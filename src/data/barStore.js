@@ -267,6 +267,20 @@ export const BarStore = {
     } catch (e) { return []; }
   },
 
+  /** 删除分组：自选池要能删，只给 put/list 等于给了个只能越堆越多的列表。 */
+  async deleteWatchlist(groupId) {
+    try {
+      const db = await openDB();
+      if (!db) return false;
+      return await new Promise((resolve) => {
+        const tx = db.transaction(STORE_WATCHLIST, 'readwrite');
+        tx.objectStore(STORE_WATCHLIST).delete(groupId);
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => resolve(false);
+      });
+    } catch (e) { return false; }
+  },
+
   async putJournal(entry) {
     const record = { id: entry.id || `j_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`, ...entry };
     try {

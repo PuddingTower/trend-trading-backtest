@@ -16,13 +16,20 @@
 | 手动复盘 / 画线 / 成交标记 | ✅ | ✅ |
 | 叠加指标（VP / Supertrend / Pivot 关键位 / 形态 / 供需区） | ✅ 纯前端计算 | ✅ |
 | 策略自动回测（6 个内置策略 + 规则/成本引擎） | ✅ | ✅ |
-| CSV 导入导出、IndexedDB 缓存 | ✅ | ✅ |
+| 自选池（分组、批量拉数据、持久化） | ✅ IndexedDB | ✅ 同一个 store |
+| 代码-名称检索与交叉校验 | ✅ JSONP 直连代码表 | ✅ 同样 JSONP 直连（`/api/resolve` 留作备用） |
+| 截图识别导入 | ✅ 浏览器 tesseract.js（WASM，模型首次现取） | ✅ 优先 rapidocr（中文最好，不下载模型），没装则同样降级到浏览器 |
+| 文本粘贴 / CSV 导入（零 OCR 兜底） | ✅ | ✅ |
 | `/api/kline` 代理降级 | ❌ 静态托管没有后端（前端会跳过这一通道，不再空打 404） | ✅ |
-| 截图 OCR 通道 `/api/ocr`、`/api/resolve` | ❌ 404 | ✅ 需 `pip install rapidocr_onnxruntime` |
 | 真实K线夹具 `fixtures/` | ❌ 不入库 | ✅ `start.py` 自动补抓 |
 
-> **识图导入目前只有服务端接口，前端还没有接入的入口**（演进计划里的 M3 未做，见下方“已知边界”）。
-> README 以前把它写成可用功能，是不准确的。
+> **在线版现在和本地版是同功能的**，唯一区别是取数通道与 OCR 引擎：本地服务器在跑时 OCR 优先用
+> `rapidocr_onnxruntime`（中文准确率高、不下载模型），纯静态托管则懒加载 tesseract.js，
+> 英文模型约 10.9MB、中文约 20.2MB，只在第一次识图时取一次。图片不会上传到任何第三方。
+>
+> 识图导入**刻意不赌 OCR 的裸准确率**：抠出的每个代码都要过 `symbolMeta` 解析 + 代码表名称交叉校验，
+> 同码多义（`000001` 平安银行 / 上证指数）和解析失败的行进「需确认」列且**默认不勾选**，
+> 错代码绝不静默入池。
 
 ---
 
@@ -92,7 +99,7 @@ python tools/fetch_fixtures.py      # 另开终端，或后台执行
 ## 验证与回测
 
 ```bash
-npm test                      # 95 条单元测试（+4 条依赖真实夹具、缺夹具时自动 skip）
+npm test                      # 109 条单元测试（+4 条依赖真实夹具、缺夹具时自动 skip）
 node tests/run.js backtest    # 只跑回测引擎那部分
 
 node tools/backtest.js                                  # 全品种 × 全策略，真实数据跑批
@@ -102,6 +109,18 @@ node tools/backtest.js --only rbm,600519                # 指定品种
 
 界面里也能直接回测：底部 **「🤖 策略自动回测」** tab。
 
+### 自选池与识图导入
+
+底部 **「⭐ 自选池与识图导入」** tab：
+
+- 手动加品种：输 `600519` / `sh000001` / `rb2610` / `螺纹钢主连` 都行，解析交给 `src/markets/symbolMeta.js`；
+  重复判重按 `secid`，所以同一个主连的三种写法不会变成三条。
+- **识图导入**：拖入截图、点上传，或直接 Ctrl+V（iPad 上长按粘贴）粘贴行情软件的自选列表截图。
+- **文本粘贴导入**：从行情软件复制整列代码粘进来（TSV / 空格分隔），零 OCR 依赖，永远可用。
+- 两种导入都会先出**预览确认表**：每行给 OCR 原文、抠出的代码、代码表回填的名称、状态。
+  同码多义与未识别的行默认**不勾选**，改代码或取消勾选后自己决定；确认无误再点入池。
+- 「🔽 批量拉本组日线」逐只取数写进 IndexedDB，不换图、不动当前复盘进度。
+
 ---
 
 ## 服务器接口
@@ -109,9 +128,9 @@ node tools/backtest.js --only rbm,600519                # 指定品种
 | 路径 | 作用 |
 |---|---|
 | `GET /api/kline` | 行情代理。参数 `secid / period(daily,weekly,monthly,60m) / adjust(none,qfq,hfq) / count / beg / end` |
-| `GET /api/resolve?q=` | 代码-名称检索（东方财富权威代码表），供识图导入做交叉校验 |
-| `GET /api/health` | 服务与 OCR 引擎状态。前端用它判断这台主机上有没有本地后端（静态托管上不发这一发请求） |
-| `POST /api/ocr` | 截图识别（需 `pip install rapidocr_onnxruntime`；未装返回 501 并给出兜底提示）。**注意：接口可用，但界面上还没有任何入口调用它（M3 未做）** |
+| `GET /api/resolve?q=` | 代码-名称检索。**现在只是备用通道** —— 前端改为 JSONP 直连代码表（searchapi 不回 CORS 头，但 `cb=` 的 JSONP 形态浏览器能直接用），所以线上也有这个能力 |
+| `GET /api/health` | 服务与 OCR 引擎状态。前端用它判断这台主机上有没有本地后端（静态托管上不发这一发请求），以及识图该走 rapidocr 还是降级到浏览器 |
+| `POST /api/ocr` | 截图识别（需 `pip install rapidocr_onnxruntime`；未装返回 501，前端自动改走浏览器 tesseract.js） |
 
 `secid` 由前端 `src/markets/symbolMeta.js` 解析后传入，服务器不重复实现代码解析。
 格式：`1.600519`(沪) / `0.000001`(深) / `113.rbm`(上期所主连) —— 交易所编号 113上期所 114大商所 115郑商所 142能源中心 220中金所 225广期所。
@@ -125,12 +144,13 @@ futures_replay_trader.html   主页面（正在按绞杀者模式逐步拆出，
 run_local_server.py          静态托管 + 行情代理 + OCR
 src/
   markets/     交易所表、期货合约规格、双市场代码解析、交易规格解析
-  data/        IndexedDB v2 缓存、行情适配器(三通道降级)、CSV、换月拼接与周期聚合
+  data/        IndexedDB v2 缓存、行情适配器(三通道降级 + 代码表 JSONP)、CSV、换月拼接与周期聚合
   analysis/    量能剖面、Supertrend、Pivot、形态识别、供需区/Wyckoff（纯函数）
   strategy/    指标库 + 6 个内置趋势策略
   core/        事件驱动回测内核
   report/      绩效指标
-  ui/          叠加层渲染器、回测面板
+  watchlist/   自选池存储、识图导入管线（解析部分是纯函数，可离线单测）
+  ui/          叠加层渲染器、回测面板、自选池面板
 tools/         夹具抓取、回测跑批、上游接口实测脚本
 tests/         零依赖单测骨架 + 用例；migration-probe.html 验证 IndexedDB 迁移
 ```
@@ -180,8 +200,8 @@ tests/         零依赖单测骨架 + 用例；migration-probe.html 验证 Inde
 - **A股 T+1、涨跌停板锁、仅做多、整手已经实现**（M2，`src/markets/marketRules.js`，有单测断言）。
   停牌日不可成交、复权衔接与逐日盯市仍在计划里。
 - **条件单没有实现**：止损/止盈/移动止损/括号单（M4 的另一半）都不在，手动复盘只能市价开平仓。
-- **识图导入只有后端接口，没有前端入口**（M3 未做）：`/api/ocr` 与 `/api/resolve` 能调通，
-  但界面上没有任何地方调用它们。自选股池同样还没有做。
+- **M3 已完成**：自选池（分组/批量拉数据/IndexedDB 持久化）与识图导入（双 OCR 通道 + 文本粘贴兜底）
+  线上线下一致。识图的浏览器通道需要现取模型（英文 10.9MB / 中文 20.2MB），第一次会慢。
 - **M5/M6 全部未做**：没有参数寻优与 walk-forward 样本外验证（只有 `tools/backtest.js --grid` 这一个粗糙网格）、
   没有组合回测、没有月度热力图/水下回撤报表、没有盲复盘与交易日志。
   `src/report/metrics.js` 已算出 Sharpe/Sortino/Calmar，但只是数字，没有成报表。

@@ -172,15 +172,72 @@ export async function fetchBars({ market = 'futures', symbol, secid, period = 'd
   return { ok: false, error: '三条行情通道全部失败', attempted };
 }
 
-/** 代码检索（M3 识图导入的名称-代码交叉校验用）。这条能力只在本地后端存在时有，
- *  静态托管上直接返回空表，不去打那个必定 404 的 /api/resolve。 */
+/**
+ * searchapi 的返回有两层结构：纯 JSON 是 QuotationCodeTable.Data，
+ * JSONP 形态可能是 result.Data / result.pages。只认前者会让检索静默返回 0 条。
+ */
+export function suggestRows(data) {
+  if (!data || typeof data !== 'object') return [];
+  const table = data.QuotationCodeTable || {};
+  if (Array.isArray(table.Data)) return table.Data;
+  const result = data.result || {};
+  if (result && typeof result === 'object') {
+    for (const key of ['Data', 'pages', 'Results']) if (Array.isArray(result[key])) return result[key];
+  }
+  return Array.isArray(data.Data) ? data.Data : [];
+}
+
+const toCandidate = (r) => ({
+  code: r.Code || r.code, name: r.Name || r.name, secid: r.QuoteID || r.secid,
+  marketId: r.MktNum || r.marketId, kindRaw: r.SecurityTypeName || r.SecurityType,
+  classify: r.Classify || r.classify
+});
+
+/**
+ * 代码-名称检索（识图导入的名称↔代码交叉校验用）。
+ *
+ * 原来只能经本地服务器 /api/resolve，静态托管上等于没有这条能力。实测：
+ *   fetch → searchapi 不回 Access-Control-Allow-Origin，直接 "Failed to fetch"；
+ *   <script> + cb=NAME → 通，GitHub Pages 源上照样拿到完整 QuotationCodeTable。
+ * JSONP 不受 CORS 约束，所以这里把它提到主通道，线上/本地/file:// 一致；
+ * 本地服务器降为备用（上游哪天改口径时还有一条能换的路）。
+ * 只认 cb 这一个参数名 —— 实测 callback / jsonp 两种写法都会 onerror。
+ */
+export function resolveSymbolJSONP(query, { count = 20, timeoutMs = 8000 } = {}) {
+  return new Promise((resolve, reject) => {
+    if (!query || !String(query).trim()) return resolve([]);
+    const cbName = 'em_suggest_' + Math.random().toString(36).slice(2, 8);
+    const script = document.createElement('script');
+    let timer = null;
+    const finish = (val, err) => {
+      clearTimeout(timer);
+      delete window[cbName];
+      if (script.parentNode) script.parentNode.removeChild(script);
+      err ? reject(err) : resolve(val);
+    };
+    timer = setTimeout(() => finish(null, new Error(`代码表检索超时 ${timeoutMs}ms`)), timeoutMs);
+
+    window[cbName] = (raw) => {
+      let data = raw;
+      if (typeof raw === 'string') { try { data = JSON.parse(raw); } catch (e) { return finish(null, new Error('代码表返回无法解析')); } }
+      finish(suggestRows(data).map(toCandidate).filter(c => c.code));
+    };
+    script.onerror = () => finish(null, new Error('代码表请求受阻'));
+    const qs = new URLSearchParams({ input: String(query).trim(), type: '14', count: String(count), cb: cbName });
+    script.src = `https://searchapi.eastmoney.com/api/suggest/get?${qs}`;
+    document.head.appendChild(script);
+  });
+}
+
 export async function resolveSymbol(query) {
-  if (!LOCAL_BACKEND) return [];
   try {
-    const res = await withTimeout(fetch(`/api/resolve?q=${encodeURIComponent(query)}`), 10000, 'resolve');
-    const json = await res.json();
-    return json.ok ? json.candidates || [] : [];
+    return await resolveSymbolJSONP(query);
   } catch (e) {
-    return [];
+    if (!LOCAL_BACKEND) return [];
+    try {
+      const res = await withTimeout(fetch(`/api/resolve?q=${encodeURIComponent(query)}`), 10000, 'resolve');
+      const json = await res.json();
+      return json.ok ? json.candidates || [] : [];
+    } catch (_) { return []; }
   }
 }

@@ -1260,6 +1260,7 @@
         <button class="tab-btn active" data-tab="tabTrades">📝 交易明细与记录</button>
         <button class="tab-btn" data-tab="tabEquity">📈 资金净值曲线 (Equity)</button>
         <button class="tab-btn" data-tab="tabBacktest">🤖 策略自动回测</button>
+        <button class="tab-btn" data-tab="tabWatchlist">⭐ 自选池与识图导入</button>
         <button class="tab-btn" data-tab="tabUpload">🌐 行情与缓存中心 (真实在线 / IndexedDB / CSV)</button>
         <button class="tab-btn" data-tab="tabHelp">⌨️ 快捷键与使用指南</button>
       </div>
@@ -1347,6 +1348,12 @@
     <!-- Tab 2.5: 策略自动回测（撮合在 src/core/backtestEngine.js，面板只收集参数与展示） -->
     <div id="tabBacktest" class="tab-content">
       <div id="backtestPanelRoot"></div>
+    </div>
+
+    <!-- Tab: 自选池（M3）。存储用 IndexedDB 的 watchlist store，识图在本地走 rapidocr、
+         在纯静态托管走浏览器 tesseract，两条通道出的是同一种预览表。 -->
+    <div id="tabWatchlist" class="tab-content">
+      <div id="watchlistPanelRoot"></div>
     </div>
 
     <!-- Tab 3: Online Real Data & Local Cache Center -->
@@ -1625,6 +1632,7 @@
     import { getFuturesSpec } from './src/markets/contractSpecs.js';
     import { OverlayManager } from './src/ui/overlays.js';
     import { BacktestPanel } from './src/ui/backtestPanel.js';
+    import { WatchlistPanel } from './src/ui/watchlistPanel.js';
 
     // 兼容旧调用点：内联 UI 代码里仍在用 MarketDataCache.xxx()，这里做一层薄转发，
     // 让 M1 不动 3000 行 UI 代码就能接上 v2 schema。M2 起再逐步改成直接调 BarStore。
@@ -3371,6 +3379,11 @@
         this.chartModule.tradingEngine = this.tradingEngine;
         this.chartModule.overlayManager = new OverlayManager();
         this.backtestPanel = new BacktestPanel(this.chartModule, 'backtestPanelRoot');
+        // 自选池：面板只调 store 与解析层，「看盘」交回给本控制器的取数入口
+        this.watchlistPanel = new WatchlistPanel('watchlistPanelRoot', {
+          openSymbol: (code) => this.loadSymbolData(code, false),
+          toast: (msg) => this.showToast(msg)
+        });
 
         this.autoPlayTimer = null;
         this.currentSymbol = 'eg9999';
