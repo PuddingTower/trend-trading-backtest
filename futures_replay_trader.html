@@ -1317,6 +1317,7 @@
         <button class="tab-btn" data-tab="tabEquity">📈 资金净值曲线 (Equity)</button>
         <button class="tab-btn" data-tab="tabBacktest">🤖 策略自动回测</button>
         <button class="tab-btn" data-tab="tabWatchlist">⭐ 自选池与识图导入</button>
+        <button class="tab-btn" data-tab="tabResearch">🔬 寻优·组合·报表</button>
         <button class="tab-btn" data-tab="tabUpload">🌐 行情与缓存中心 (真实在线 / IndexedDB / CSV)</button>
         <button class="tab-btn" data-tab="tabHelp">⌨️ 快捷键与使用指南</button>
       </div>
@@ -1410,6 +1411,11 @@
          在纯静态托管走浏览器 tesseract，两条通道出的是同一种预览表。 -->
     <div id="tabWatchlist" class="tab-content">
       <div id="watchlistPanelRoot"></div>
+    </div>
+
+    <!-- Tab: 研究（M5 寻优 / Walk-Forward / 组合 / 报表） -->
+    <div id="tabResearch" class="tab-content">
+      <div id="researchPanelRoot"></div>
     </div>
 
     <!-- Tab 3: Online Real Data & Local Cache Center -->
@@ -1691,6 +1697,7 @@
     import { ORDER_KIND, ratchetStop, makeBracket, evalExitOrders, evalAddOrders } from './src/core/orders.js';
     import { BacktestPanel } from './src/ui/backtestPanel.js';
     import { WatchlistPanel } from './src/ui/watchlistPanel.js';
+    import { ResearchPanel } from './src/ui/researchPanel.js';
 
     // 兼容旧调用点：内联 UI 代码里仍在用 MarketDataCache.xxx()，这里做一层薄转发，
     // 让 M1 不动 3000 行 UI 代码就能接上 v2 schema。M2 起再逐步改成直接调 BarStore。
@@ -3611,6 +3618,16 @@
           openSymbol: (code) => this.loadSymbolData(code, false),
           toast: (msg) => this.showToast(msg)
         });
+        // 研究面板：寻优结果可以一键交回回测面板复现，组合直接吃自选池
+        this.researchPanel = new ResearchPanel('researchPanelRoot', {
+          chart: this.chartModule,
+          toast: (msg) => this.showToast(msg),
+          watchlistItems: () => this.watchlistPanel?.group?.items || [],
+          currentStrategyId: () => document.getElementById('btStrategy')?.value || 'donchianBreak',
+          currentParams: () => this.backtestPanel?.collectParams?.().params || null,
+          loadBarsFor: (it) => this.loadBarsForSymbol(it),
+          runBacktestWith: (strategyId, params) => this.applyResearchParams(strategyId, params)
+        });
 
         this.autoPlayTimer = null;
         this.currentSymbol = 'eg9999';
@@ -3622,6 +3639,53 @@
         this.bindEvents();
         this.loadSymbolData(this.currentSymbol);
         this.syncUI();
+      }
+
+      /** 组合回测取数用：先读缓存，没有再走三通道取数并回写缓存。 */
+      async loadBarsForSymbol(it) {
+        const periodEl = document.getElementById('periodSelect');
+        const adjustEl = document.getElementById('adjustSelect');
+        const period = periodEl ? periodEl.value : 'daily';
+        const isFutures = it.market === MARKETS.FUTURES;
+        const adjust = isFutures ? 'none' : (adjustEl ? adjustEl.value : 'qfq');
+        const key = barKey(it.market, it.symbol, period, adjust);
+        const cached = await BarStore.getCache(key);
+        if (cached && Array.isArray(cached.data) && cached.data.length >= 60) return cached.data;
+        try {
+          const out = await fetchBars({ market: it.market, symbol: it.symbol, secid: it.secid, period, adjust });
+          if (out.ok && out.bars && out.bars.length) {
+            await cacheBars(key, out.bars, { market: it.market, symbol: it.symbol, period, adjust, name: out.name, source: out.source });
+            return out.bars;
+          }
+        } catch (e) { /* 交给调用方按"没有数据"处理 */ }
+        return null;
+      }
+
+      /**
+       * 把寻优选出的参数交回回测面板并跑一次。
+       * 这一步存在的意义：寻优表上的数字必须能在主回测里复现出来，
+       * 否则"最优参数"只是另一个页面上的漂亮数字，没人能验证它。
+       */
+      applyResearchParams(strategyId, params) {
+        const sel = document.getElementById('btStrategy');
+        if (!sel) { this.showToast('回测面板还没初始化'); return; }
+        if (strategyId) sel.value = strategyId;
+        sel.dispatchEvent(new Event('change'));          // 重建参数表单，否则下面的选择器还不存在
+        const host = document.getElementById('btParams');
+        let set = 0;
+        if (host) {
+          for (const el of host.querySelectorAll('[data-p]')) {
+            const k = el.getAttribute('data-p');
+            if (!(k in (params || {}))) continue;
+            const t = el.getAttribute('data-t');
+            if (t === 'bool') el.checked = !!params[k];
+            else el.value = params[k];
+            set++;
+          }
+        }
+        document.querySelector('.tab-btn[data-tab="tabBacktest"]').click();
+        this.backtestPanel.run();
+        this.showToast(`已把 ${set} 个参数交给回测面板复现`);
       }
 
       async loadSymbolData(rawCode, forceOnline = false) {

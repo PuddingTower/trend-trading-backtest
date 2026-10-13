@@ -200,7 +200,10 @@ export class BacktestEngine {
       // ---- 3. 逐 bar 盯市权益 ----
       const float = pos ? this._floating(pos, bar) : 0;
       const equity = cash + (pos ? pos.margin : 0) + float;
-      this.equityCurve.push({ idx: i, date: bar.date, equity, cash, floating: float, inPosition: !!pos, dir: pos ? pos.dir : 0 });
+      // margin 一并记下来：组合回测要算「合并保证金占用」才能执行总仓位上限，
+      // 曲线里没这个数，上层就只能靠成交记录反推，反推出来的敞口是错的。
+      this.equityCurve.push({ idx: i, date: bar.date, equity, cash, margin: pos ? pos.margin : 0,
+                             floating: float, inPosition: !!pos, dir: pos ? pos.dir : 0 });
     }
 
     // 收尾：末根收盘强平，避免最后一笔浮盈被当成已实现收益
