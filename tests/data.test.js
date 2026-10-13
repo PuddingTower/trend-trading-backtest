@@ -3,6 +3,7 @@ import { calcMA, attachDefaultMAs, normalizeSinaRow, sortByDate } from '../src/d
 import { parseCSV, barsToCSV, tradesToCSV, toCSV } from '../src/data/csvIO.js';
 import { stitch, aggregate, findRolloverGaps, STITCH_MODES } from '../src/data/dominant.js';
 import { barKey, upgradeLegacyKey } from '../src/data/barStore.js';
+import { mightHaveLocalBackend } from '../src/data/sources.js';
 
 const mk = (date, o, h, l, c, v = 1000) => ({ date, open: o, high: h, low: l, close: c, volume: v });
 
@@ -175,4 +176,22 @@ test('v1→v2 缓存键迁移：EG0_daily → futures:EG0:daily:none', () => {
   assert.eq(upgradeLegacyKey('EG0_daily'), 'futures:EG0:daily:none');
   assert.eq(upgradeLegacyKey('RB0_60m'), 'futures:RB0:60m:none');
   assert.eq(upgradeLegacyKey('ashare:600519:daily:qfq'), 'ashare:600519:daily:qfq', '新格式原样返回');
+});
+
+// ---------- 本地后端存在性判定（静态托管不再空打 /api/* 吃 404） ----------
+test('mightHaveLocalBackend：本机与局域网放行，静态托管与 file:// 拒绝', () => {
+  const loc = (protocol, hostname) => ({ protocol, hostname });
+  assert.eq(mightHaveLocalBackend(loc('http:', 'localhost')), true);
+  assert.eq(mightHaveLocalBackend(loc('http:', '127.0.0.1')), true);
+  assert.eq(mightHaveLocalBackend(loc('http:', '::1')), true, 'IPv6 回环');
+  // iPad 通过局域网访问本地服务器时，origin 就是这台机器的私网地址，必须放行
+  for (const ip of ['192.168.1.20', '10.0.0.5', '172.16.3.9', '172.31.255.1']) {
+    assert.eq(mightHaveLocalBackend(loc('http:', ip)), true, `${ip} 是局域网地址`);
+  }
+  assert.eq(mightHaveLocalBackend(loc('http:', 'nas.local')), true);
+  assert.eq(mightHaveLocalBackend(loc('https:', 'puddingtower.github.io')), false, 'GitHub Pages 上没有后端');
+  assert.eq(mightHaveLocalBackend(loc('https:', 'example.com')), false);
+  assert.eq(mightHaveLocalBackend(loc('file:', '')), false, 'file:// 下没有同源后端');
+  assert.eq(mightHaveLocalBackend(loc('http:', '172.15.0.1')), false, '172.15 不属于私网段');
+  assert.eq(mightHaveLocalBackend(null), false, '拿不到 location 时保守判否');
 });

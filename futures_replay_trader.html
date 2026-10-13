@@ -2,7 +2,8 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- viewport-fit=cover：不带它就拿不到 env(safe-area-inset-*)，iPad 横屏时右侧内容会被圆角切掉 -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>国内期货手动复盘与划线模拟交易回测系统</title>
   <style>
     :root {
@@ -42,10 +43,15 @@
       color: var(--text-main);
       font-family: var(--font-mono);
       font-size: 13px;
+      /* iPad/Safari 的 100vh 是「页面完全展开时」的高度，比实际可视区高出一截，
+         底部 KPI 与播放条会被 Safari 工具栏盖住且滚不动。dvh 才是可视高度；
+         不支持 dvh 的浏览器仍用上一行的 100vh。 */
       height: 100vh;
+      height: 100dvh;
       display: flex;
       flex-direction: column;
       overflow: hidden;
+      overscroll-behavior: none;      /* 禁掉 iPad 的整页橡皮筋回弹：它会和图表拖拽抢手势 */
     }
 
     /* Scrollbars */
@@ -677,6 +683,7 @@
       left: 0;
       width: 100vw;
       height: 100vh;
+      height: 100dvh;
       background: rgba(0, 0, 0, 0.75);
       backdrop-filter: blur(6px);
       z-index: 2000;
@@ -850,6 +857,103 @@
       opacity: 1;
       transform: translateY(0);
     }
+
+    /* ============================================================
+       iPad / 触控端专项
+       ------------------------------------------------------------
+       这个界面原本是按桌面写的：零个 @media、零个 touch/pointer 分支，
+       画线只绑 mousedown/mousemove/mouseup，缩放只绑 wheel。
+       在 iPad 上的实际后果是：手指拖不动 K 线、画不了线、双指捏不合，
+       且 100vh 让底部播放条被 Safari 工具栏吃掉半截。下面逐条补。
+       ============================================================ */
+
+    /* 图表必须独占触摸手势：touch-action 不给 none 的话，浏览器会把手指拖拽
+       拿去做页面滚动/双指缩放，pointermove 直接收到 pointercancel，画线永远画不完。 */
+    .chart-container, #chartCanvas, #equityCanvas {
+      touch-action: none;
+      -webkit-touch-callout: none;    /* 长按不弹「存储图像」菜单 */
+    }
+
+    * { -webkit-tap-highlight-color: transparent; }
+
+    /* 工具栏：iPad 竖屏放不下 5 个分组，横向滚动比换行挤压图表高度更好用 */
+    .toolbar {
+      overflow-x: auto;
+      overflow-y: hidden;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: none;
+    }
+    .toolbar::-webkit-scrollbar { display: none; }
+    .toolbar-group { flex-shrink: 0; }
+
+    /* 侧栏抽屉开关：桌面端不显示，窄屏才出现 */
+    .sidebar-toggle { display: none; }
+
+    @supports (padding: env(safe-area-inset-left)) {
+      .navbar {
+        padding-left: calc(14px + env(safe-area-inset-left));
+        padding-right: calc(14px + env(safe-area-inset-right));
+      }
+      .bottom-panel { padding-bottom: env(safe-area-inset-bottom); }
+    }
+
+    /* iPad Pro 11" 横屏(1194)、Air 横屏(1024)：先把侧栏收窄，给图表腾地方 */
+    @media (max-width: 1220px) {
+      .side-panel { width: 280px; }
+    }
+
+    /* iPad 竖屏(768/810/834)：330px 侧栏会吃掉半块屏，图表只剩 400 多 px。
+       改成右侧滑出抽屉，默认收起，需要下单时再拉出来。 */
+    @media (max-width: 900px) {
+      .sidebar-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .side-panel {
+        position: absolute;
+        top: 0; right: 0; bottom: 0;
+        width: min(340px, 90vw);
+        z-index: 1500;
+        transform: translateX(103%);
+        transition: transform 0.22s ease;
+        box-shadow: -10px 0 30px rgba(0, 0, 0, 0.55);
+      }
+      .side-panel.open { transform: translateX(0); }
+    }
+
+    /* 触控指针：命中区与字号一起放大。
+       iOS 在聚焦 font-size < 16px 的输入框时会自动放大整个页面且不会自己缩回去 ——
+       所以输入框/下拉框必须写死 16px，这是唯一稳妥的绕法。 */
+    @media (pointer: coarse) {
+      .tool-btn, .btn, .btn-sm, .tab-btn {
+        min-height: 40px;
+        padding-left: 12px;
+        padding-right: 12px;
+        font-size: 14px;
+      }
+      input, select, textarea { font-size: 16px; }
+      .navbar {
+        height: auto;
+        min-height: 52px;
+        padding-top: 6px;
+        padding-bottom: 6px;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      .toolbar {
+        height: auto;                 /* 原本是死高 38px，装不下 40px 的触控按钮会被裁一半 */
+        min-height: 48px;
+        padding-top: 4px;
+        padding-bottom: 4px;
+      }
+      .kpi-grid { grid-template-columns: 1fr; }
+      .bottom-panel { height: min(230px, 30dvh); }
+      .panel-section { padding: 12px; }
+      /* hover 态在触控屏上没有意义，且点完会残留：清掉 */
+      .tool-btn:hover, .btn:hover { background: transparent; }
+      .tool-btn.active:hover { background: rgba(41, 98, 255, 0.25); }
+    }
   </style>
 </head>
 <body>
@@ -932,6 +1036,8 @@
 
     <!-- Right Quick Actions -->
     <div class="nav-right">
+      <!-- 只在窄屏（iPad 竖屏）出现：此时 .side-panel 已变成右侧抽屉，不开就下不了单 -->
+      <button class="btn btn-sm sidebar-toggle" id="btnToggleSidebar" title="展开/收起交易侧栏">📋 交易面板</button>
       <button class="btn btn-sm btn-warning" id="btnOpenAnalysisModal">📊 账户分析 (本次曲线)</button>
       <button class="btn btn-sm" id="btnImportDataModal">📂 导入数据</button>
       <button class="btn btn-sm" id="btnExportCSV">📥 导出明细</button>
@@ -967,9 +1073,9 @@
       <span class="toolbar-title">叠加</span>
       <button class="tool-btn" data-overlay="vp" title="Volume Profile：POC / VAH / VAL / HVN·LVN。自动锚定=从最近显著高低点起算">📊 VP 量能剖面</button>
       <button class="tool-btn" data-overlay="supertrend" title="Supertrend：单向动态支撑/阻力线，变色即趋势翻转">〰 SuperTrend</button>
-      <button class="tool-btn" data-overlay="pivots" title="Pivot Points：上一期高低收算出的关键位（只用已收盘数据，不预测未来）">✛ Pivot 关键位</button>
-      <button class="tool-btn" data-overlay="patterns" title="自动形态：头肩/双顶底/三角/楔形/旗形，标出 突破·目标·止损 三条关键位。启发式，可能误报">◈ 形态识别</button>
-      <button class="tool-btn" data-overlay="zones" title="供需区 + Wyckoff 事件（spring/ut/sos/sow）。已跌破的区自动移除">▧ 供需区</button>
+      <button class="tool-btn" data-overlay="pivots" title="Pivot Points：上一期高低收算出的关键位（只用已收盘数据，不预测未来）。每期只画在自己的区间内，历史期淡出；HL 摆动位被收盘穿越即截止并标「破」">✛ Pivot 关键位</button>
+      <button class="tool-btn" data-overlay="patterns" title="自动形态：头肩/双顶底/三角/楔形/旗形，标出 突破·目标·止损 三条关键位，并跟踪到 在途中/已突破/已达标/已失效/已过期 —— 走完的形态线会截止，不会一直挂着。启发式，可能误报">◈ 形态识别</button>
+      <button class="tool-btn" data-overlay="zones" title="供需区 + Wyckoff 事件（spring/ut/sos/sow）。区带截止在被穿越那一根并标「已失效」；脱离棒还是最新一根时标「形成中」；名额按强度×新鲜度排序，老区不再长期霸屏">▧ 供需区</button>
     </div>
 
     <div class="toolbar-group" style="border-right:none;">
@@ -2159,7 +2265,8 @@
       }
 
       hitTest(mouseX, mouseY) {
-        const threshold = 8;
+        // 手指的落点精度比鼠标粗一个量级，8px 的命中区在 iPad 上基本点不中已有的线
+        const threshold = this.coarse ? 22 : 8;
         for (let i = this.lines.length - 1; i >= 0; i--) {
           const line = this.lines[i];
           if (line.type === 'hline') {
@@ -2653,7 +2760,23 @@
 
         this.setupEventListeners();
         this.resize();
-        window.addEventListener('resize', () => this.resize());
+        // iPad 旋转屏幕不一定只触发 window.resize（Safari 还会走 visualViewport），
+        // 而 canvas 尺寸一不对，坐标换算就会整体偏移 —— 三个信号都接上，并用 rAF 合并。
+        const relayout = () => {
+          if (this._relayoutPending) return;
+          this._relayoutPending = true;
+          requestAnimationFrame(() => { this._relayoutPending = false; this.resize(); });
+        };
+        window.addEventListener('resize', relayout);
+        window.addEventListener('orientationchange', () => setTimeout(relayout, 120));
+        if (window.visualViewport) window.visualViewport.addEventListener('resize', relayout);
+        if (window.matchMedia) {
+          // iPad 外接显示器 / 台前调度会让 dpr 从 1 跳到 2，不重算就是一层糊的位图
+          const mq = window.matchMedia('(resolution: 1dppx)');
+          const onDpr = () => relayout();
+          if (mq.addEventListener) mq.addEventListener('change', onDpr);
+          else if (mq.addListener) mq.addListener(onDpr);
+        }
       }
 
       setData(data) {
@@ -2689,6 +2812,7 @@
 
       resize() {
         const rect = this.container.getBoundingClientRect();
+        if (rect.width < 2 || rect.height < 2) return;   // 侧栏抽屉收起/旋转过渡中会量到 0，直接算会写出 NaN 几何
         this.dpr = window.devicePixelRatio || 1;
         this.width = rect.width;
         this.height = rect.height;
@@ -2715,27 +2839,48 @@
         }
       }
 
+      /**
+       * 触控/鼠标统一走 Pointer Events。
+       * 原来只有 mousedown/mousemove/mouseup + wheel：在 iPad 上手指一个事件都收不到，
+       * 于是画不了线、拖不动 K 线、捏不缩放 —— 这不是样式问题，是根本没有输入通路。
+       */
       setupEventListeners() {
         const { canvas } = this;
+        canvas.style.touchAction = 'none';      // CSS 里也写了；这里兜住内联样式覆盖不到的场合
+        this._pointers = new Map();             // pointerId -> {x,y}
+        this.pinch = null;
 
-        canvas.addEventListener('mousedown', (e) => {
+        const local = (e) => {
           const rect = canvas.getBoundingClientRect();
-          const mouseX = e.clientX - rect.left;
-          const mouseY = e.clientY - rect.top;
+          return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+        };
 
+        canvas.addEventListener('pointerdown', (e) => {
+          const { x: mouseX, y: mouseY } = local(e);
+          this.drawingModule.coarse = e.pointerType === 'touch';
+          this._pointers.set(e.pointerId, { x: mouseX, y: mouseY });
+
+          if (this._pointers.size === 2) { this._beginPinch(); return; }
+          if (this._pointers.size > 2) return;
+
+          if (canvas.setPointerCapture) {
+            try { canvas.setPointerCapture(e.pointerId); } catch (_) { /* 指针已离开，忽略 */ }
+          }
           if (this.drawingModule.handleMouseDown(mouseX, mouseY)) return;
 
-          if (e.button === 0 && mouseX < this.mainWidth) {
+          if ((e.pointerType !== 'mouse' || e.button === 0) && mouseX < this.mainWidth) {
             this.isPanning = true;
             this.panStartX = mouseX;
             this.panStartScrollOffset = this.scrollOffset;
           }
         });
 
-        canvas.addEventListener('mousemove', (e) => {
-          const rect = canvas.getBoundingClientRect();
-          const mouseX = e.clientX - rect.left;
-          const mouseY = e.clientY - rect.top;
+        canvas.addEventListener('pointermove', (e) => {
+          const { x: mouseX, y: mouseY } = local(e);
+          if (this._pointers.has(e.pointerId)) this._pointers.set(e.pointerId, { x: mouseX, y: mouseY });
+
+          if (this.pinch) { this._updatePinch(); return; }
+
           this.lastMousePos = { x: mouseX, y: mouseY };
 
           if (this.drawingModule.handleMouseMove(mouseX, mouseY)) return;
@@ -2751,14 +2896,22 @@
           this.requestRender();
         });
 
-        window.addEventListener('mouseup', () => {
-          this.isPanning = false;
-          this.drawingModule.handleMouseUp();
-        });
+        const release = (e) => {
+          const wasTouch = e.pointerType === 'touch';
+          this._pointers.delete(e.pointerId);
+          if (this._pointers.size < 2) this.pinch = null;
+          if (this._pointers.size === 0) {
+            this.isPanning = false;
+            this.drawingModule.handleMouseUp();
+            // 手指抬起后不该把十字光标钉在最后触碰的位置 —— 触摸没有“悬停”这个状态
+            if (wasTouch) { this.lastMousePos = null; this.requestRender(); }
+          }
+        };
+        canvas.addEventListener('pointerup', release);
+        canvas.addEventListener('pointercancel', release);
 
-        canvas.addEventListener('mouseleave', () => {
-          this.lastMousePos = null;
-          this.requestRender();
+        canvas.addEventListener('pointerleave', (e) => {
+          if (e.pointerType === 'mouse') { this.lastMousePos = null; this.requestRender(); }
         });
 
         canvas.addEventListener('wheel', (e) => {
@@ -2768,6 +2921,34 @@
           this.barSpacing = Math.max(1, Math.round(this.barWidth * 0.35));
           this.requestRender();
         }, { passive: false });
+      }
+
+      _beginPinch() {
+        const [a, b] = [...this._pointers.values()];
+        this.pinch = {
+          d0: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)),
+          w0: this.barWidth,
+          cx: (a.x + b.x) / 2
+        };
+        this.isPanning = false;
+        // 第二根手指落下时若还在画线，会拉出一条斜穿屏幕的废线 —— 直接收尾
+        this.drawingModule.handleMouseUp();
+      }
+
+      _updatePinch() {
+        const pts = [...this._pointers.values()];
+        if (pts.length < 2 || !this.pinch) return;
+        const d = Math.max(1, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y));
+        const next = Math.max(3, Math.min(50, this.pinch.w0 * (d / this.pinch.d0)));
+        if (Math.abs(next - this.barWidth) < 0.05) return;
+
+        // 以双指中心为锚：不补偿的话缩放时画面整体左右漂，捏完找不到刚才在看哪一段
+        const anchor = this.pinch.cx;
+        const before = this.xToBarIndex(anchor);
+        this.barWidth = next;
+        this.barSpacing = Math.max(1, Math.round(this.barWidth * 0.35));
+        this.scrollOffset -= (this.xToBarIndex(anchor) - before);
+        this.requestRender();
       }
 
       calcVisibleRange() {
@@ -3409,6 +3590,7 @@
         if (om.state.pivots.on) html += `<span style="color:var(--accent-blue);">Pivot</span>` +
           ctl('pivots', 'type', { type: 'select', options: ['standard', 'fibonacci', 'camarilla', 'woodie'] }) +
           ctl('pivots', 'timeframe', { type: 'select', options: ['daily', 'weekly', 'monthly'] }) +
+          ctl('pivots', 'visibleSets', { min: 1, max: 12, step: 1 }) +
           ctl('pivots', 'showHL', { type: 'checkbox' });
         if (om.state.patterns.on) html += `<span style="color:var(--accent-purple);">形态</span>` +
           ctl('patterns', 'swingPct', { min: 0.01, max: 0.2, step: 0.005 }) + ctl('patterns', 'max', { min: 1, max: 10 });
@@ -3433,6 +3615,17 @@
         document.getElementById('symbolSelect').addEventListener('change', (e) => {
           this.loadSymbolData(e.target.value, false);
         });
+
+        // iPad 竖屏下 .side-panel 变成抽屉（CSS 里 translateX 收起），不给个开关就下不了单
+        const toggleSb = document.getElementById('btnToggleSidebar');
+        const sidePanel = document.querySelector('.side-panel');
+        if (toggleSb && sidePanel) {
+          toggleSb.addEventListener('click', () => {
+            const open = sidePanel.classList.toggle('open');
+            toggleSb.classList.toggle('active', open);
+            if (open) sidePanel.scrollTop = 0;
+          });
+        }
 
         // 任意代码输入：解析权交给 symbolMeta，不在这里写正则
         const loadTypedCode = () => {

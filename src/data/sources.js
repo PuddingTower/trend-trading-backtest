@@ -2,6 +2,8 @@
  * sources —— 行情适配器。三条通道按优先级降级，任何一条通了就返回：
  *
  *   1. 本地服务器 /api/kline  —— 首选。隔离 CORS 与上游接口变动（演进计划 §7 的对策）。
+ *      仅在 origin 看起来确实可能跑着本地后端时才尝试（见 mightHaveLocalBackend），
+ *      静态托管上整条跳过，避免每次取数都在控制台留一条 404。
  *   2. 浏览器直连 eastmoney   —— 备用。实测 push2his 会回显请求 Origin，
  *      所以 http://localhost 下能直连；file:// 下 Origin 为 null 会被拒，属预期。
  *   3. 新浪 JSONP             —— 遗留期货通道，file:// 也能跑。
@@ -21,6 +23,26 @@ const withTimeout = (promise, ms, label) => Promise.race([
   promise,
   new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} 超时 ${ms}ms`)), ms))
 ]);
+
+/**
+ * 这台主机上有没有可能跑着本地后端？
+ *
+ * 静态托管（GitHub Pages 之类）上 /api/* 一定 404，而原来每次取数都先打一发再降级，
+ * 控制台于是固定留两条红色 404 —— 功能没坏，但看着像坏了。这里按 origin 判断，一次请求都不发。
+ *
+ * 判据不能只写 localhost：`python start.py` 绑的是所有网卡，iPad 是通过
+ * http://192.168.x.x:8080 访问的，那种情况下本地后端确实在，必须放行。
+ */
+export function mightHaveLocalBackend(loc = (typeof location !== 'undefined' ? location : null)) {
+  if (!loc || !loc.hostname) return false;
+  if (loc.protocol === 'file:') return false;
+  const h = String(loc.hostname).replace(/^\[|\]$/g, '');
+  if (h === '::1') return true;
+  return (/^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.)/.test(h))
+    || h.endsWith('.local') || h.endsWith('.internal');
+}
+
+const LOCAL_BACKEND = mightHaveLocalBackend();
 
 /** 通道 1：本地服务器代理 */
 async function viaServer(params, timeoutMs = 12000) {
@@ -114,14 +136,18 @@ export async function fetchBars({ market = 'futures', symbol, secid, period = 'd
     }
   }
 
-  // 1. 本地服务器
-  try {
-    const params = { secid: targetSecid, market, symbol, period, adjust };
-    if (count) params.count = count;
-    const out = await viaServer(params);
-    return { ...out, bars: attachDefaultMAs(sortByDate(out.bars || [])), attempted };
-  } catch (e) {
-    attempted.push({ channel: 'local-server', error: String(e.message || e) });
+  // 1. 本地服务器（静态托管上直接跳过，不发那一发必定 404 的请求）
+  if (LOCAL_BACKEND) {
+    try {
+      const params = { secid: targetSecid, market, symbol, period, adjust };
+      if (count) params.count = count;
+      const out = await viaServer(params);
+      return { ...out, bars: attachDefaultMAs(sortByDate(out.bars || [])), attempted };
+    } catch (e) {
+      attempted.push({ channel: 'local-server', error: String(e.message || e) });
+    }
+  } else {
+    attempted.push({ channel: 'local-server', error: '静态托管，无本地后端（已跳过，非故障）' });
   }
 
   // 2. 浏览器直连 eastmoney
@@ -146,8 +172,10 @@ export async function fetchBars({ market = 'futures', symbol, secid, period = 'd
   return { ok: false, error: '三条行情通道全部失败', attempted };
 }
 
-/** 代码检索（M3 识图导入的名称-代码交叉校验用）。服务器不可用时返回空表而不是抛错。 */
+/** 代码检索（M3 识图导入的名称-代码交叉校验用）。这条能力只在本地后端存在时有，
+ *  静态托管上直接返回空表，不去打那个必定 404 的 /api/resolve。 */
 export async function resolveSymbol(query) {
+  if (!LOCAL_BACKEND) return [];
   try {
     const res = await withTimeout(fetch(`/api/resolve?q=${encodeURIComponent(query)}`), 10000, 'resolve');
     const json = await res.json();

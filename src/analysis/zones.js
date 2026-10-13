@@ -4,8 +4,12 @@
  * 供需区取的是最主流的可定义版本：
  *   需求区 = 窄幅 base 之后紧跟一段强向上脱离（RBR/DBD）
  *   供给区 = 窄幅 base 之后紧跟一段强向下脱离（RBD/DBR）
- * base 用「实体很小 + 随后一根的位移远大于 base 波动」来判定，而不是随便找密集成交区。
- * 区域一旦被收盘价有效穿越即失效（broken），不再画 —— 留着失效区是最常见的误报来源。
+ * base 用「1~3 根连续窄幅棒 + 随后若干根里出现远大于 base 波动的脱离」来判定，
+ * 而不是随便找密集成交区。方向由第一个把收盘价甩出盆地 ± 阈值的那根决定。
+ * 区域被收盘价有效穿越即失效（broken），并把色带截止在穿越那一根。
+ * 过去这里是 `if (broken) continue` 直接丢弃：刚跌破的区会凭空消失，读者不知道它“曾经成立过”；
+ * 而未跌破的区又一律 `endIdx = 最后一根`，于是一条 2015 年的需求区能一路糊到 2026 年。
+ * 两者都不对 —— 现在 broken 的带子画到穿越点为止，active 的才延续到最新一根。
  *
  * Wyckoff 只做两件可核验的事：区间内的 spring（下破后收回）与 upthrust（上破后收回），
  * 以及放量突破（SOS/SOW）。完整的 Wyckoff 阶段/因果分析不在这里装懂。
@@ -15,51 +19,94 @@ import { atr } from './common.js';
 
 export function supplyDemandZones(bars, {
   baseMaxRangeAtr = 0.6,
-  departureAtrMult = 1.8,
+  departureAtrMult = 1.2,
+  maxBaseBars = 3,
+  departureWindow = 3,
   maxZones = 8,
-  atrPeriod = 14
+  atrPeriod = 14,
+  freshnessHalfLife = 250    // 距今多少根衰减到一半：老区不再是“榜首常客”
 } = {}) {
   const n = (bars || []).length;
   if (n < atrPeriod + 5) return [];
   const a = atr(bars, atrPeriod);
+
+  const isNarrow = (i) => {
+    const at = a[i];
+    return !!at && at > 0 && (bars[i].high - bars[i].low) <= at * baseMaxRangeAtr;
+  };
   const zones = [];
 
   for (let i = atrPeriod; i < n - 1; i++) {
     const at = a[i];
-    if (!at) continue;
-    const base = bars[i];
-    const baseRange = base.high - base.low;
-    if (baseRange > at * baseMaxRangeAtr) continue;
+    if (!isNarrow(i)) continue;
 
-    const next = bars[i + 1];
-    const move = next.close - next.open;
-    const strength = Math.abs(next.close - base.close) / at;
-    if (strength < departureAtrMult) continue;
+    // base 可以是 1~maxBaseBars 根连续窄幅棒构成的盆地。
+    // 原口径要求「单根窄棒 + 紧接着下一根就走完 1.8ATR」：实测螺纹钢 1900 根日线里
+    // 够格的窄 base 有 233 个，但单根最大脱离只有 1.76ATR，门槛永远够不着 ——
+    // 整个供需区叠加层恒返回 0，用户开了开关看到的是“什么都没画”。
+    let runStart = i;
+    while (runStart > i - maxBaseBars && runStart - 1 >= atrPeriod && isNarrow(runStart - 1)) runStart--;
 
-    const isDemand = move > 0;
-    const top = Math.max(base.high, base.open, base.close);
-    const bottom = Math.min(base.low, base.open, base.close);
-
-    // 向后找首次被收盘价穿越的那根。一旦穿越即失效 —— 包括“最后一根才跌破”的情况：
-    // 留着刚破的区继续画，是供需区最常见的误报来源（读者会以为支撑还在）。
-    let broken = false;
-    for (let j = i + 2; j < n; j++) {
-      if (isDemand ? bars[j].close < bottom : bars[j].close > top) { broken = true; break; }
+    let top = -Infinity, bottom = Infinity;
+    for (let j = runStart; j <= i; j++) {
+      if (bars[j].high > top) top = bars[j].high;
+      if (bars[j].low < bottom) bottom = bars[j].low;
     }
-    if (broken) continue;
+    if (!(top > bottom)) continue;
+
+    // 脱离在随后几根内完成都算，取第一个把收盘价甩出盆地 ≥ 阈值的棒来定方向
+    let dep = null;
+    for (let k = 1; k <= departureWindow && i + k < n; k++) {
+      const c = bars[i + k].close;
+      const up = (c - top) / at;
+      const dn = (bottom - c) / at;
+      if (up >= departureAtrMult || dn >= departureAtrMult) {
+        dep = { idx: i + k, isDemand: up >= departureAtrMult, strength: Math.max(up, dn) };
+        break;
+      }
+    }
+    if (!dep) continue;
+
+    // 向后找首次被收盘价穿越的那根。找到了就在那里截止，而不是整条区间一律延长到最新一根。
+    let brokenAtIdx = null;
+    for (let j = dep.idx + 1; j < n; j++) {
+      if (dep.isDemand ? bars[j].close < bottom : bars[j].close > top) { brokenAtIdx = j; break; }
+    }
+
+    // 脱离那根还是最新一根时，区域仍在“形成中”：它下一秒可能被直接吞掉，不能当已成立展示
+    const forming = dep.idx >= n - 1;
 
     zones.push({
-      kind: isDemand ? 'demand' : 'supply',
-      label: isDemand ? '需求区' : '供给区',
+      kind: dep.isDemand ? 'demand' : 'supply',
+      label: dep.isDemand ? '需求区' : '供给区',
       top, bottom,
-      startIdx: i,
-      endIdx: n - 1,
-      strength,
+      startIdx: runStart,
+      originIdx: i,
+      departureIdx: dep.idx,
+      endIdx: brokenAtIdx === null ? n - 1 : brokenAtIdx,
+      brokenAtIdx,
+      status: brokenAtIdx !== null ? 'broken' : (forming ? 'forming' : 'active'),
+      strength: dep.strength,
       freshness: n - 1 - i
     });
   }
 
-  return zones.sort((x, y) => y.strength - x.strength).slice(0, maxZones);
+  // 同一盆地的相邻起点会报出几乎重合的区，只留最强的那个
+  const distinct = [];
+  for (const z of zones.sort((x, y) => y.strength - x.strength)) {
+    if (distinct.some(k => k.kind === z.kind && Math.abs(k.originIdx - z.originIdx) <= maxBaseBars)) continue;
+    distinct.push(z);
+  }
+
+  // 名额权重 = 脱离强度 × 新鲜度衰减，失效区再打三折。
+  // freshness 早就算出来了却没人用，所以全历史最强的老区永远占满名额 —— 这才是“显示一般”的主因。
+  const rank = (z) => z.strength
+    * Math.exp(-z.freshness / Math.max(1, freshnessHalfLife))
+    * (z.status === 'broken' ? 0.3 : 1);
+  return distinct
+    .sort((x, y) => rank(y) - rank(x))
+    .slice(0, maxZones)
+    .sort((x, y) => x.startIdx - y.startIdx);
 }
 
 /**

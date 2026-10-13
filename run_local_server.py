@@ -14,10 +14,11 @@
 """
 
 import http.server
-import socketserver
 import json
 import os
 import re
+import socket
+import socketserver
 import sys
 import urllib.parse
 import urllib.request
@@ -295,11 +296,32 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                                 "engine": "rapidocr_onnxruntime", "engineError": ocr_err})
 
 
+def lan_ip():
+    """本机在局域网里的地址。
+
+    服务器本来就绑在 ("", PORT) 即所有网卡上，但原先只打印 localhost ——
+    iPad / 手机在同一 Wi-Fi 下根本不知道该填什么地址，等于把平板访问这条路堵死了。
+    用 UDP connect 选出默认出口网卡，不会真的发包，也不依赖 hosts/DNS 配置。
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        s.close()
+
+
 def main():
     url = f"http://localhost:{PORT}/futures_replay_trader.html"
     print("=== 趋势交易回测系统 · 双市场（期货 + A股）===")
     print(f"本地服务: http://localhost:{PORT}")
     print(f"主页:     {url}")
+    ip = lan_ip()
+    if ip:
+        print(f"平板/手机: http://{ip}:{PORT}/futures_replay_trader.html")
+        print(f"          （iPad 与本机连同一个 Wi-Fi，上面这个地址才是它能打开的）")
     print("接口:     /api/kline  /api/resolve  /api/ocr  /api/health")
     try:
         webbrowser.open(url)

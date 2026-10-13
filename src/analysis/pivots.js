@@ -6,16 +6,24 @@
  * 所以这里每个 level set 带 fromIdx（首个可见 bar）与 toIdx。
  */
 
+/**
+ * iOS/Safari 的 `new Date('2026-10-14 10:30')` 返回 Invalid Date，而 60m bar 的 date 正是这个形状。
+ * 周线枢轴一旦落到 iPad 上就会全体归到同一个坏 key 里，所以这里只按字符串取年月日，
+ * 再用 Date.UTC 构造（这个形式全平台都能解析）。
+ */
+const dayKey = (dateStr) => String(dateStr).slice(0, 10);
+
 const periodKey = (dateStr, timeframe) => {
-  const d = String(dateStr);
-  if (timeframe === 'monthly') return d.slice(0, 7);
+  const day = dayKey(dateStr);
+  if (timeframe === 'monthly') return day.slice(0, 7);
   if (timeframe === 'weekly') {
-    const dt = new Date(d);
-    const day = (dt.getUTCDay() + 6) % 7;
-    dt.setUTCDate(dt.getUTCDate() - day);
-    return dt.toISOString().slice(0, 10);
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(dateStr));
+    if (!m) return day;
+    const t = Date.UTC(+m[1], +m[2] - 1, +m[3]);
+    const dow = (new Date(t).getUTCDay() + 6) % 7;    // 周一为一周起点
+    return new Date(t - dow * 86400000).toISOString().slice(0, 10);
   }
-  return d.slice(0, 10);   // daily：每个交易日自成一期
+  return day;   // daily：每个交易日自成一期
 };
 
 export function groupByPeriod(bars, timeframe = 'daily') {
@@ -101,6 +109,10 @@ export function computePivots(bars, { type = 'standard', timeframe = 'daily' } =
  * 不依赖百分比阈值，因此对盘整区更敏感。
  *
  * 右侧必须留够 right 根才算确认 —— 未确认的候选不返回，否则图上会浮出未来拐点。
+ *
+ * 每条线都算 `brokenAtIdx`：被收盘价穿越即失效，线的右端截止在那一根。
+ * 不这么做的话，一条 2015 年就被突破的阻力位会一路拖到图上最右边，
+ * 读图的人会继续把它当支撑看 —— 这比漏标更有害。
  */
 export function highLowPivots(bars, { left = 5, right = 5, mergePct = 0.002 } = {}) {
   const n = (bars || []).length;
@@ -129,5 +141,20 @@ export function highLowPivots(bars, { left = 5, right = 5, mergePct = 0.002 } = 
       out.push({ price: p.price, kind: p.kind, touches: 1, firstIdx: p.idx, lastIdx: p.idx, confirmedAtIdx: p.confirmedAtIdx });
     }
   }
-  return out.sort((a, b) => b.touches - a.touches);
+
+  for (const lv of out) {
+    let brokenAtIdx = null;
+    for (let j = lv.lastIdx + 1; j < n; j++) {
+      if (lv.kind === 'high' ? bars[j].close > lv.price : bars[j].close < lv.price) { brokenAtIdx = j; break; }
+    }
+    lv.brokenAtIdx = brokenAtIdx;
+    lv.status = brokenAtIdx === null ? 'active' : 'broken';
+    lv.endIdx = brokenAtIdx === null ? n - 1 : brokenAtIdx;
+    lv.freshness = n - 1 - lv.lastIdx;
+  }
+
+  // 还活着者优先，其次按触碰次数：否则“2010 年碰过 9 次”的线会永久霸占仅有的几个名额
+  return out.sort((a, b) => (a.status === b.status
+    ? b.touches - a.touches
+    : a.status === 'active' ? -1 : 1));
 }

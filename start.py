@@ -57,6 +57,9 @@ def main():
 
     print("=== 趋势交易回测系统 · 双市场（期货 + A股）===")
     print(f"  主页 {url}")
+    lan = server.lan_ip()
+    if lan:
+        print(f"  平板/手机 http://{lan}:{port}/futures_replay_trader.html  （同一 Wi-Fi 下的 iPad 用这个）")
     print(f"  接口 /api/kline  /api/resolve  /api/ocr  /api/health")
 
     httpd = socketserver.ThreadingTCPServer(("", port), server.Handler)

@@ -28,7 +28,7 @@ const C = {
 export const DEFAULT_OVERLAY_STATE = {
   vp: { on: false, bins: 48, vaPct: 0.70, mode: 'auto', lookback: 250, width: 0.22 },
   supertrend: { on: false, period: 10, multiplier: 3 },
-  pivots: { on: false, type: 'standard', timeframe: 'daily', showHL: true, hlLeft: 5, hlRight: 5 },
+  pivots: { on: false, type: 'standard', timeframe: 'daily', showHL: true, hlLeft: 5, hlRight: 5, visibleSets: 3 },
   patterns: { on: false, swingPct: 0.035, max: 4 },
   zones: { on: false, maxZones: 6, wyckoff: true }
 };
@@ -94,20 +94,26 @@ export class OverlayManager {
         // 分形摆动位一多就把图糊成网格：只留触碰最多的 6 条，且必须落在当前可见价位内
         const lo = chart.currentPriceRange ? chart.currentPriceRange.minPrice : -Infinity;
         const hi = chart.currentPriceRange ? chart.currentPriceRange.maxPrice : Infinity;
+        // endIdx >= start：早就被穿越失效的线不再占名额（排序已让活线优先）
         out.hl = highLowPivots(revealed, { left: s.pivots.hlLeft, right: s.pivots.hlRight })
-          .filter(p => p.price > lo && p.price < hi)
+          .filter(p => p.price > lo && p.price < hi && p.endIdx >= start)
           .slice(0, 6);
       }
     }
 
     if (s.patterns.on) {
+      // 这里原来是 .filter(p => p.confirmedAtIdx <= end)，恒真、什么也没过滤掉。
+      // 真正的可见性判据是“生命周期还没走完，或走完的位置仍在窗口内”。
       out.patterns = detectPatterns(revealed, { swingPct: s.patterns.swingPct, maxPatterns: s.patterns.max })
-        .filter(p => p.confirmedAtIdx <= end);
-      if (out.patterns.length) out.summary.push(`形态 ${out.patterns.map(p => p.label).join('/')}`);
+        .filter(p => (p.resolvedAtIdx === null ? end : p.resolvedAtIdx) >= start);
+      if (out.patterns.length) {
+        out.summary.push(`形态 ${out.patterns.map(p => `${p.label}·${p.stateLabel}`).join(' / ')}`);
+      }
     }
 
     if (s.zones.on) {
-      out.zones = supplyDemandZones(revealed, { maxZones: s.zones.maxZones });
+      out.zones = supplyDemandZones(revealed, { maxZones: s.zones.maxZones })
+        .filter(z => z.endIdx >= start);
       if (s.zones.wyckoff) out.wyckoff = wyckoffEvents(revealed, {}).filter(e => e.idx <= end).slice(-8);
       if (out.zones.length) out.summary.push(`供需区 ${out.zones.length} 个`);
     }
@@ -133,7 +139,7 @@ export class OverlayManager {
     ctx.rect(0, 0, chart.mainWidth, chart.klineHeight);
     ctx.clip();
 
-    if (d.zones) this._drawZones(ctx, chart, d.zones);
+    if (d.zones) this._drawZones(ctx, chart, d.zones, start, end);
     if (d.vp) this._drawVolumeProfile(ctx, chart, d.vp, start, end);
     if (d.pivots) this._drawPivots(ctx, chart, d.pivots, start, end);
     if (d.hl) this._drawHighLowPivots(ctx, chart, d.hl, start, end);
@@ -144,6 +150,16 @@ export class OverlayManager {
     ctx.restore();
 
     if (this.summary.length) this._drawSummaryChip(ctx, chart);
+  }
+
+  /**
+   * 某根 bar 的右边缘 x。
+   * 叠加层的线必须截止在这里，而不是一路拖到 mainWidth —— 「拖到最右边」是这一层
+   * 原先最主要的观感问题：一期的日枢轴、一条早已失效的摆动位、一个走完了的形态
+   * 都会被拉成横贯全屏的报价线，看起来都还是“当前有效”。
+   */
+  _barRight(chart, idx) {
+    return Math.min(chart.mainWidth, chart.barIndexToX(idx) + (chart.barWidth + chart.barSpacing) / 2);
   }
 
   _drawVolumeProfile(ctx, chart, vp, start, end) {
@@ -200,12 +216,19 @@ export class OverlayManager {
     for (const p of list) {
       const y = chart.priceToY(p.price);
       const x0 = chart.barIndexToX(Math.max(start, p.confirmedAtIdx));
+      const x1 = this._barRight(chart, Math.min(p.endIdx, end));
+      if (x1 <= x0) continue;                      // 窗口整段都在失效点之后：这条线没有信息量
+      const broken = p.status === 'broken';
+      ctx.save();
+      ctx.globalAlpha = broken ? 0.4 : 1;
       ctx.strokeStyle = p.kind === 'high' ? 'rgba(239,68,68,0.45)' : 'rgba(16,185,129,0.45)';
       ctx.setLineDash([1, 4]);
       ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(chart.mainWidth, y); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x1, y); ctx.stroke();
       ctx.fillStyle = ctx.strokeStyle;
-      ctx.fillText(`${p.kind === 'high' ? 'HL↑' : 'HL↓'}${p.touches}`, chart.mainWidth - 42, y - 2);
+      ctx.fillText(`${p.kind === 'high' ? 'HL↑' : 'HL↓'}${p.touches}${broken ? '破' : ''}`,
+        Math.max(0, x1 - 40), y - 2);
+      ctx.restore();
     }
     ctx.restore();
   }
@@ -227,26 +250,42 @@ export class OverlayManager {
     }
   }
 
+  /**
+   * 每期枢轴只在自己的 [fromIdx, toIdx] 内画 —— 日级枢轴本来就是“当日有效”的报价，
+   * 拖过收盘点就变成在替后面的日子报价。
+   * 原先这里只取 slice(-1)[0] 画一组并拉到右边缘：日级 timeframe 下一屏几百根只出 1 组枢轴，
+   * 看着像随机出现的一条线。现在按 visibleSets 显示最近几期，历史期淡出且不再叠标签。
+   */
   _drawPivots(ctx, chart, sets, start, end) {
-    const cur = sets.filter(s => s.fromIdx <= end && s.toIdx >= start).slice(-1)[0];
-    if (!cur) return;
-    const x0 = chart.barIndexToX(Math.max(start, cur.fromIdx));
-    const x1 = chart.mainWidth;
+    const inView = sets.filter(s => s.toIdx >= start && s.fromIdx <= end);
+    if (!inView.length) return;
+    const count = Math.max(1, Math.min(20, this.state.pivots.visibleSets | 0 || 3));
+    const shown = inView.slice(-count);
     ctx.font = '10px Consolas, monospace';
-    for (const [k, v] of Object.entries(cur.levels)) {
-      if (v === null || !Number.isFinite(v)) continue;
-      const y = chart.priceToY(v);
-      const isP = k === 'P';
-      const isR = k.startsWith('R');
+
+    shown.forEach((cur, i) => {
+      const isLatest = i === shown.length - 1;
+      const x0 = chart.barIndexToX(Math.max(start, cur.fromIdx));
+      const x1 = this._barRight(chart, Math.min(cur.toIdx, end));
+      if (x1 <= x0) return;
       ctx.save();
-      ctx.strokeStyle = isP ? C.pivot : isR ? 'rgba(239,68,68,0.75)' : 'rgba(16,185,129,0.75)';
-      ctx.setLineDash(isP ? [] : [4, 3]);
-      ctx.lineWidth = isP ? 1.6 : 1;
-      ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x1, y); ctx.stroke();
-      ctx.fillStyle = ctx.strokeStyle;
-      ctx.fillText(`${cur.type === 'standard' ? '' : cur.type[0].toUpperCase()}${k} ${v.toFixed(2)}`, x0 + 4, y - 2);
+      ctx.globalAlpha = isLatest ? 1 : 0.38;
+      for (const [k, v] of Object.entries(cur.levels)) {
+        if (v === null || !Number.isFinite(v)) continue;
+        const y = chart.priceToY(v);
+        const isP = k === 'P';
+        const isR = k.startsWith('R');
+        ctx.strokeStyle = isP ? C.pivot : isR ? 'rgba(239,68,68,0.75)' : 'rgba(16,185,129,0.75)';
+        ctx.setLineDash(isP ? [] : [4, 3]);
+        ctx.lineWidth = isP ? 1.6 : 1;
+        ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x1, y); ctx.stroke();
+        if (isLatest) {
+          ctx.fillStyle = ctx.strokeStyle;
+          ctx.fillText(`${cur.type === 'standard' ? '' : cur.type[0].toUpperCase()}${k} ${v.toFixed(2)}`, x0 + 4, y - 2);
+        }
+      }
       ctx.restore();
-    }
+    });
   }
 
   _drawPatterns(ctx, chart, patterns, start, end) {
@@ -254,7 +293,11 @@ export class OverlayManager {
     for (const p of patterns) {
       if (p.endIdx < start) continue;
       const color = p.direction === 'bull' ? C.bull : C.bear;
+      // 三条关键位只在生命周期内有效：走完了（达标/失效/过期）就截止在那一根
+      const lastIdx = p.resolvedAtIdx === null ? end : Math.min(p.resolvedAtIdx, end);
+      const settled = p.resolvedAtIdx !== null;
       ctx.save();
+      ctx.globalAlpha = settled ? 0.55 : 1;
       ctx.strokeStyle = color; ctx.lineWidth = 1.6;
       ctx.beginPath();
       p.points.forEach((pt, i) => {
@@ -270,14 +313,17 @@ export class OverlayManager {
       }
       ctx.stroke();
 
+      const x0 = chart.barIndexToX(Math.max(start, p.confirmedAtIdx));
+      const x1 = this._barRight(chart, lastIdx);
       const keyLine = (price, label, dash) => {
+        if (x1 <= x0) return;
         const y = chart.priceToY(price);
         ctx.save();
-        ctx.strokeStyle = color; ctx.globalAlpha = 0.75;
+        ctx.strokeStyle = color; ctx.globalAlpha = settled ? 0.4 : 0.75;
         if (dash) ctx.setLineDash(dash);
-        ctx.beginPath(); ctx.moveTo(chart.barIndexToX(p.confirmedAtIdx), y); ctx.lineTo(chart.mainWidth, y); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x1, y); ctx.stroke();
         ctx.fillStyle = color;
-        ctx.fillText(`${label} ${price.toFixed(2)}`, chart.barIndexToX(p.confirmedAtIdx) + 6, y - 3);
+        ctx.fillText(`${label} ${price.toFixed(2)}`, x0 + 6, y - 3);
         ctx.restore();
       };
       keyLine(p.breakout, '突破', [6, 3]);
@@ -287,23 +333,36 @@ export class OverlayManager {
       const lx = chart.barIndexToX(p.startIdx) + 6;
       const ly = chart.priceToY(p.points[0].price) + (p.direction === 'bull' ? 16 : -8);
       ctx.fillStyle = color;
-      ctx.fillText(`${p.label} · 置信 ${(p.confidence * 100).toFixed(0)}%`, lx, ly);
+      ctx.fillText(`${p.label} · 置信 ${(p.confidence * 100).toFixed(0)}% · ${p.stateLabel}`, lx, ly);
+      if (p.state === 'brokenOut' && p.breakoutAtIdx !== null && p.breakoutAtIdx <= end) {
+        const bx = chart.barIndexToX(p.breakoutAtIdx);
+        ctx.beginPath(); ctx.arc(bx, chart.priceToY(p.breakout), 3, 0, Math.PI * 2); ctx.fill();
+      }
       ctx.restore();
     }
   }
 
-  _drawZones(ctx, chart, zones) {
+  _drawZones(ctx, chart, zones, start, end) {
     for (const z of zones) {
       const x0 = chart.barIndexToX(z.startIdx);
+      const x1 = this._barRight(chart, Math.min(z.endIdx, end));
+      if (x1 <= x0) continue;                       // 整段在窗口左侧，或早已走完全程
       const yTop = chart.priceToY(z.top), yBot = chart.priceToY(z.bottom);
+      const suffix = z.status === 'broken' ? '·已失效' : z.status === 'forming' ? '·形成中' : '';
+      ctx.save();
+      if (z.status === 'broken') ctx.globalAlpha = 0.5;
       ctx.fillStyle = z.kind === 'demand' ? C.demand : C.supply;
-      ctx.fillRect(x0, Math.min(yTop, yBot), chart.mainWidth - x0, Math.abs(yBot - yTop));
+      ctx.fillRect(x0, Math.min(yTop, yBot), x1 - x0, Math.abs(yBot - yTop));
       ctx.strokeStyle = z.kind === 'demand' ? C.demandEdge : C.supplyEdge;
       ctx.lineWidth = 1;
-      ctx.strokeRect(x0, Math.min(yTop, yBot), chart.mainWidth - x0, Math.abs(yBot - yTop));
+      // 没走完的结构右边界用虚线，视觉上就和已成立的区分开
+      if (z.status !== 'active') ctx.setLineDash([4, 3]);
+      ctx.strokeRect(x0, Math.min(yTop, yBot), x1 - x0, Math.abs(yBot - yTop));
+      ctx.setLineDash([]);
       ctx.fillStyle = ctx.strokeStyle;
       ctx.font = '10px system-ui, sans-serif';
-      ctx.fillText(`${z.label} ×${z.strength.toFixed(1)}ATR`, x0 + 4, Math.min(yTop, yBot) - 2);
+      ctx.fillText(`${z.label} ×${z.strength.toFixed(1)}ATR${suffix}`, x0 + 4, Math.min(yTop, yBot) - 2);
+      ctx.restore();
     }
   }
 

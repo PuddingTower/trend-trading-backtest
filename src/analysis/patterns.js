@@ -36,11 +36,15 @@ const priceAt = (f, idx) => f.intercept + f.slope * idx;
 
 const MIN_SPAN = 12;   // 少于 12 根摆出来的“形态”多半是噪声
 
-export function detectPatterns(bars, { swingPct = 0.035, confirmRight = 3, maxPatterns = 4 } = {}) {
+export function detectPatterns(bars, { swingPct = 0.035, confirmRight = 3, maxPatterns = 4, resolveWindow = 120 } = {}) {
   const n = (bars || []).length;
   if (n < 30) return [];
 
   const all = swingPoints(bars, { pct: swingPct });
+  // 只留右侧已被 confirmRight 根站得住的拐点。
+  // 曾考虑再把 ZigZag 的尾点也砍掉（怕它被后续极值替换导致标记抖动），实测不成立：
+  // 同一段双顶在 64/70/76 三个截面上给出的拐点索引都是 [12,22,33]，纹丝不动，
+  // 而砍尾要白等一整条腿才能出形态 —— 得不偿失，所以保留尾点。
   const usable = all.filter(p => p.idx + confirmRight <= n - 1);
   if (usable.length < 3) return [];
 
@@ -179,7 +183,41 @@ export function detectPatterns(bars, { swingPct = 0.035, confirmRight = 3, maxPa
     break;
   }
 
+  for (const p of found) resolveLifecycle(bars, p, resolveWindow);
   return dedupeOverlaps(found).slice(0, maxPatterns);
+}
+
+/**
+ * 形态确认后逐根核对，给出「在途中 / 已突破 / 已达标 / 已失效 / 已过期」之一。
+ *
+ * 这就是原来缺的那半边：检测阶段很谨慎，画出来之后却不再管，
+ * 于是 2018 年的头肩顶到今天还挂着「目标」，看着像在途交易机会。
+ * 三条关键位只在 resolvedAtIdx 之前有意义，此后一律截止。
+ *
+ * 判定顺序悲观优先（先看止损再看目标），与回测内核第 3 条口径一致。
+ */
+function resolveLifecycle(bars, p, resolveWindow) {
+  const isBear = p.direction === 'bear';
+  p.breakoutAtIdx = null;
+  p.state = 'pending';
+  p.stateLabel = '在途中';
+  p.resolvedAtIdx = null;
+
+  for (let j = p.confirmedAtIdx; j < bars.length; j++) {
+    const c = bars[j].close;
+    if (isBear ? c > p.stop : c < p.stop) {
+      p.state = 'invalidated'; p.stateLabel = '已失效'; p.resolvedAtIdx = j; return;
+    }
+    if (isBear ? c < p.target : c > p.target) {
+      p.state = 'targetHit'; p.stateLabel = '已达标'; p.resolvedAtIdx = j; return;
+    }
+    if (p.breakoutAtIdx === null && (isBear ? c < p.breakout : c > p.breakout)) {
+      p.breakoutAtIdx = j;
+      p.state = 'brokenOut'; p.stateLabel = '已突破';
+    } else if (p.breakoutAtIdx === null && j - p.confirmedAtIdx > resolveWindow) {
+      p.state = 'expired'; p.stateLabel = '已过期'; p.resolvedAtIdx = j; return;
+    }
+  }
 }
 
 /**
