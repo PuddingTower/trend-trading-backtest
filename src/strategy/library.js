@@ -9,7 +9,7 @@
  * 所以止损只会朝有利方向移动，不会放松。
  */
 
-import { ema, sma, macd, rsi, atr, crosses, priorExtreme } from './indicators.js';
+import { ema, sma, macd, rsi, atr, crosses, priorExtreme, adx, roc, fieldSma, rising, priorRange } from './indicators.js';
 import { swingPoints } from '../analysis/common.js';
 
 const DIR = { FLAT: 0, LONG: 1, SHORT: -1 };
@@ -175,5 +175,208 @@ export const rsiReversion = {
   }
 };
 
-export const STRATEGIES = [maCross, donchianBreak, dualThrust, macdTrend, hhLlStructure, rsiReversion];
+// ---------------- 7. Minervini 趋势模板 + 枢轴买点 ----------------
+/**
+ * 趋势模板的八条判据，单独导出成函数：扫描器要在"还没突破但模板成立"的品种上读它，
+ * 而 signals() 只在持仓状态下返回对象 —— 拿不到判据就只能把八条重写一遍，两处会慢慢对不上。
+ *
+ * 第 8 条（RS 相对强度）是横截面指标，单品种拿不到：
+ * opts.rsBars 给基准指数序列才算；useRs=true 又没给基准时 rsAvailable=false，
+ * 由调用方决定是降级到 7 条还是不出信号（策略里选的是"要求就不出"）。
+ // ---------------- 7. Minervini 趋势模板 + 枢轴买点 ----------------
+/**
+ * 《Trade Like a Stock Market Wizard》里那 8 条趋势模板。
+ * 它的价值不在买点有多聪明，而在**过滤掉八成不合格的机会**：只在多头排列、
+ * 离新高近、离低点远的品种上找突破。
+ *
+ * 第 8 条（RS 相对强度）是横截面指标，单品种拿不到：rsBars 给基准序列才算。
+ * useRs=true 又缺基准时策略**不出信号**（静默降级等于假装自己跑的是完整模板）；
+ * useRs=false 时按能算的 7 条判定，reason 里如实写明"RS 无基准未参与"。
+ */
+/**
+ * 逐根的模板判据（向量化算一遍，供 signals 与扫描器共用）。
+ * 每个下标返回 {crit, passed, enabled, ok}，暖机期返回 null —— 不假装判得过。
+ */
+function templateSeries(bars, q) {
+  const closes = bars.map(b => b.close);
+  const f = sma(closes, q.maFast), m = sma(closes, q.maMid), s = sma(closes, q.maSlow);
+  const rg = priorRange(bars, q.rangeLook);
+  const rr = rising(sma(closes, q.maSlow), q.riseLook);
+  const rrMid = rising(sma(closes, q.maMid), q.riseLook);
+  const rsFlag = (() => {
+    if (q.useRs !== true) return null;             // 开关关着就不参与判定，给了基准也不算
+    const rb = q.rsBars;
+    if (!Array.isArray(rb) || rb.length < q.riseLook + 2) return null;
+    const own = roc(closes, q.riseLook);
+    const bench = roc(rb.map(b => b.close), q.riseLook);
+    return closes.map((_, i) => {
+      const o = own[i], b2 = bench[Math.min(bench.length - 1, i)];
+      return (o === null || o === undefined || !Number.isFinite(b2)) ? null : o > b2;
+    });
+  })();
+  return bars.map((b, i) => {
+    if ([f[i], m[i], s[i], rg.hi[i], rg.lo[i]].some(v => v === null)) return null;
+    const crit = [
+      { k: '价>150&200日线', ok: b.close > m[i] && b.close > s[i] },
+      { k: '150>200', ok: m[i] > s[i] },
+      { k: '价>50日线', ok: b.close > f[i] },
+      { k: '50>150>200', ok: f[i] > m[i] && m[i] > s[i] },
+      { k: `离${q.rangeLook}日低≥${(q.minAboveLow * 100) | 0}%`, ok: b.close / rg.lo[i] - 1 >= q.minAboveLow },
+      { k: `距${q.rangeLook}日高≤${(q.maxBelowHigh * 100) | 0}%`, ok: b.close / rg.hi[i] - 1 >= -q.maxBelowHigh },
+      { k: '200日/150日上行', ok: rr[i] === true && rrMid[i] === true },
+      { k: 'RS 强于基准', ok: rsFlag ? rsFlag[i] : null }
+    ];
+    const enabled = crit.filter(c => c.ok !== null);
+    const passed = enabled.filter(c => c.ok).length;
+    return { crit, passed, enabled: enabled.length,
+             ok: enabled.length >= 6 && passed === enabled.length,
+             rsAvailable: rsFlag !== null && rsFlag[i] !== null && rsFlag[i] !== undefined,
+             values: { ma50: f[i], ma150: m[i], ma200: s[i], hi: rg.hi[i], lo: rg.lo[i], close: b.close } };
+  });
+}
+
+const TEMPLATE_DEFAULTS = { maFast: 50, maMid: 150, maSlow: 200, rangeLook: 250, minAboveLow: 0.15,
+                            maxBelowHigh: 0.25, riseLook: 63, useRs: false };
+
+/** 最后一根的模板判据 —— 扫描器用它回答"这个品种今天符合趋势模板吗"。 */
+export function trendTemplate(bars, opts = {}) {
+  const q = { ...TEMPLATE_DEFAULTS, ...opts };
+  const list = templateSeries(bars || [], q);
+  const last = list.length ? list[list.length - 1] : null;
+  return last || { crit: [], passed: 0, enabled: 0, ok: false, rsAvailable: false, values: null };
+}
+
+/** 枢轴突破：收盘越过前 N 根高点（不含本根），可选量能确认。 */
+export function pivotBreak(bars, { pivotLook = 25, volLen = 50, volMul = 1.2, i = null } = {}) {
+  const idx = i === null ? bars.length - 1 : i;
+  const hh = priorExtreme(bars, pivotLook, 'high');
+  if (hh[idx] === null) return { broke: false, level: null, volOk: false };
+  const volMa = fieldSma(bars, 'volume', volLen);
+  const b = bars[idx];
+  const volOk = !(Number.isFinite(b.volume) && Number.isFinite(volMa[idx])) || b.volume >= volMul * volMa[idx];
+  return { broke: b.close > hh[idx], level: hh[idx], volOk, volume: b.volume, volMa: volMa[idx] };
+}
+
+export const minerviniTemplate = {
+  id: 'minerviniTemplate', name: 'Minervini 趋势模板',
+  params: { ...TEMPLATE_DEFAULTS, pivotLook: 25, pivotVolMul: 1.2, stopPct: 0.075, exitMa: true, bothWays: false },
+  signals(bars, p = {}) {
+    const q = { ...this.params, ...p };
+    const tpl = templateSeries(bars, q);
+    const f = sma(bars.map(b => b.close), q.maFast);
+    const hh = priorExtreme(bars, q.pivotLook, 'high');
+    const volMa = fieldSma(bars, 'volume', 50);
+    const rsMissing = q.useRs === true && !tpl.some(t => t && t.rsAvailable);   // 要求 RS 又拿不到基准：宁可不交易
+    let state = DIR.FLAT;
+    return bars.map((b, i) => {
+      const t = tpl[i];
+      if (state === DIR.LONG && q.exitMa && f[i] !== null && b.close < f[i]) state = DIR.FLAT;
+      if (state !== DIR.LONG && t && t.ok && !rsMissing && hh[i] !== null && b.close > hh[i]
+        && !(Number.isFinite(b.volume) && Number.isFinite(volMa[i]) && b.volume < q.pivotVolMul * volMa[i])) state = DIR.LONG;
+      if (state === DIR.FLAT) return null;
+      const sig = { i, dir: state,
+        reason: `模板 ${t ? t.passed : '?'}/${t ? t.enabled : '?'}${t && !t.rsAvailable ? '（RS 无基准未参与）' : ''} · 突破${q.pivotLook}日枢轴`,
+        template: { crit: t ? t.crit : [], passed: t ? t.passed : 0, enabled: t ? t.enabled : 0, rsAvailable: t ? t.rsAvailable : false } };
+      sig.stop = b.close * (1 - q.stopPct);
+      return sig;
+    });
+  }
+};
+
+// ---------------- 8. 趋势区间过滤突破（Clenow 式） ----------------
+/**
+ * 里肖《Stock Market Logic / Trend Following》那一套：先判"现在是不是趋势状态"，
+ * 再用长周期均线之上 + ADX 达标 + 放量突破近期高点进场。
+ * 和唐奇安的区别：Donchian 什么行情都突破，这里**只在趋势里**突破 —— 用胜率换出手次数。
+ */
+export const trendRegime = {
+  id: 'trendRegime', name: '趋势区间过滤突破',
+  params: {
+    maLen: 100, riseLook: 21, adxLen: 14, adxMin: 20, breakout: 20, volLen: 20, volMul: 1.0,
+    atrLen: 14, stopAtr: 2.5, trailAtr: 3, exitMa: true, bothWays: false
+  },
+  signals(bars, p = {}) {
+    const q = { ...this.params, ...p };
+    const closes = bars.map(b => b.close);
+    const ma = sma(closes, q.maLen);
+    const up = rising(ma, q.riseLook);
+    const { adx: ax, plus, minus } = adx(bars, q.adxLen);
+    const volMa = fieldSma(bars, 'volume', q.volLen);
+    const hh = priorExtreme(bars, q.breakout, 'high');
+    const ll = priorExtreme(bars, q.breakout, 'low');
+    const exL = priorExtreme(bars, Math.max(5, Math.round(q.breakout / 2)), 'low');
+    const exH = priorExtreme(bars, Math.max(5, Math.round(q.breakout / 2)), 'high');
+    const a = atr(bars, q.atrLen);
+    let state = DIR.FLAT;
+    return bars.map((b, i) => {
+      if (ma[i] === null || ax[i] === null || hh[i] === null) return null;
+      const bullRegime = b.close > ma[i] && up[i] === true && ax[i] >= q.adxMin && (plus[i] ?? 0) > (minus[i] ?? 0);
+      const bearRegime = b.close < ma[i] && up[i] === false && ax[i] >= q.adxMin && (minus[i] ?? 0) > (plus[i] ?? 0);
+      const volOk = !(Number.isFinite(b.volume) && Number.isFinite(volMa[i])) || b.volume >= q.volMul * volMa[i];
+      if (state === DIR.FLAT) {
+        if (bullRegime && b.close > hh[i] && volOk) state = DIR.LONG;
+        else if (q.bothWays && bearRegime && b.close < ll[i] && volOk) state = DIR.SHORT;
+      } else if (state === DIR.LONG) {
+        if (q.exitMa && b.close < ma[i]) state = q.bothWays && bearRegime ? DIR.SHORT : DIR.FLAT;
+        else if (exL[i] !== null && b.close < exL[i]) state = q.bothWays && bearRegime ? DIR.SHORT : DIR.FLAT;
+      } else if (q.exitMa && b.close > ma[i]) state = bullRegime ? DIR.LONG : DIR.FLAT;
+      else if (exH[i] !== null && b.close > exH[i]) state = bullRegime ? DIR.LONG : DIR.FLAT;
+      if (state === DIR.FLAT) return null;
+      const sig = { i, dir: state, reason: `ADX${ax[i].toFixed(0)} 趋势态 · 突破${q.breakout}日`, adx: ax[i] };
+      if (q.stopAtr) sig.stop = state === DIR.LONG ? b.close - q.stopAtr * a[i] : b.close + q.stopAtr * a[i];
+      return applyTrail(bars, a, sig, state, q.trailAtr);
+    });
+  }
+};
+
+// ---------------- 9. N 字量价形态（倍量起涨 → 缩量回调 → 放量突破） ----------------
+/**
+ * 国内教材里最常见的一个结构：一根放量大阳把趋势拉开，回调时量能缩回去（没人卖），
+ * 再放量越过前高时进场 —— 进场点比裸突破晚一点，但假突破少得多。
+ *
+ * 判定只用 i 及之前的 bar：起涨根、回调段、突破根全在窗口内，未来函数无处下手。
+ */
+export const nVolumePattern = {
+  id: 'nVolumePattern', name: 'N字量价突破',
+  params: {
+    volLen: 20, startMul: 1.8, shrinkMul: 0.9, minPull: 2, maxPull: 8, breakMul: 1.5,
+    atrLen: 14, stopAtr: 2, trailAtr: 2.5, exitLowLook: 10, bothWays: false
+  },
+  signals(bars, p = {}) {
+    const q = { ...this.params, ...p };
+    const a = atr(bars, q.atrLen);
+    const volMa = fieldSma(bars, 'volume', q.volLen);
+    const exL = priorExtreme(bars, q.exitLowLook, 'low');
+    let state = DIR.FLAT;
+    const nudge = (i) => {           // 找出以 i 为突破根的 N 字结构，返回起涨根下标或 null
+      if (volMa[i] === null || !Number.isFinite(bars[i].volume)) return null;
+      if (!(bars[i].close > bars[i].open) || bars[i].volume < q.breakMul * volMa[i]) return null;
+      for (let j = Math.max(1, i - q.maxPull - 1); j <= i - q.minPull; j++) {
+        if (volMa[j] === null) continue;
+        const rallied = bars[j].close > bars[j].open && bars[j].volume >= q.startMul * volMa[j];
+        if (!rallied) continue;
+        if (bars[i].close <= bars[j].high) continue;                 // 必须越过起涨根的高点
+        let shrunk = true, held = true;
+        for (let k = j + 1; k < i; k++) {
+          if (volMa[k] !== null && bars[k].volume > q.shrinkMul * volMa[k]) { shrunk = false; break; }
+          if (bars[k].low < bars[j].open) { held = false; break; }   // 回调跌破起涨那根的开盘 = 结构坏了
+        }
+        if (shrunk && held) return j;
+      }
+      return null;
+    };
+    return bars.map((b, i) => {
+      if (i < q.volLen + 2) return null;
+      if (state === DIR.LONG && exL[i] !== null && b.close < exL[i]) state = DIR.FLAT;
+      if (state === DIR.FLAT) { const j = nudge(i); if (j !== null) state = DIR.LONG; }
+      if (state === DIR.FLAT) return null;
+      const sig = { i, dir: state, reason: 'N字：倍量起涨→缩量回调→放量突破' };
+      if (q.stopAtr) sig.stop = b.close - q.stopAtr * a[i];
+      return applyTrail(bars, a, sig, state, q.trailAtr);
+    });
+  }
+};
+
+export const STRATEGIES = [maCross, donchianBreak, dualThrust, macdTrend, hhLlStructure, rsiReversion,
+                           minerviniTemplate, trendRegime, nVolumePattern];
 export const getStrategy = (id) => STRATEGIES.find(s => s.id === id) || null;

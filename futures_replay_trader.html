@@ -1713,7 +1713,7 @@
     import { WatchlistPanel } from './src/ui/watchlistPanel.js';
     import { ResearchPanel } from './src/ui/researchPanel.js';
     import { JournalPanel } from './src/ui/journalPanel.js';
-    import { pickBlindSegment, blindBadge, makeRng } from './src/replay/blind.js';
+    import { pickBlindSegment, blindBadge } from './src/replay/blind.js';
 
     // 兼容旧调用点：内联 UI 代码里仍在用 MarketDataCache.xxx()，这里做一层薄转发，
     // 让 M1 不动 3000 行 UI 代码就能接上 v2 schema。M2 起再逐步改成直接调 BarStore。
@@ -3649,6 +3649,7 @@
           currentStrategyId: () => document.getElementById('btStrategy')?.value || 'donchianBreak',
           currentParams: () => this.backtestPanel?.collectParams?.().params || null,
           loadBarsFor: (it) => this.loadBarsForSymbol(it),
+          openSymbol: (code) => this.loadSymbolData(code, false),
           runBacktestWith: (strategyId, params) => this.applyResearchParams(strategyId, params)
         });
         // 交易日志：手动复盘与自动回测的成交都能标注

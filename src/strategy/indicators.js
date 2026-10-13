@@ -131,3 +131,113 @@ export function crosses(a, b) {
   }
   return { up, dn };
 }
+
+/** 简单均值（直接吃 bar 数组的某个字段），量能过滤用。不足周期为 null。 */
+export function fieldSma(bars, field, period) {
+  return sma(bars.map(b => (b && Number.isFinite(b[field]) ? b[field] : 0)), period);
+}
+
+/** N 根涨幅（ROC）。基期数据不足给 null，不当成 0%。 */
+export function roc(values, period) {
+  const out = new Array(values.length).fill(null);
+  for (let i = period; i < values.length; i++) {
+    const base = values[i - period];
+    if (Number.isFinite(base) && base !== 0 && Number.isFinite(values[i])) out[i] = values[i] / base - 1;
+  }
+  return out;
+}
+
+/**
+ * ADX（Wilder 原版：DMI + DX 的 N 期平滑）。
+ * 趋势策略的"当前有没有趋势"就靠它 —— 突破在无趋势的震荡里胜率会掉到很低，
+ * 但 ADX 是滞后指标，所以只当过滤器用，不用它择时。
+ */
+export function adx(bars, period = 14) {
+  const n = bars.length;
+  const out = new Array(n).fill(null);
+  if (n <= period + 1) return { adx: out, plus: new Array(n).fill(null), minus: new Array(n).fill(null) };
+  const pdm = new Array(n).fill(0), mdm = new Array(n).fill(0), trs = new Array(n).fill(0);
+  for (let i = 1; i < n; i++) {
+    const up = bars[i].high - bars[i - 1].high;
+    const dn = bars[i - 1].low - bars[i].low;
+    pdm[i] = up > dn && up > 0 ? up : 0;
+    mdm[i] = dn > up && dn > 0 ? dn : 0;
+    trs[i] = Math.max(bars[i].high - bars[i].low, Math.abs(bars[i].high - bars[i - 1].close), Math.abs(bars[i].low - bars[i - 1].close));
+  }
+  // Wilder 平滑：第一期为求和，其后 new = prev - prev/N + cur
+  let tr = 0, pd = 0, md = 0;
+  for (let i = 1; i <= period; i++) { tr += trs[i]; pd += pdm[i]; md += mdm[i]; }
+  const plus = new Array(n).fill(null), minus = new Array(n).fill(null), dx = new Array(n).fill(null);
+  const smooth = (i) => {
+    tr = tr - tr / period + trs[i];
+    pd = pd - pd / period + pdm[i];
+    md = md - md / period + mdm[i];
+    if (!(tr > 0)) return;
+    plus[i] = 100 * pd / tr;
+    minus[i] = 100 * md / tr;
+    const sum = plus[i] + minus[i];
+    dx[i] = sum > 0 ? 100 * Math.abs(plus[i] - minus[i]) / sum : 0;
+  };
+  for (let i = period + 1; i < n; i++) smooth(i);
+  // ADX = DX 的 Wilder 平滑
+  let acc = 0, cnt = 0;
+  for (let i = 0; i < n; i++) {
+    if (dx[i] === null) continue;
+    if (cnt < period) { acc += dx[i]; cnt++; if (cnt === period) out[i] = acc / period; continue; }
+    acc = out[i - 1] * (period - 1) + dx[i];
+    out[i] = acc / period;
+  }
+  return { adx: out, plus, minus };
+}
+
+/** 序列是否在上行：与 period 根前比。斜率判定比"逐根都在涨"宽容，趋势本来就是有回调的。 */
+export function rising(values, period = 21) {
+  return values.map((v, i) => (v === null || i < period || values[i - period] === null || !Number.isFinite(values[i - period])
+    ? null : v > values[i - period]));
+}
+
+/**
+ * 日线聚合成周线（ISO 周，周一为一周起点）。
+ * 多周期共振只能用**已收完的周**：本根日线所在的那一周还没走完，拿它的收盘价决策就是未来函数。
+ * 返回 { weekly, weekIdx, firstDailyOfWeek }：weekIdx[i] = 第 i 根日线属于第几个周。
+ */
+export function toWeekly(bars) {
+  const weekly = [], weekIdx = new Array(bars.length).fill(null);
+  const keyOf = (d) => {
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(d));
+    if (!m) return null;
+    const t = Date.UTC(+m[1], +m[2] - 1, +m[3]);
+    const dow = (new Date(t).getUTCDay() + 6) % 7;
+    return new Date(t - dow * 86400000).toISOString().slice(0, 10);
+  };
+  let cur = null, curKey = null;
+  for (let i = 0; i < bars.length; i++) {
+    const b = bars[i], k = keyOf(b.date);
+    if (k === null) continue;
+    if (k !== curKey) {
+      if (cur) weekly.push(cur);
+      curKey = k;
+      cur = { date: k, open: b.open, high: b.high, low: b.low, close: b.close, volume: b.volume || 0, startDaily: i, endDaily: i };
+    } else {
+      cur.high = Math.max(cur.high, b.high);
+      cur.low = Math.min(cur.low, b.low);
+      cur.close = b.close;
+      cur.volume += b.volume || 0;
+      cur.endDaily = i;
+    }
+    weekIdx[i] = weekly.length;            // 它自己那一周还没进 weekly，所以 index = 现有长度
+  }
+  if (cur) weekly.push(cur);
+  return { weekly, weekIdx };
+}
+
+/** 距 N 根内高点/低点的百分比位置（Minervini 的"接近新高 / 远离低点"两条）。 */
+export function priorRange(bars, period) {
+  const hi = new Array(bars.length).fill(null), lo = new Array(bars.length).fill(null);
+  for (let i = period - 1; i < bars.length; i++) {
+    let h = -Infinity, l = Infinity;
+    for (let j = i - period + 1; j <= i; j++) { h = Math.max(h, bars[j].high); l = Math.min(l, bars[j].low); }
+    hi[i] = h; lo[i] = l;
+  }
+  return { hi, lo };
+}
