@@ -1193,6 +1193,62 @@
         </div>
       </div>
 
+      <!-- 条件单（M4）。触发判定走 src/core/orders.js，和自动回测是同一个函数：
+           两边各写一套的话，人工按键和策略信号会在同一根 bar 上给出不同出场点。 -->
+      <div class="panel-section">
+        <div class="section-title">
+          <span>条件单 / 移动止损</span>
+          <span id="condBadge" class="badge" style="background:#374151; color:#9ca3af;">未挂单</span>
+        </div>
+        <div class="form-grid">
+          <div class="form-group">
+            <span class="form-label">止损 %</span>
+            <input type="number" id="condStopPct" class="form-input" step="0.1" min="0" placeholder="如 2" />
+          </div>
+          <div class="form-group">
+            <span class="form-label">止盈 %</span>
+            <input type="number" id="condTargetPct" class="form-input" step="0.1" min="0" placeholder="如 5" />
+          </div>
+        </div>
+        <div class="form-grid">
+          <div class="form-group">
+            <span class="form-label">盈亏比 rr</span>
+            <input type="number" id="condRr" class="form-input" step="0.1" min="0" placeholder="留空用止盈%" title="给了 rr 就按「风险额 × rr」推止盈，这是交易者真正想要的挂法" />
+          </div>
+          <div class="form-group">
+            <span class="form-label">移动止损 %</span>
+            <input type="number" id="condTrailPct" class="form-input" step="0.1" min="0" placeholder="从极值回撤" />
+          </div>
+        </div>
+        <div class="form-grid">
+          <div class="form-group">
+            <span class="form-label">止损价(优先)</span>
+            <input type="number" id="condStopPrice" class="form-input" step="0.01" placeholder="结构位" />
+          </div>
+          <div class="form-group">
+            <span class="form-label">止盈价</span>
+            <input type="number" id="condTargetPrice" class="form-input" step="0.01" placeholder="可留空" />
+          </div>
+        </div>
+        <div class="form-grid">
+          <div class="form-group">
+            <span class="form-label">部分平仓/加仓(手)</span>
+            <input type="number" id="condQty" class="form-input" value="1" min="1" />
+          </div>
+          <div class="form-group">
+            <span class="form-label">分批止盈比例</span>
+            <input type="number" id="condScalePct" class="form-input" step="10" min="0" max="100" placeholder="留空=全平" />
+          </div>
+        </div>
+        <div class="trade-actions">
+          <button class="btn btn-sm" id="btnAttachCond" title="给当前持仓挂止损/止盈/移动止损（OCO 括号单）">📌 挂括号单</button>
+          <button class="btn btn-sm" id="btnClearCond" title="撤掉当前持仓的全部条件单">✖ 撤条件单</button>
+          <button class="btn btn-sm" id="btnPartialClose" title="只平一部分，剩下的继续由条件单看管">➖ 部分平仓</button>
+          <button class="btn btn-sm" id="btnAddPosition" title="金字塔加仓，均价按手数加权上移">➕ 加仓</button>
+        </div>
+        <div id="condOrderList" style="font-size:11px; color:var(--text-muted); margin-top:6px; line-height:1.7;"></div>
+      </div>
+
       <!-- Current Position Status -->
       <div class="panel-section">
         <div class="section-title">
@@ -1631,6 +1687,8 @@
     import { parseSymbol, classifyAShare, MARKETS } from './src/markets/symbolMeta.js';
     import { getFuturesSpec } from './src/markets/contractSpecs.js';
     import { OverlayManager } from './src/ui/overlays.js';
+    // 条件单的判定内核：手动复盘与自动回测共用同一份，避免两套触发规则
+    import { ORDER_KIND, ratchetStop, makeBracket, evalExitOrders, evalAddOrders } from './src/core/orders.js';
     import { BacktestPanel } from './src/ui/backtestPanel.js';
     import { WatchlistPanel } from './src/ui/watchlistPanel.js';
 
@@ -1712,7 +1770,10 @@
           entryPrice: price,
           entryTime: time,
           entryIndex: barIndex,
-          margin: marginNeeded
+          margin: marginNeeded,
+          orders: [],
+          peak: price,
+          trough: price
         };
 
         const marker = {
@@ -1754,7 +1815,10 @@
           entryPrice: price,
           entryTime: time,
           entryIndex: barIndex,
-          margin: marginNeeded
+          margin: marginNeeded,
+          orders: [],
+          peak: price,
+          trough: price
         };
 
         const marker = {
@@ -1807,6 +1871,8 @@
           fee: totalFee,
           netPnL: netPnL,
           holdingBars,
+          exitReason: 'manual',
+          exitTag: '手动平仓',
           equityAfter: currentEquity,
           positionRate: (pos.margin / currentEquity) * 100
         };
@@ -1834,10 +1900,171 @@
         return { success: true, trade: tradeRecord };
       }
 
+      /**
+       * 挂条件单（M4）。所有触发判定都走 src/core/orders.js —— 与自动回测调的是同一个函数。
+       * 两边各写一套的话，同一段行情下人工按键和策略信号会给出不同出场点，
+       * 而这个差异不会报错，只会让人以为自己练出来的手感"就是"策略的行为。
+       */
+      attachConditional(cfg = {}) {
+        if (!this.position) return { success: false, message: '当前无持仓，无法挂条件单' };
+        const pos = this.position;
+        const dir = pos.direction === 'long' ? 1 : -1;
+        const bracket = makeBracket({
+          entryPrice: pos.entryPrice, dir,
+          stopPrice: cfg.stopPrice, stopPct: cfg.stopPct,
+          targetPrice: cfg.targetPrice, targetPct: cfg.targetPct, rr: cfg.rr,
+          trailPct: cfg.trailPct
+        });
+        if (!bracket.ok) return { success: false, message: bracket.reason };
+
+        const prevState = this.captureState();
+        // 同 kinds 覆盖而不是追加：券商里「改止损」就是替换，追加会叠出两张止损单，
+        // 而两张都成立时先成交哪张取决于数组顺序 —— 复盘的人完全看不出来。
+        const incoming = bracket.orders.map(o => ({ ...o, qtyLots: o.qty ?? pos.lots }));
+        const kinds = new Set(incoming.map(o => o.kind));
+        const kept = (pos.orders || []).filter(o => !kinds.has(o.kind) || o.qtyLots === 0);
+        pos.orders = kept.concat(incoming);
+        if (bracket.trail) pos.trailCfg = bracket.trail;
+        const stopOrder = pos.orders.find(o => o.kind === ORDER_KIND.STOP);
+        if (stopOrder) pos.stop = ratchetStop(pos.stop ?? null, stopOrder.price, dir);
+        pos.peak = pos.direction === 'long' ? pos.entryPrice : -Infinity;
+        pos.trough = pos.direction === 'long' ? Infinity : pos.entryPrice;
+        this.actionHistory.push({ action: 'order', prevState });
+        const labels = pos.orders.map(o => `${o.label} ${o.price}`).join(' / ');
+        return { success: true, message: `已挂条件单：${labels}`, orders: pos.orders, risk: bracket.risk };
+      }
+
+      clearConditional() {
+        if (!this.position) return { success: false, message: '当前无持仓' };
+        const prevState = this.captureState();
+        this.position.orders = [];
+        this.position.trailCfg = null;
+        this.actionHistory.push({ action: 'clearOrder', prevState });
+        return { success: true, message: '已撤掉全部条件单' };
+      }
+
+      /**
+       * 每揭示一根新 bar 调一次：先把移动止损收紧，再判是否触发。
+       * 移动止损用「截至上一根」的极值 —— 拿本根最高价抬止损、又在同一根判触发，
+       * 等于假设你永远在最有利的那一下按了按钮。
+       */
+      evaluateConditional(bar, barIndex) {
+        const pos = this.position;
+        if (!pos || barIndex <= pos.entryIndex || !bar) return [];
+        const dir = pos.direction === 'long' ? 1 : -1;
+        // 收紧只用「截至上一根」的极值：先判触发，再把本根极值并进 peak ——
+        // 顺序反了就等于假设你在本根最高点的那一刻手动把止损抬上去，同一根里又用它判出场。
+        if (pos.trailCfg && Number(pos.trailCfg.pct) > 0) {
+          const base = pos.direction === 'long' ? pos.peak : pos.trough;
+          if (Number.isFinite(base)) {
+            const cand = pos.direction === 'long'
+              ? base * (1 - Number(pos.trailCfg.pct)) : base * (1 + Number(pos.trailCfg.pct));
+            pos.stop = ratchetStop(pos.stop ?? null, cand, dir);
+            const so = (pos.orders || []).find(o => o.kind === ORDER_KIND.STOP);
+            if (so) so.price = pos.stop;
+            else pos.orders = (pos.orders || []).concat([{ kind: ORDER_KIND.STOP, price: pos.stop, qtyLots: pos.lots, label: '移动止损' }]);
+          }
+        }
+        const { hits, anyHit } = evalExitOrders(pos.orders || [], bar, dir);
+        const closed = [];
+        if (anyHit) {
+          for (const h of hits) {
+            if (!this.position || !this.position.lots) break;
+            const lots = Math.min(this.position.lots, h.order.qtyLots ?? this.position.lots);
+            const res = this._closeLots(h.price, bar.date, barIndex, lots, h.gap ? `gap_${h.kind}` : h.kind, h.order.label);
+            h.order.qtyLots = 0;                 // 一次性委托，成交过就不再挂
+            closed.push(res.trade);
+          }
+        }
+        if (this.position) {
+          const p = this.position;
+          p.orders = (p.orders || []).filter(o => (o.qtyLots ?? 0) > 0);
+          if (p.direction === 'long') p.peak = Math.max(p.peak ?? bar.high, bar.high);
+          else p.trough = Math.min(p.trough ?? bar.low, bar.low);
+        }
+        return closed;
+      }
+
+      /** 部分平仓：按比例释放保证金，均价不变，剩下的继续跑条件单。 */
+      _closeLots(price, time, barIndex, lots, reason, tag = '') {
+        const pos = this.position;
+        const closing = Math.max(1, Math.min(pos.lots, Math.round(lots)));
+        const prevState = this.captureState();
+        const frac = closing / pos.lots;
+        const pointDiff = pos.direction === 'long' ? (price - pos.entryPrice) : (pos.entryPrice - price);
+        const grossPnL = pointDiff * this.multiplier * closing;
+        const fee = this.commission * closing * 2;          // 开仓费已在建仓时扣过现金，这里只为展示口径配平
+        const netPnL = grossPnL - this.commission * closing;
+        const marginReleased = pos.margin * frac;
+        this.cash += marginReleased + netPnL;
+        pos.lots -= closing;
+        pos.margin = Math.round(pos.margin - marginReleased);
+        const holdingBars = Math.max(1, barIndex - pos.entryIndex);
+        const tradeRecord = {
+          id: this.tradesHistory.length + 1, symbol: pos.symbol, direction: pos.direction,
+          entryIndex: pos.entryIndex, exitIndex: barIndex, entryTime: pos.entryTime, exitTime: time,
+          entryPrice: pos.entryPrice, exitPrice: price, lots: closing,
+          points: pointDiff, pct: (pointDiff / pos.entryPrice) * 100,
+          grossPnL, fee, netPnL, holdingBars,
+          exitReason: reason || 'manual', exitTag: tag,
+          partial: closing < (pos.lots + closing),
+          equityAfter: this.cash, positionRate: (pos.margin / this.cash) * 100
+        };
+        this.tradesHistory.push(tradeRecord);
+        this.equitySnapshots.push({ tradeNum: this.tradesHistory.length, equity: this.cash, positionRate: 0 });
+        this.tradeMarkers.push({
+          barIndex, time, price, type: 'close',
+          direction: pos.direction === 'long' ? 'sell_close' : 'buy_close',
+          lots: closing, text: `${tag || '平仓'} ${closing}手 @ ${price} (${netPnL >= 0 ? '+' : ''}${netPnL.toFixed(0)})`
+        });
+        const emptied = pos.lots <= 0;
+        if (emptied) this.position = null;
+        this.actionHistory.push({ action: 'close', prevState });
+        return { success: true, trade: tradeRecord, emptied };
+      }
+
+      partialClose(lots, price, time, barIndex) {
+        if (!this.position) throw new Error('当前无持仓，无法部分平仓');
+        const n = Math.max(1, Math.round(Number(lots) || 1));
+        if (n >= this.position.lots) return this.closePosition(price, time, barIndex);
+        return this._closeLots(price, time, barIndex, n, 'manual_partial', '减仓');
+      }
+
+      /**
+       * 金字塔加仓：均价按手数加权，越加越贵，所以规模必须递减 ——
+       * 等额加仓会把均价推到接近现价，一个正常回调就把整段浮盈打成亏损。
+       */
+      addToPosition(symbol, price, lots, time, barIndex) {
+        const pos = this.position;
+        if (!pos) return { success: false, message: '当前无持仓，先开仓再加仓' };
+        if (pos.symbol !== symbol && symbol) return { success: false, message: '持仓品种不同，不能加仓' };
+        const add = Math.max(1, Math.round(Number(lots) || 1));
+        const marginNeeded = price * this.multiplier * add * this.marginRatio;
+        const fee = this.commission * add;
+        if (this.cash < marginNeeded + fee) {
+          return { success: false, message: `可用资金不足，加仓需 ${marginNeeded.toFixed(2)} + ${fee.toFixed(2)}` };
+        }
+        const prevState = this.captureState();
+        const total = pos.lots + add;
+        pos.entryPrice = Math.round(((pos.entryPrice * pos.lots + price * add) / total) * 1e6) / 1e6;
+        pos.lots = total;
+        pos.margin += marginNeeded;
+        this.cash -= (marginNeeded + fee);
+        pos.orders = (pos.orders || []).map(o => ({ ...o, qtyLots: total }));
+        this.tradeMarkers.push({
+          barIndex, time, price, type: pos.direction === 'long' ? 'buy_long' : 'sell_short',
+          direction: pos.direction, lots: add, text: `加仓 ${add}手 @ ${price}（均价 ${pos.entryPrice.toFixed(2)}）`
+        });
+        this.actionHistory.push({ action: 'add', prevState });
+        return { success: true, message: `加仓 ${add} 手 @ ${price}，均价 ${pos.entryPrice.toFixed(2)}`, avgPrice: pos.entryPrice };
+      }
+
       captureState() {
         return {
           cash: this.cash,
-          position: this.position ? { ...this.position } : null,
+          // 条件单挂的是数组，浅拷贝会让撤销恢复到「已经被成交消耗掉」的那份状态 ——
+          // 挂单后撤销一次，止损单就凭空消失了。这里必须深拷贝。
+          position: this.position ? JSON.parse(JSON.stringify(this.position)) : null,
           tradesHistory: JSON.parse(JSON.stringify(this.tradesHistory)),
           tradeMarkers: JSON.parse(JSON.stringify(this.tradeMarkers)),
           equitySnapshots: JSON.parse(JSON.stringify(this.equitySnapshots))
@@ -3784,6 +4011,17 @@
         document.getElementById('btnSellShort').addEventListener('click', () => this.handleTrade('short'));
         document.getElementById('btnClosePosition').addEventListener('click', () => this.handleClose());
 
+        // 条件单（M4）
+        document.getElementById('btnAttachCond').addEventListener('click', () => this.handleAttachConditional());
+        document.getElementById('btnClearCond').addEventListener('click', () => {
+          const r = this.tradingEngine.clearConditional();
+          this.showToast(r.message);
+          this.syncUI();
+          this.chartModule.requestRender();
+        });
+        document.getElementById('btnPartialClose').addEventListener('click', () => this.handlePartialClose());
+        document.getElementById('btnAddPosition').addEventListener('click', () => this.handleAddPosition());
+
         // 侧边栏按钮 (单次撤销、账户分析、全部清空)
         document.getElementById('btnUndoTrade').addEventListener('click', () => {
           if (this.tradingEngine.undo()) {
@@ -3896,6 +4134,12 @@
       stepForward() {
         const bar = this.chartModule.stepForward();
         if (bar) {
+          // 条件单在每揭示一根 bar 时结算一次 —— 手动复盘里它是"自动帮你盯盘"的那一半
+          const idx = this.chartModule.getCurrentIndex();
+          const closed = this.tradingEngine.evaluateConditional(bar, idx);
+          for (const t of closed) {
+            this.showToast(`⚡ 条件单触发：${t.exitTag || t.exitReason} ${t.lots} 手 @ ${t.exitPrice}（${t.netPnL >= 0 ? '+' : ''}${t.netPnL.toFixed(0)}）`);
+          }
           this.syncUI();
         } else {
           this.stopAutoPlay();
@@ -3969,6 +4213,69 @@
         }
       }
 
+      /** 挂括号单：数值全交给 makeBracket 归一，界面不做任何价格推算 ——
+       *  两处各算一遍迟早给出两个止损位，而复盘的人看不出来哪个是真的。 */
+      handleAttachConditional() {
+        const pos = this.tradingEngine.position;
+        if (!pos) { this.showToast('当前无持仓，先开仓再挂条件单'); return; }
+        const num = (id) => {
+          const el = document.getElementById(id);
+          const v = el && el.value !== '' ? Number(el.value) : null;
+          return Number.isFinite(v) ? v : null;
+        };
+        const scalePct = num('condScalePct');
+        const cfg = {
+          stopPrice: num('condStopPrice'), stopPct: num('condStopPct') != null ? num('condStopPct') / 100 : null,
+          targetPrice: num('condTargetPrice'), targetPct: num('condTargetPct') != null ? num('condTargetPct') / 100 : null,
+          rr: num('condRr'), trailPct: num('condTrailPct') != null ? num('condTrailPct') / 100 : null
+        };
+        const r = this.tradingEngine.attachConditional(cfg);
+        if (!r.success) { this.showToast(`❌ ${r.message}`); return; }
+        // 分批止盈：目标单只平这一部分，剩下的带着止损继续跑
+        if (scalePct != null && scalePct > 0 && scalePct < 100) {
+          const tgt = (r.orders || []).find(o => o.kind === ORDER_KIND.TARGET);
+          if (tgt) {
+            tgt.qtyLots = Math.max(1, Math.floor(pos.lots * scalePct / 100));
+            this.showToast(`已挂：止损/止盈（止盈只平 ${tgt.qtyLots}/${pos.lots} 手）`);
+          } else {
+            this.showToast(r.message);
+          }
+        } else {
+          this.showToast(r.message);
+        }
+        this.syncUI();
+        this.chartModule.requestRender();
+      }
+
+      handlePartialClose() {
+        const bar = this.chartModule.getCurrentBar();
+        const pos = this.tradingEngine.position;
+        if (!bar || !pos) { this.showToast('当前无持仓'); return; }
+        const lotsEl = document.getElementById('condQty');
+        const lots = Math.max(1, Number(lotsEl && lotsEl.value) || 1);
+        try {
+          const res = this.tradingEngine.partialClose(lots, bar.close, bar.date, this.chartModule.getCurrentIndex());
+          if (res.emptied === false) this.showToast(`➖ 已减 ${lots} 手，剩 ${pos.lots} 手继续由条件单看管`);
+          else this.showToast(`➖ 已减 ${lots} 手，净盈亏 ${(res.trade && res.trade.netPnL.toFixed(1))} 元`);
+          this.chartModule.requestRender();
+          this.syncUI();
+          this.renderEquityCurve();
+        } catch (err) {
+          this.showToast(`❌ 减仓失败: ${err.message}`);
+        }
+      }
+
+      handleAddPosition() {
+        const bar = this.chartModule.getCurrentBar();
+        const pos = this.tradingEngine.position;
+        if (!bar || !pos) { this.showToast('当前无持仓，先开仓才能加仓'); return; }
+        const lotsEl = document.getElementById('condQty');
+        const lots = Math.max(1, Number(lotsEl && lotsEl.value) || 1);
+        const r = this.tradingEngine.addToPosition(pos.symbol, bar.close, lots, bar.date, this.chartModule.getCurrentIndex());
+        this.showToast(r.success ? `➕ ${r.message}` : `❌ ${r.message}`);
+        if (r.success) { this.chartModule.requestRender(); this.syncUI(); }
+      }
+
       handleClose() {
         const bar = this.chartModule.getCurrentBar();
         if (!bar) return;
@@ -3986,9 +4293,28 @@
         }
       }
 
+      /** 把已挂的条件单显示出来。挂单看不见就等于没挂 —— 复盘的人会以为自己在按纪律出场。 */
+      renderConditionalStatus() {
+        const badge = document.getElementById('condBadge');
+        const list = document.getElementById('condOrderList');
+        if (!badge || !list) return;
+        const pos = this.tradingEngine.position;
+        const orders = (pos && pos.orders) || [];
+        if (!pos) { badge.textContent = '无持仓'; badge.style.cssText = 'background:#374151; color:#9ca3af;'; list.innerHTML = ''; return; }
+        if (!orders.length) { badge.textContent = '未挂单'; badge.style.cssText = 'background:#374151; color:#9ca3af;'; list.innerHTML = '<div>未挂条件单。持仓裸奔时，出场全靠你自己按。</div>'; return; }
+        badge.textContent = `${orders.length} 张在途`;
+        badge.style.cssText = 'background:rgba(41,98,255,.2); color:#93c5fd;';
+        const dir = pos.direction === 'long' ? 1 : -1;
+        list.innerHTML = orders.map(o => {
+          const dist = ((o.price - pos.entryPrice) / pos.entryPrice * 100 * dir).toFixed(2);
+          return `<div>· <b>${o.label}</b> ${o.price}${o.qtyLots && o.qtyLots < pos.lots ? `（平 ${o.qtyLots}/${pos.lots} 手）` : ''} <span style="color:var(--text-muted);">距均价 ${dist}%</span></div>`;
+        }).join('') + (pos.trailCfg ? `<div style="color:var(--accent-cyan);">· 移动止损 ${((pos.trailCfg.pct || 0) * 100).toFixed(1)}% → 当前 ${pos.stop ?? '—'}</div>` : '');
+      }
+
       syncUI() {
         const bar = this.chartModule.getCurrentBar();
         const currentPrice = bar ? bar.close : 4200;
+        this.renderConditionalStatus();
 
         if (bar) {
           document.getElementById('quotePrice').textContent = bar.close;
