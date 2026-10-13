@@ -1,0 +1,10 @@
+{
+  "name": "trend-replay-backtest",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "趋势交易回测系统 —— 纯前端 + 薄本地 Python 服务器。type:module 仅为让 node 能直接跑 src/ 下的 ES module 单测。",
+  "scripts": {
+    "test": "node tests/run.js"
+  }
+}
