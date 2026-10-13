@@ -306,6 +306,20 @@ export const BarStore = {
         req.onerror = () => resolve([]);
       });
     } catch (e) { return []; }
+  },
+
+  /** 删除一条日志：只能写不能删的"笔记"会让人不敢下笔。 */
+  async deleteJournal(id) {
+    try {
+      const db = await openDB();
+      if (!db) return false;
+      return await new Promise((resolve) => {
+        const tx = db.transaction(STORE_JOURNALS, 'readwrite');
+        tx.objectStore(STORE_JOURNALS).delete(id);
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => resolve(false);
+      });
+    } catch (e) { return false; }
   }
 };
 

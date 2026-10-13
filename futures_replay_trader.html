@@ -1032,6 +1032,14 @@
         <option value="100">极速(0.1s)</option>
       </select>
       <button class="btn btn-sm" id="btnShowAllBars" title="显示全部K线">⏩ 全部显示</button>
+      <!-- 盲复盘：抽一段行情、遮住品种与日期，只留价格行为 -->
+      <span id="blindCtl" style="display:flex;align-items:center;gap:5px;">
+        <label style="font-size:11px;color:var(--text-muted);">长度</label>
+        <input type="number" id="blindLen" value="120" min="40" max="400" step="10" style="background:var(--bg-tertiary);color:#fff;border:1px solid var(--border-color);padding:2px 4px;border-radius:3px;font-size:11px;width:56px;" />
+        <button class="btn btn-sm" id="btnBlindStart" title="从自选池随机抽一个品种的一段行情，遮住名称与日期">🎲 盲复盘</button>
+      </span>
+      <span id="blindBadge" style="display:none;font-size:11px;color:#93c5fd;background:rgba(41,98,255,.18);border:1px solid var(--accent-blue);border-radius:4px;padding:2px 8px;"></span>
+      <button class="btn btn-sm" id="btnBlindExit" style="display:none;" title="退回盲复盘，恢复原来的品种与进度">⏏ 退出盲复盘</button>
     </div>
 
     <!-- Right Quick Actions -->
@@ -1318,6 +1326,7 @@
         <button class="tab-btn" data-tab="tabBacktest">🤖 策略自动回测</button>
         <button class="tab-btn" data-tab="tabWatchlist">⭐ 自选池与识图导入</button>
         <button class="tab-btn" data-tab="tabResearch">🔬 寻优·组合·报表</button>
+        <button class="tab-btn" data-tab="tabJournal">📔 交易日志与复盘</button>
         <button class="tab-btn" data-tab="tabUpload">🌐 行情与缓存中心 (真实在线 / IndexedDB / CSV)</button>
         <button class="tab-btn" data-tab="tabHelp">⌨️ 快捷键与使用指南</button>
       </div>
@@ -1416,6 +1425,11 @@
     <!-- Tab: 研究（M5 寻优 / Walk-Forward / 组合 / 报表） -->
     <div id="tabResearch" class="tab-content">
       <div id="researchPanelRoot"></div>
+    </div>
+
+    <!-- Tab: 交易日志与复盘（M6） -->
+    <div id="tabJournal" class="tab-content">
+      <div id="journalPanelRoot"></div>
     </div>
 
     <!-- Tab 3: Online Real Data & Local Cache Center -->
@@ -1698,6 +1712,8 @@
     import { BacktestPanel } from './src/ui/backtestPanel.js';
     import { WatchlistPanel } from './src/ui/watchlistPanel.js';
     import { ResearchPanel } from './src/ui/researchPanel.js';
+    import { JournalPanel } from './src/ui/journalPanel.js';
+    import { pickBlindSegment, blindBadge, makeRng } from './src/replay/blind.js';
 
     // 兼容旧调用点：内联 UI 代码里仍在用 MarketDataCache.xxx()，这里做一层薄转发，
     // 让 M1 不动 3000 行 UI 代码就能接上 v2 schema。M2 起再逐步改成直接调 BarStore。
@@ -3526,7 +3542,9 @@
         for (let i = start; i <= end; i++) {
           if (i % stepBars === 0 && this.data[i]) {
             const x = this.barIndexToX(i);
-            ctx.fillText(this.data[i].date.slice(5), x, totalChartHeight + 6);
+            // 盲复盘时日期刻度必须换成 bar 序号：X 轴上留着 "03-15" 就足够让人认出是哪一波行情，
+            // 遮住了侧栏品种名却放任时间轴照抄，等于没遮。
+            ctx.fillText(this.blindMode ? `#${i + 1}` : this.data[i].date.slice(5), x, totalChartHeight + 6);
           }
         }
         ctx.restore();
@@ -3567,8 +3585,9 @@
           ctx.fillStyle = '#ffffff';
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
-          ctx.fillText(bar.date, x, totalChartHeight + 11);
-          this.updateLegend(bar);
+          // 十字光标的日期标签同样要遮：X 轴刻度遮了、这里漏出一个 2020-01-23，照样能认出是哪段行情
+          ctx.fillText(this.blindMode ? `#${barIdx + 1}` : bar.date, x, totalChartHeight + 11);
+          this.updateLegend(bar, barIdx);
         }
 
         if (this.drawingModule.magnetEnabled) {
@@ -3585,8 +3604,12 @@
         ctx.restore();
       }
 
-      updateLegend(bar) {
-        document.getElementById('legendTime').textContent = bar.date;
+      updateLegend(bar, idx) {
+        // 盲复盘：legend 的日期换成相对根号，价格照给 —— 训练要看的就是价格行为，
+        // 但年份一露出来，复盘的人就会开始回忆"这是不是那波疫情行情"。
+        document.getElementById('legendTime').textContent = this.chartModule.blindMode
+          ? `第 ${(idx === undefined ? this.chartModule.visibleDataCount - 1 : idx) + 1} 根（盲复盘）`
+          : bar.date;
         document.getElementById('legendOpen').textContent = bar.open;
         document.getElementById('legendHigh').textContent = bar.high;
         document.getElementById('legendLow').textContent = bar.low;
@@ -3628,6 +3651,13 @@
           loadBarsFor: (it) => this.loadBarsForSymbol(it),
           runBacktestWith: (strategyId, params) => this.applyResearchParams(strategyId, params)
         });
+        // 交易日志：手动复盘与自动回测的成交都能标注
+        this.journalPanel = new JournalPanel('journalPanelRoot', {
+          toast: (msg) => this.showToast(msg),
+          trades: () => this.allClosedTrades(),
+          snapshotCanvas: () => document.getElementById('chartCanvas')
+        });
+        this.blind = null;         // 盲复盘会话状态
 
         this.autoPlayTimer = null;
         this.currentSymbol = 'eg9999';
@@ -3686,6 +3716,97 @@
         document.querySelector('.tab-btn[data-tab="tabBacktest"]').click();
         this.backtestPanel.run();
         this.showToast(`已把 ${set} 个参数交给回测面板复现`);
+      }
+
+      /**
+       * 汇总所有已平仓交易给日志用：手动复盘 + 自动回测各一套。
+       * id 必须加来源前缀 —— 两套引擎各自从 1 编号，直接拼会让手动第 3 笔和回测第 3 笔
+       * 共用同一条笔记，改一笔另一笔的笔记就被覆盖。
+       */
+      allClosedTrades() {
+        const manual = (this.tradingEngine.tradesHistory || []).map(t => ({ ...t, id: 'm' + t.id, source: '手动复盘' }));
+        const bt = (this.backtestPanel?.lastResult?.trades || []).map(t => ({
+          ...t, id: 'b' + t.id, source: '自动回测', symbol: t.symbol || this.currentSymbol
+        }));
+        return manual.concat(bt);
+      }
+
+      /** 抽一道盲复盘题：从自选池挑品种、截一段、遮身份。 */
+      async startBlind() {
+        const items = this.watchlistPanel?.group?.items || [];
+        if (!items.length) { this.showToast('自选池是空的 —— 盲复盘的抽取池就是自选池，先加几个品种'); return; }
+        const len = Math.max(40, Math.min(400, Number(document.getElementById('blindLen').value) || 120));
+        const pool = [];
+        this.showToast(`正在准备 ${items.length} 个品种的历史数据…`);
+        for (const it of items) {
+          const bars = await this.loadBarsForSymbol(it);
+          if (bars && bars.length >= len + 2) pool.push({ name: `${it.name || ''} ${it.openCode || it.symbol}`.trim(), symbol: it, bars });
+        }
+        if (!pool.length) { this.showToast(`自选池里没有够 ${len} 根历史的品种`); return; }
+        const seed = (Date.now() % 1000000) + 1;
+        const state = pickBlindSegment(pool, { rangeLen: len, seed });
+        if (!state) { this.showToast('抽题失败：可选品种不足'); return; }
+
+        // 先备份现场，退出时原样还回去
+        this.blindBackup = {
+          data: this.chartModule.data, visible: this.chartModule.visibleDataCount,
+          scroll: this.chartModule.scrollOffset, symbol: this.currentSymbol, market: this.currentMarket
+        };
+        this.blind = state;
+        this.chartModule.blindMode = true;
+        this.chartModule.setData(state.bars);
+        // setData 会把游标推到 min(120, n) —— 不压回 1 的话一开局就把整段答案摊在桌上
+        this.chartModule.setVisibleCount(1);
+        this.chartModule.drawingModule.clearAll();
+        this.tradingEngine.reset(parseFloat(document.getElementById('inputInitialCapital').value) || 100000);
+        this.syncUI();
+        this.showToast(`盲复盘开始：${pool.length} 个候选品种，${state.bars.length} 根，推进到末尾才揭示答案`);
+      }
+
+      exitBlind(reveal = false) {
+        if (!this.blind) return;
+        const label = this.blind.label;
+        this.blind = null;
+        this.chartModule.blindMode = false;
+        const bak = this.blindBackup || {};
+        if (bak.data && bak.data.length) {
+          this.chartModule.setData(bak.data);
+          this.chartModule.setVisibleCount(bak.visible || 120);
+          this.chartModule.scrollOffset = bak.scroll || 0;
+          this.currentSymbol = bak.symbol || this.currentSymbol;
+          this.currentMarket = bak.market || this.currentMarket;
+        }
+        this.chartModule.drawingModule.clearAll();
+        this.chartModule.requestRender();
+        this.syncUI();
+        if (reveal) this.showToast(`本题品种是：${label}`);
+      }
+
+      /** 盲复盘的界面遮罩与揭示状态（syncUI 每根都要调）。 */
+      syncBlindUI() {
+        const badge = document.getElementById('blindBadge');
+        const ctl = document.getElementById('blindCtl');
+        const exitBtn = document.getElementById('btnBlindExit');
+        const posBadge = document.getElementById('posSymbolBadge');
+        if (!badge || !ctl || !exitBtn) return;
+        if (!this.blind) {
+          badge.style.display = 'none'; ctl.style.display = 'flex'; exitBtn.style.display = 'none';
+          if (posBadge) posBadge.textContent = this.currentSymbol || '—';
+          return;
+        }
+        const b = blindBadge(this.blind, this.chartModule.visibleDataCount);
+        ctl.style.display = 'none';
+        badge.style.display = 'inline-block';
+        badge.textContent = b.answer ? `揭示：${b.answer}` : `${b.symbolText} · ${b.dateText}`;
+        badge.style.borderColor = b.answer ? 'var(--accent-gold)' : 'var(--accent-blue)';
+        badge.style.color = b.answer ? 'var(--accent-gold)' : '#93c5fd';
+        exitBtn.style.display = 'inline-flex';
+        if (posBadge) posBadge.textContent = b.answer ? b.answer : '🔒 已隐藏';
+        if (b.answer && !this._blindRevealed) {
+          this._blindRevealed = true;
+          this.showToast(`已到区间末尾 —— 本题答案：${b.answer}`);
+        }
+        if (!b.answer) this._blindRevealed = false;
       }
 
       async loadSymbolData(rawCode, forceOnline = false) {
@@ -4062,6 +4183,8 @@
         // 复盘控制
         document.getElementById('btnReplayStep').addEventListener('click', () => this.stepForward());
         document.getElementById('btnReplayReset').addEventListener('click', () => this.resetReplay());
+        document.getElementById('btnBlindStart').addEventListener('click', () => this.startBlind());
+        document.getElementById('btnBlindExit').addEventListener('click', () => this.exitBlind(true));
         document.getElementById('btnReplayAutoPlay').addEventListener('click', () => this.toggleAutoPlay());
         document.getElementById('btnShowAllBars').addEventListener('click', () => {
           this.stopAutoPlay();
@@ -4135,6 +4258,13 @@
 
             if (btn.dataset.tab === 'tabEquity') {
               this.renderEquityCurve();
+            }
+            // 日志要读 IndexedDB，只在切进去的时候刷新，别挂在每次 syncUI 上拖慢复盘
+            if (btn.dataset.tab === 'tabJournal' && this.journalPanel) {
+              this.journalPanel.reload();
+            }
+            if (btn.dataset.tab === 'tabResearch' && this.researchPanel) {
+              this.researchPanel.render();
             }
           });
         });
@@ -4379,6 +4509,7 @@
         const bar = this.chartModule.getCurrentBar();
         const currentPrice = bar ? bar.close : 4200;
         this.renderConditionalStatus();
+        this.syncBlindUI();
 
         if (bar) {
           document.getElementById('quotePrice').textContent = bar.close;
