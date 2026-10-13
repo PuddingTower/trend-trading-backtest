@@ -4,6 +4,10 @@
 
 不接任何实盘/券商接口，不做实时行情推送，不做 tick 级高频回测。
 
+**在线试用**：https://puddingtower.github.io/trend-trading-backtest/ —— GitHub Pages 静态托管，打开就是真实行情，不用装任何东西。
+
+在线版走浏览器直连东财（实测上游回显任意 `Origin`，含 `null`，所以静态托管也能取到数）；本地版 `python start.py` 额外提供 `/api/kline` 代理与 IndexedDB 缓存，上游不可用时可降级。
+
 ---
 
 ## 环境要求
