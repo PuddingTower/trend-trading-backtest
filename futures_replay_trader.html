@@ -963,6 +963,15 @@
       </select>
     </div>
 
+    <div class="toolbar-group">
+      <span class="toolbar-title">叠加</span>
+      <button class="tool-btn" data-overlay="vp" title="Volume Profile：POC / VAH / VAL / HVN·LVN。自动锚定=从最近显著高低点起算">📊 VP 量能剖面</button>
+      <button class="tool-btn" data-overlay="supertrend" title="Supertrend：单向动态支撑/阻力线，变色即趋势翻转">〰 SuperTrend</button>
+      <button class="tool-btn" data-overlay="pivots" title="Pivot Points：上一期高低收算出的关键位（只用已收盘数据，不预测未来）">✛ Pivot 关键位</button>
+      <button class="tool-btn" data-overlay="patterns" title="自动形态：头肩/双顶底/三角/楔形/旗形，标出 突破·目标·止损 三条关键位。启发式，可能误报">◈ 形态识别</button>
+      <button class="tool-btn" data-overlay="zones" title="供需区 + Wyckoff 事件（spring/ut/sos/sow）。已跌破的区自动移除">▧ 供需区</button>
+    </div>
+
     <div class="toolbar-group" style="border-right:none;">
       <button class="tool-btn" id="btnDeleteSelectedLine" title="删除当前选中的线 (Delete)">🗑 删除选中线</button>
       <button class="tool-btn" id="btnClearAllLines" title="清空全部画线">🧹 清空画线</button>
@@ -973,6 +982,11 @@
       <span>|</span>
       <span>滚轮缩放 / 拖拽平移</span>
     </div>
+  </div>
+
+  <!-- 叠加指标参数条：开启任一叠加层时出现（TradingView 式“指标+设置”分离） -->
+  <div id="overlaySettings" class="toolbar" style="display:none; padding:4px 10px; min-height:26px; border-top:none;">
+    <span id="overlaySettingsBody" style="display:flex; flex-wrap:wrap; gap:14px; align-items:center; font-size:11px; color:var(--text-muted);"></span>
   </div>
 
   <!-- Main Split Area -->
@@ -1497,6 +1511,7 @@
     import { parseCSV, barsToCSV, tradesToCSV, downloadText, SAMPLE_CSV } from './src/data/csvIO.js';
     import { parseSymbol, classifyAShare, MARKETS } from './src/markets/symbolMeta.js';
     import { getFuturesSpec } from './src/markets/contractSpecs.js';
+    import { OverlayManager } from './src/ui/overlays.js';
 
     // 兼容旧调用点：内联 UI 代码里仍在用 MarketDataCache.xxx()，这里做一层薄转发，
     // 让 M1 不动 3000 行 UI 代码就能接上 v2 schema。M2 起再逐步改成直接调 BarStore。
@@ -2830,6 +2845,9 @@
         this.drawMovingAverages(start, end);
         this.drawTradeMarkers();
 
+        // 叠加指标（VP / Supertrend / Pivot / 形态 / 供需区）—— 画在 K线之上、用户画线之下
+        if (this.overlayManager) this.overlayManager.render(this);
+
         // 渲染画线、测量尺、多空平仓连线与持仓成本线
         this.drawingModule.render(ctx);
 
@@ -3127,6 +3145,7 @@
         this.tradingEngine = new TradingEngine();
         this.chartModule = new ChartModule('chartContainer', 'chartCanvas');
         this.chartModule.tradingEngine = this.tradingEngine;
+        this.chartModule.overlayManager = new OverlayManager();
 
         this.autoPlayTimer = null;
         this.currentSymbol = 'eg9999';
@@ -3307,6 +3326,61 @@
       }
 
 
+      /** 参数条：只为“已开启”的叠加层生成控件，改一项就重算重绘。 */
+      renderOverlaySettings() {
+        const bar = document.getElementById('overlaySettings');
+        const body = document.getElementById('overlaySettingsBody');
+        if (!bar || !body) return;
+        const om = this.chartModule.overlayManager;
+        const on = Object.entries(om.state).filter(([, s]) => s.on).map(([k]) => k);
+        if (on.length === 0) { bar.style.display = 'none'; body.innerHTML = ''; return; }
+        bar.style.display = 'flex';
+
+        const INP = 'background:var(--bg-tertiary); color:#fff; border:1px solid var(--border-color); padding:1px 4px; border-radius:3px; font-size:11px; width:58px;';
+        const ctl = (key, field, { type = 'number', min, max, step, options } = {}) => {
+          const v = om.state[key][field];
+          const id = `ovs_${key}_${field}`;
+          if (type === 'select') {
+            return `<label>${field}<select id="${id}" style="${INP} width:auto;">` +
+              options.map(o => `<option value="${o}" ${String(o) === String(v) ? 'selected' : ''}>${o}</option>`).join('') +
+              `</select></label>`;
+          }
+          if (type === 'checkbox') {
+            return `<label style="display:flex;align-items:center;gap:3px;"><input type="checkbox" id="${id}" ${v ? 'checked' : ''} style="width:auto;" />${field}</label>`;
+          }
+          return `<label>${field}<input id="${id}" type="number" value="${v}" min="${min ?? 0}" max="${max ?? 1000}" step="${step ?? 1}" style="${INP}" /></label>`;
+        };
+
+        let html = '';
+        if (om.state.vp.on) html += `<span style="color:var(--accent-gold);">VP</span>` +
+          ctl('vp', 'mode', { type: 'select', options: ['auto', 'visible', 'lookback'] }) +
+          ctl('vp', 'bins', { min: 8, max: 200 }) + ctl('vp', 'vaPct', { min: 0.1, max: 0.95, step: 0.05 }) +
+          ctl('vp', 'lookback', { min: 20, max: 2000, step: 10 });
+        if (om.state.supertrend.on) html += `<span style="color:var(--accent-cyan);">ST</span>` +
+          ctl('supertrend', 'period', { min: 5, max: 50 }) + ctl('supertrend', 'multiplier', { min: 1, max: 10, step: 0.5 });
+        if (om.state.pivots.on) html += `<span style="color:var(--accent-blue);">Pivot</span>` +
+          ctl('pivots', 'type', { type: 'select', options: ['standard', 'fibonacci', 'camarilla', 'woodie'] }) +
+          ctl('pivots', 'timeframe', { type: 'select', options: ['daily', 'weekly', 'monthly'] }) +
+          ctl('pivots', 'showHL', { type: 'checkbox' });
+        if (om.state.patterns.on) html += `<span style="color:var(--accent-purple);">形态</span>` +
+          ctl('patterns', 'swingPct', { min: 0.01, max: 0.2, step: 0.005 }) + ctl('patterns', 'max', { min: 1, max: 10 });
+        if (om.state.zones.on) html += `<span style="color:var(--down-color);">供需</span>` +
+          ctl('zones', 'maxZones', { min: 1, max: 20 }) + ctl('zones', 'wyckoff', { type: 'checkbox' });
+        body.innerHTML = html;
+
+        body.querySelectorAll('[id^="ovs_"]').forEach(el => {
+          const [, key, field] = el.id.split('_');
+          const apply = () => {
+            const raw = el.type === 'checkbox' ? el.checked : el.value;
+            const num = Number(raw);
+            om.merge({ [key]: { [field]: (el.type === 'checkbox' || el.tagName === 'SELECT' || !Number.isFinite(num)) ? raw : num } });
+            this.chartModule.requestRender();
+          };
+          el.addEventListener('change', apply);
+          el.addEventListener('input', apply);
+        });
+      }
+
       bindEvents() {
         document.getElementById('symbolSelect').addEventListener('change', (e) => {
           this.loadSymbolData(e.target.value, false);
@@ -3402,6 +3476,19 @@
           pathsBtn.textContent = on ? '📍 交易连线: 开' : '📍 交易连线: 关';
           pathsBtn.classList.toggle('active', on);
           this.showToast(on ? '图表已显示多空平仓连线与盈亏统计' : '图表已隐藏平仓连线');
+        });
+
+        // 叠加指标开关（TradingView 式：开关在工具栏，参数在下方参数条）
+        document.querySelectorAll('button[data-overlay]').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const name = btn.getAttribute('data-overlay');
+            const on = this.chartModule.overlayManager.toggle(name);
+            btn.classList.toggle('active', on);
+            this.renderOverlaySettings();
+            this.chartModule.requestRender();
+            const cn = { vp: 'VP 量能剖面', supertrend: 'SuperTrend', pivots: 'Pivot 关键位', patterns: '形态识别', zones: '供需区' }[name];
+            this.showToast(on ? `已开启 ${cn}（启发式叠加层，仅供复盘参考）` : `已关闭 ${cn}`);
+          });
         });
 
         // 画线属性
