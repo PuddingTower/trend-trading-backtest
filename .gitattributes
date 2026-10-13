@@ -1,0 +1,6 @@
+# Keep LF in repo and working tree (files are LF already; avoids churn on Windows)
+* text eol=lf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
