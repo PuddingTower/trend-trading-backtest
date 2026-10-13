@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # 夹具不入版本库（避免再分发上游行情），所以 CI 里单测会自动 skip
+      # 依赖真实数据的那几条 —— 这是有意的：CI 只保证纯逻辑不回退。
+      - name: Run unit tests
+        run: node tests/run.js
+
+      - name: Verify skip-on-missing-fixtures contract
+        run: |
+          out=$(node tests/run.js 2>&1)
+          echo "$out" | tail -3
+          if echo "$out" | grep -q " 0 failed"; then
+            echo "tests OK"
+          else
+            echo "::error::unit tests failed"; exit 1
+          fi
+
+  # 服务器不依赖任何第三方包，起得来 + 代理有响应就算通过
+  server:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Boot server and probe endpoints
+        run: |
+          python run_local_server.py &
+          sleep 3
+          curl -fsS http://localhost:8080/api/health | head -c 200
+          curl -fsS "http://localhost:8080/api/kline?secid=113.rbm&count=3" -o /tmp/k.json
+          python -c "import json;d=json.load(open('/tmp/k.json'));assert d['ok'] and d['count']>0,d;print('kline proxy OK,',d['count'],'bars')"
+          curl -fsS http://localhost:8080/ -o /dev/null
+          # ES module 必须带正确 MIME，否则浏览器拒绝执行
+          test "$(curl -fsSI http://localhost:8080/src/core/backtestEngine.js | grep -i '^content-type' | tr -d '\r' | grep -c 'text/javascript')" = 1
+          echo "JS MIME OK"

@@ -18,13 +18,22 @@
 
 ---
 
-## 启动
+## 启动（一条命令）
 
 ```bash
-python run_local_server.py
+python start.py
 ```
 
-自动打开浏览器 `http://localhost:8080/futures_replay_trader.html`。
+它会：起本地服务器 → 夹具缺失时自动补抓 → 打开浏览器。
+端口被占会自动往后找一个，并同步告诉抓取脚本用哪个端口
+（之前必须手动开两个终端、还得保证顺序，那不算开箱即用）。
+
+```bash
+python start.py --port 9000        # 换端口
+python start.py --no-fixtures      # 跳过抓夹具（纯手动复盘）
+python start.py --no-browser       # 不开浏览器
+python run_local_server.py         # 只想跑服务器时也可以单独用它
+```
 
 > **必须通过这个服务器访问，不能双击 HTML 打开。**
 > 前端用 ES modules（`<script type="module">`），浏览器在 `file://` 下会以 CORS 为由拒绝加载模块；
@@ -32,16 +41,14 @@ python run_local_server.py
 
 换端口：`TREND_PORT=9000 python run_local_server.py`
 
-### 抓取行情夹具（新机器上必做一次）
+### 行情夹具
 
-真实K线夹具**不入版本库**（避免把上游抓取数据再分发），需要自己生成：
+真实K线夹具**不入版本库**（避免把上游抓取数据再分发）。`python start.py` 会自动抓；
+想手动做也可以，注意抓取脚本走的是本地 `/api/kline` 代理，所以**服务器必须先起**：
 
 ```bash
-# 终端 1：先起服务器
-python run_local_server.py
-
-# 终端 2：再抓数据（脚本走的是本地 /api/kline 代理，所以服务器必须在跑）
-python tools/fetch_fixtures.py
+python run_local_server.py &        # 服务器先跑着
+python tools/fetch_fixtures.py      # 另开终端，或后台执行
 ```
 
 生成 `fixtures/` 下约 17 份 JSON（2015→今，覆盖黑色/化工/农产品/金属/股指/A股/ETF/指数）。
@@ -120,6 +127,13 @@ tests/         零依赖单测骨架 + 用例；migration-probe.html 验证 Inde
 - 保证金强平只做了底线（权益跌破维持线次根开盘平），完整的逐日盯市/预警线还在计划里。
 
 ---
+
+## 持续集成
+
+`.github/workflows/ci.yml` 在每次 push / PR 上跑两件事：
+
+- **test** —— `node tests/run.js`（纯逻辑单测；依赖真实夹具的用例会 skip，这是有意的，CI 不保证数据可得）
+- **server** —— 起服务器探 `/api/health`、`/api/kline`，并断言 `.js` 的 `Content-Type` 是 `text/javascript`（MIME 错了浏览器会直接拒绝加载 ES module，而这在本地很容易看不出来）
 
 ## 许可
 
