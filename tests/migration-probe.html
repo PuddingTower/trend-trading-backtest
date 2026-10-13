@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>M1 v1→v2 缓存迁移探针</title>
+<style>body{font:13px/1.7 monospace;background:#12151c;color:#d1d5db;padding:16px}pre{background:#1a1e29;padding:10px;border-radius:4px;white-space:pre-wrap}
+.ok{color:#10b981}.bad{color:#ef4444}</style></head>
+<body>
+<h3>IndexedDB v1(kline_cache) → v2(bars) 迁移验证</h3>
+<pre id="log">运行中…</pre>
+<script type="module">
+const log = [];
+const say = (m, cls) => { log.push((cls ? `[${cls}] ` : '') + m); document.getElementById('log').textContent = log.join('\n'); };
+const step = new URLSearchParams(location.search).get('stage') || 'seed';
+
+const idb = (req) => new Promise((res, rej) => { req.onsuccess = e => res(e.target.result); req.onerror = e => rej(req.error); req.onblocked = () => say('deleteDatabase blocked（还有连接没关）', 'bad'); });
+
+const LEGACY = [
+  { key: 'CU0_daily', data: Array.from({ length: 6 }, (_, i) => ({ date: `2024-07-${15 + i}`, open: i, high: i + 1, low: i, close: i + 1, volume: i * 10 })),
+    meta: { symbol: 'CU0', period: 'daily', count: 6 }, updateTime: '2024-07-20 15:00:00' },
+  { key: 'M0_60m', data: Array.from({ length: 8 }, (_, i) => ({ date: `2024-07-0${i + 1}`, open: i, high: i + 1, low: i, close: i + 1, volume: i * 10 })),
+    meta: { symbol: 'M0', period: '60m', count: 8 }, updateTime: '2024-07-21 10:00:00' }
+];
+
+if (step === 'seed') {
+  try {
+    await idb(indexedDB.deleteDatabase('FuturesReplayDB'));
+    say('已删除既有库，准备写入 v1 样本');
+    const db = await idb((() => {
+      const r = indexedDB.open('FuturesReplayDB', 1);
+      r.onupgradeneeded = e => { const d = e.target.result; if (!d.objectStoreNames.contains('kline_cache')) d.createObjectStore('kline_cache', { keyPath: 'key' }); };
+      return r;
+    })());
+    await new Promise((res) => {
+      const tx = db.transaction('kline_cache', 'readwrite');
+      LEGACY.forEach(r => tx.objectStore('kline_cache').put(r));
+      tx.oncomplete = res; tx.onerror = () => { say('v1 写入失败', 'bad'); res(); };
+    });
+    db.close();
+    say(`v1 已种 ${LEGACY.length} 条：CU0_daily / M0_60m → 进入 upgrade 阶段`);
+    setTimeout(() => { location.href = '?stage=upgrade'; }, 250);
+  } catch (e) {
+    say('seed 异常：' + e, 'bad');
+  }
+} else {
+  const { BarStore, barKey } = await import('../../src/data/barStore.js');
+  say('以 v2 打开（触发 onupgradeneeded 迁移）…');
+
+  const got = await BarStore.getCache(barKey('futures', 'CU0', 'daily', 'none'));
+  const got60 = await BarStore.getCache(barKey('futures', 'M0', '60m', 'none'));
+  const all = await BarStore.listCaches();
+
+  const check = (name, cond, detail) => say(`${cond ? 'PASS' : 'FAIL'} — ${name}${detail ? ' :: ' + detail : ''}`, cond ? 'ok' : 'bad');
+
+  check('CU0 日线迁移后按新 key 命中', !!got, got ? `${got.key}, ${got.data.length} 根` : 'null');
+  check('M0 60m 迁移后按新 key 命中', !!got60, got60 ? `${got60.key}, ${got60.data.length} 根` : 'null');
+  check('bar 根数与原 v1 一致', !!got && !!got60 && got.data.length === 6 && got60.data.length === 8);
+  check('OHLC 数值未损', !!got && got.data[3].close === 4 && got.data[3].high === 4);
+  check('updateTime 保留', !!got && got.updateTime === '2024-07-20 15:00:00', got && got.updateTime);
+  check('meta.migratedFrom 留痕', !!got && got.meta && got.meta.migratedFrom === 'CU0_daily', got && JSON.stringify(got.meta));
+  check('listCaches 至少含 2 条迁移记录', all.length >= 2, `共 ${all.length} 条`);
+
+  const legacyKept = await new Promise((res) => {
+    const r = indexedDB.open('FuturesReplayDB');
+    r.onsuccess = e => { const db = e.target.result; const has = db.objectStoreNames.contains('kline_cache'); db.close(); res(has); };
+    r.onerror = () => res(null);
+  });
+  check('旧 kline_cache store 保留（不删原始数据，可回滚）', legacyKept === true);
+  say('完成');
+}
+</script>
+</body>
+</html>

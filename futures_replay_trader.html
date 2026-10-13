@@ -858,20 +858,33 @@
   <header class="navbar">
     <div class="nav-left">
       <div class="brand">
-        <span>⚡ FUTURES REPLAY</span>
-        <span class="brand-badge">期货手动复盘</span>
+        <span>⚡ TREND REPLAY</span>
+        <span class="brand-badge">期货 + A股 双市场复盘</span>
       </div>
 
       <div class="contract-selector">
-        <label for="symbolSelect" style="color:var(--text-muted);">合约:</label>
+        <label for="symbolSelect" style="color:var(--text-muted);">品种:</label>
         <select id="symbolSelect">
-          <optgroup label="在线真实期货 (自动缓存)">
-            <option value="EG0" selected>EG0 乙二醇主力 (真实)</option>
-            <option value="RB0">RB0 螺纹钢主力 (真实)</option>
-            <option value="M0">M0 豆粕主力 (真实)</option>
-            <option value="I0">I0 铁矿石主力 (真实)</option>
-            <option value="CU0">CU0 沪铜主力 (真实)</option>
-            <option value="TA0">TA0 PTA主力 (真实)</option>
+          <optgroup label="期货主连 (东财真实行情)">
+            <option value="EG0" selected>EG0 乙二醇主连</option>
+            <option value="RB0">RB0 螺纹钢主连</option>
+            <option value="M0">M0 豆粕主连</option>
+            <option value="I0">I0 铁矿石主连</option>
+            <option value="CU0">CU0 沪铜主连</option>
+            <option value="TA0">TA0 PTA主连</option>
+            <option value="AU0">AU0 沪金主连</option>
+            <option value="SC0">SC0 原油主连</option>
+            <option value="IF0">IF0 沪深300股指主连</option>
+          </optgroup>
+          <optgroup label="A股 / ETF / 指数 (东财真实行情)">
+            <option value="600519">600519 贵州茅台</option>
+            <option value="000001">000001 平安银行</option>
+            <option value="300750">300750 宁德时代</option>
+            <option value="688981">688981 中芯国际</option>
+            <option value="510300">510300 沪深300ETF</option>
+            <option value="159915">159915 创业板ETF</option>
+            <option value="000300">000300 沪深300指数</option>
+            <option value="399001">399001 深证成指</option>
           </optgroup>
           <optgroup label="仿真预置行情">
             <option value="eg9999">eg9999 乙二醇仿真</option>
@@ -881,8 +894,18 @@
         </select>
         <select id="periodSelect" style="background:transparent; border:none; color:#60a5fa; font-size:11px; font-weight:600; outline:none; cursor:pointer;" title="K线周期">
           <option value="daily" selected>日线</option>
+          <option value="weekly">周线</option>
+          <option value="monthly">月线</option>
           <option value="60m">60分钟</option>
         </select>
+        <select id="adjustSelect" style="background:transparent; border:none; color:#60a5fa; font-size:11px; font-weight:600; outline:none; cursor:pointer;" title="价格复权口径（A股）；期货用主连拼接">
+          <option value="qfq" selected>前复权</option>
+          <option value="none">不复权</option>
+          <option value="hfq">后复权</option>
+        </select>
+        <input id="symbolInput" class="form-input" placeholder="代码/名称 如 rb2610、600519" title="也可直接输入代码：期货 rb2610 / RB0 / 螺纹钢主连，A股 600519 / sh000001"
+               style="width:150px; height:22px; padding:0 6px; font-size:11px;" />
+        <button class="btn btn-sm" id="btnLoadCode" style="height:22px; padding:0 6px; font-size:10px;" title="解析输入的任意代码并载入">载入</button>
         <button class="btn btn-sm btn-primary" id="btnSyncOnlineData" style="height:22px; padding:0 6px; font-size:10px;" title="在线拉取真实行情并缓存至本地">🌐 在线同步</button>
       </div>
 
@@ -1217,6 +1240,8 @@
             <input type="text" id="inputCustomSymbol" class="form-input" value="EG0" placeholder="合约如 EG0, RB0, M0, I0..." style="flex:1; text-transform:uppercase;" />
             <select id="selectOnlinePeriod" class="form-input" style="width:90px;">
               <option value="daily" selected>日线</option>
+              <option value="weekly">周线</option>
+              <option value="monthly">月线</option>
               <option value="60m">60分钟</option>
             </select>
             <button class="btn btn-primary" id="btnTriggerFetchOnline">立即拉取并缓存</button>
@@ -1460,213 +1485,22 @@
   <div id="toast">提示信息</div>
 
   <!-- JAVASCRIPT APPLICATION CODE -->
-  <script>
-    // --- 0. LOCAL INDEXEDDB CACHE & ONLINE FETCH ENGINE ---
-    const InMemoryFallback = {
-      store: {},
-      set(k, v) { this.store[k] = v; },
-      get(k) { return this.store[k] || null; },
-      list() { return Object.values(this.store); },
-      clear() { this.store = {}; }
-    };
+  <script type="module">
+    // --- 0. 数据层与市场规则：已抽为 ES module（绞杀者模式第一步）---
+    // 这里只 import，不再复制实现。旧的 InMemoryFallback / MarketDataCache /
+    // OnlineFuturesFetcher / MockDataGenerator 全部迁到 src/data/ 下。
+    import { BarStore, barKey, upgradeLegacyKey, cacheBars } from './src/data/barStore.js';
+    import { fetchBars, fetchSinaJSONP, resolveSymbol } from './src/data/sources.js';
+    import { MockDataGenerator } from './src/data/mock.js';
+    import { attachDefaultMAs, calcMA } from './src/data/indicators.js';
+    import { aggregate } from './src/data/dominant.js';
+    import { parseCSV, barsToCSV, tradesToCSV, downloadText, SAMPLE_CSV } from './src/data/csvIO.js';
+    import { parseSymbol, classifyAShare, MARKETS } from './src/markets/symbolMeta.js';
+    import { getFuturesSpec } from './src/markets/contractSpecs.js';
 
-    const MarketDataCache = {
-      dbName: 'FuturesReplayDB',
-      storeName: 'kline_cache',
-      version: 1,
-
-      async getDB() {
-        return new Promise((resolve) => {
-          try {
-            if (!window.indexedDB) {
-              resolve(null);
-              return;
-            }
-            const request = indexedDB.open(this.dbName, this.version);
-            request.onupgradeneeded = (e) => {
-              const db = e.target.result;
-              if (!db.objectStoreNames.contains(this.storeName)) {
-                db.createObjectStore(this.storeName, { keyPath: 'key' });
-              }
-            };
-            request.onsuccess = (e) => resolve(e.target.result);
-            request.onerror = () => resolve(null);
-          } catch (err) {
-            resolve(null);
-          }
-        });
-      },
-
-      async setCache(key, data, meta = {}) {
-        const item = { key, data, meta, updateTime: new Date().toLocaleString() };
-        InMemoryFallback.set(key, item);
-
-        try {
-          const db = await this.getDB();
-          if (db) {
-            return new Promise((resolve) => {
-              const tx = db.transaction(this.storeName, 'readwrite');
-              const store = tx.objectStore(this.storeName);
-              store.put(item);
-              tx.oncomplete = () => resolve(true);
-              tx.onerror = () => resolve(false);
-            });
-          }
-        } catch (e) {}
-
-        try {
-          localStorage.setItem('kline_' + key, JSON.stringify(item));
-        } catch (err) {}
-        return true;
-      },
-
-      async getCache(key) {
-        const inMem = InMemoryFallback.get(key);
-        if (inMem) return inMem;
-
-        try {
-          const db = await this.getDB();
-          if (db) {
-            const fromDb = await new Promise((resolve) => {
-              const tx = db.transaction(this.storeName, 'readonly');
-              const store = tx.objectStore(this.storeName);
-              const req = store.get(key);
-              req.onsuccess = () => resolve(req.result || null);
-              req.onerror = () => resolve(null);
-            });
-            if (fromDb) {
-              InMemoryFallback.set(key, fromDb);
-              return fromDb;
-            }
-          }
-        } catch (e) {}
-
-        try {
-          const raw = localStorage.getItem('kline_' + key);
-          if (raw) {
-            const parsed = JSON.parse(raw);
-            InMemoryFallback.set(key, parsed);
-            return parsed;
-          }
-        } catch (err) {}
-
-        return null;
-      },
-
-      async listCaches() {
-        const list = [...InMemoryFallback.list()];
-        try {
-          const db = await this.getDB();
-          if (db) {
-            const dbList = await new Promise((resolve) => {
-              const tx = db.transaction(this.storeName, 'readonly');
-              const store = tx.objectStore(this.storeName);
-              const req = store.getAll();
-              req.onsuccess = () => resolve(req.result || []);
-              req.onerror = () => resolve([]);
-            });
-            for (const item of dbList) {
-              if (!list.find(x => x.key === item.key)) list.push(item);
-            }
-          }
-        } catch (e) {}
-
-        try {
-          for (let i = 0; i < localStorage.length; i++) {
-            const k = localStorage.key(i);
-            if (k && k.startsWith('kline_')) {
-              try {
-                const item = JSON.parse(localStorage.getItem(k));
-                if (!list.find(x => x.key === item.key)) list.push(item);
-              } catch (err) {}
-            }
-          }
-        } catch (err) {}
-
-        return list;
-      },
-
-      async clearAll() {
-        InMemoryFallback.clear();
-        try {
-          const db = await this.getDB();
-          if (db) {
-            const tx = db.transaction(this.storeName, 'readwrite');
-            tx.objectStore(this.storeName).clear();
-          }
-        } catch (e) {}
-
-        try {
-          const keys = [];
-          for (let i = 0; i < localStorage.length; i++) {
-            const k = localStorage.key(i);
-            if (k && k.startsWith('kline_')) keys.push(k);
-          }
-          keys.forEach(k => localStorage.removeItem(k));
-        } catch (err) {}
-      }
-    };
-
-    const OnlineFuturesFetcher = {
-      // 采用新浪财经公开 JSONP 接口，彻底避免本地 file:// 跨域 CORS 拦截
-      fetchSinaKline(symbol = 'EG0', period = 'daily') {
-        return new Promise((resolve, reject) => {
-          const cbName = 'sina_cb_' + Math.random().toString(36).substr(2, 6);
-          const script = document.createElement('script');
-          const cleanSymbol = symbol.toUpperCase().trim();
-
-          let url = '';
-          if (period === '60m') {
-            url = `https://stock2.finance.sina.com.cn/futures/api/jsonp.php/var%20${cbName}=/IndexService.getInnerFuturesMiniKLine60m?symbol=${cleanSymbol}`;
-          } else {
-            url = `https://stock2.finance.sina.com.cn/futures/api/jsonp.php/var%20${cbName}=/IndexService.getInnerFuturesDailyKLine?symbol=${cleanSymbol}`;
-          }
-
-          const timer = setTimeout(() => {
-            cleanup();
-            reject(new Error('在线同步超时。如果您当前在无外网离线环境，系统将自动使用本地缓存或仿真数据。'));
-          }, 8000);
-
-          function cleanup() {
-            clearTimeout(timer);
-            delete window[cbName];
-            if (script.parentNode) script.parentNode.removeChild(script);
-          }
-
-          window[cbName] = function(rawData) {
-            cleanup();
-            if (!rawData || !Array.isArray(rawData) || rawData.length === 0) {
-              reject(new Error(`未获取到 ${cleanSymbol} 行情，请检查合约代码是否有效（如 EG0, RB0, M0, I0）`));
-              return;
-            }
-
-            const parsed = rawData.map(item => ({
-              date: item.d,
-              open: parseFloat(item.o),
-              high: parseFloat(item.h),
-              low: parseFloat(item.l),
-              close: parseFloat(item.c),
-              volume: parseFloat(item.v) || 0
-            })).filter(b => !isNaN(b.open) && !isNaN(b.close));
-
-            if (parsed.length === 0) {
-              reject(new Error('数据解析后无有效条目'));
-              return;
-            }
-
-            resolve(parsed);
-          };
-
-          script.onerror = function() {
-            cleanup();
-            reject(new Error('网络请求受阻或服务器未响应。'));
-          };
-
-          script.src = url;
-          document.body.appendChild(script);
-        });
-      }
-    };
+    // 兼容旧调用点：内联 UI 代码里仍在用 MarketDataCache.xxx()，这里做一层薄转发，
+    // 让 M1 不动 3000 行 UI 代码就能接上 v2 schema。M2 起再逐步改成直接调 BarStore。
+    const MarketDataCache = BarStore;
 
     /**
      * 国内期货手动复盘与划线模拟交易回测系统 (PRO 增强版)
@@ -1677,72 +1511,6 @@
      * 4. 净值曲线与平仓前仓位图
      * 5. 侧边栏「已了结明细」与「单次撤销」
      */
-
-    // --- 1. MOCK DATA GENERATOR ---
-    const MockDataGenerator = {
-      generate(symbol = 'eg9999', count = 260) {
-        let basePrice = 4250;
-        let volatility = 28;
-        let startDate = new Date(2025, 4, 6, 9, 0); // 2025-05-06
-
-        if (symbol === 'rb9999') {
-          basePrice = 3380;
-          volatility = 22;
-        } else if (symbol === 'm9999') {
-          basePrice = 3050;
-          volatility = 18;
-        }
-
-        const data = [];
-        let curClose = basePrice;
-
-        for (let i = 0; i < count; i++) {
-          let trend = 0;
-          if (i < 40) trend = Math.sin(i / 6) * 12;
-          else if (i < 55) trend = -20 - (i - 40) * 2;
-          else if (i < 130) trend = 25 + Math.sin(i / 8) * 15;
-          else if (i < 170) trend = Math.sin(i / 5) * 20;
-          else if (i < 220) trend = -24 - Math.cos(i / 7) * 10;
-          else trend = 18 + Math.sin(i / 4) * 8;
-
-          const delta = (Math.random() - 0.48) * volatility + trend * 0.4;
-          const open = Math.round(curClose + (Math.random() - 0.5) * (volatility * 0.4));
-          const close = Math.round(open + delta);
-          const high = Math.round(Math.max(open, close) + Math.random() * (volatility * 0.8));
-          const low = Math.round(Math.min(open, close) - Math.random() * (volatility * 0.8));
-          const volume = Math.round(35000 + Math.random() * 85000 + Math.abs(delta) * 1800);
-
-          startDate.setDate(startDate.getDate() + 1);
-          if (startDate.getDay() === 0) startDate.setDate(startDate.getDate() + 1);
-          if (startDate.getDay() === 6) startDate.setDate(startDate.getDate() + 2);
-
-          const yyyy = startDate.getFullYear();
-          const mm = String(startDate.getMonth() + 1).padStart(2, '0');
-          const dd = String(startDate.getDate()).padStart(2, '0');
-          const dateStr = `${yyyy}-${mm}-${dd}`;
-
-          data.push({ date: dateStr, open, high, low, close, volume });
-          curClose = close;
-        }
-
-        for (let i = 0; i < data.length; i++) {
-          data[i].ma5 = this.calcMA(data, i, 5);
-          data[i].ma10 = this.calcMA(data, i, 10);
-          data[i].ma20 = this.calcMA(data, i, 20);
-        }
-
-        return data;
-      },
-
-      calcMA(data, idx, period) {
-        if (idx < period - 1) return null;
-        let sum = 0;
-        for (let j = idx - period + 1; j <= idx; j++) {
-          sum += data[j].close;
-        }
-        return Math.round((sum / period) * 10) / 10;
-      }
-    };
 
     // --- 2. TRADING ENGINE ---
     class TradingEngine {
@@ -3372,57 +3140,109 @@
         this.syncUI();
       }
 
-      async loadSymbolData(symbol, forceOnline = false) {
-        this.currentSymbol = symbol;
-        const period = document.getElementById('periodSelect') ? document.getElementById('periodSelect').value : 'daily';
-        const cacheKey = `${symbol.toUpperCase()}_${period}`;
+      async loadSymbolData(rawCode, forceOnline = false) {
+        this.currentSymbol = rawCode;
+        const periodEl = document.getElementById('periodSelect');
+        const period = periodEl ? periodEl.value : 'daily';
+        const adjustSel = document.getElementById('adjustSelect');
 
-        // 1. 如果不强制在线刷新，先尝试从本地 IndexedDB 缓存加载
+        const parsed = parseSymbol(String(rawCode).trim(), '');
+        if (!parsed.ok) {
+          // 仿真预置盘（*9999）走这里：不是有效真实代码，但本来就该出拟真行情
+          if (/9999$/.test(String(rawCode))) {
+            const mockBars = attachDefaultMAs(MockDataGenerator.generate(rawCode, 260));
+            this.applyDataToChart(mockBars, rawCode, `已载入 ${rawCode} 拟真行情 (共 ${mockBars.length} 根K线)`);
+            this.refreshCacheListUI();
+            return;
+          }
+          this.showToast(`代码无法解析：${parsed.reason || parsed.error || rawCode}`);
+          return;
+        }
+
+        const isFutures = parsed.market === MARKETS.FUTURES;
+        this.currentMarket = parsed.market;
+        const adjust = isFutures ? 'none' : (adjustSel ? adjustSel.value : 'qfq');
+        const symbol = isFutures ? parsed.contractCode : parsed.code;
+        const cacheKey = barKey(parsed.market, symbol, period, adjust);
+        const label = isFutures
+          ? `${parsed.name}${parsed.isDominant ? ' 主连' : ''} (${symbol})`
+          : `${parsed.code} (${parsed.board || parsed.kind})`;
+
+        // 规格表自动带入账户参数（期货才有；用户仍可手改，改完不回写规格表）
+        if (isFutures && parsed.spec) this.applyContractSpec(parsed.spec);
+
         if (!forceOnline) {
           try {
             const cached = await MarketDataCache.getCache(cacheKey);
             if (cached && cached.data && cached.data.length > 5) {
-              this.applyDataToChart(cached.data, symbol, `已从本地缓存秒开 ${symbol} (${cached.data.length} 根K线, 缓存时间: ${cached.updateTime})`);
+              this.applyDataToChart(cached.data, label, `已从本地缓存秒开 ${label} (${cached.data.length} 根K线, 缓存时间: ${cached.updateTime})`);
               this.refreshCacheListUI();
               return;
             }
           } catch (e) {}
         }
 
-        // 2. 如果是真实期货代码 (如 EG0, RB0, M0, I0, CU0 等)
-        const isRealSymbol = !symbol.endsWith('9999');
-        if (isRealSymbol || forceOnline) {
-          this.showToast(`正在在线直连新浪财经拉取 ${symbol} 真实K线...`);
-          try {
-            const realBars = await OnlineFuturesFetcher.fetchSinaKline(symbol, period);
-            // 计算技术均线
-            for (let i = 0; i < realBars.length; i++) {
-              realBars[i].ma5 = MockDataGenerator.calcMA(realBars, i, 5);
-              realBars[i].ma10 = MockDataGenerator.calcMA(realBars, i, 10);
-              realBars[i].ma20 = MockDataGenerator.calcMA(realBars, i, 20);
+        this.showToast(`正在拉取 ${label} ${period} 真实行情…`);
+        try {
+          let out = await fetchBars({ market: parsed.market, symbol, secid: parsed.secid, period, adjust });
+
+          // 周/月线兜底：上游 klt 不可用时，用本地日线自己聚合（CSV 导入的数据也只能这样）
+          if ((!out.ok || !out.bars || out.bars.length === 0) && (period === 'weekly' || period === 'monthly')) {
+            const dailyKey = barKey(parsed.market, symbol, 'daily', adjust);
+            let daily = (await MarketDataCache.getCache(dailyKey))?.data;
+            if (!daily) {
+              const d = await fetchBars({ market: parsed.market, symbol, secid: parsed.secid, period: 'daily', adjust });
+              if (d.ok && d.bars?.length) { daily = d.bars; await cacheBars(dailyKey, daily, { market: parsed.market, symbol, period: 'daily', adjust }); }
             }
-            // 写入本地持久化缓存
-            await MarketDataCache.setCache(cacheKey, realBars, { symbol, period, count: realBars.length });
-            this.applyDataToChart(realBars, symbol, `🎉 真实行情同步成功！共 ${realBars.length} 根，已永久缓存至本地 IndexedDB`);
+            if (daily && daily.length) {
+              out = { ok: true, source: 'local-aggregate', bars: attachDefaultMAs(aggregate(daily, period)) };
+            }
+          }
+
+          if (out.ok && out.bars && out.bars.length > 0) {
+            await cacheBars(cacheKey, out.bars, { market: parsed.market, symbol, period, adjust, count: out.bars.length, name: out.name || parsed.name });
+            if (parsed.ok) BarStore.putSymbol({ market: parsed.market, symbol, name: out.name || parsed.name, kind: isFutures ? 'futures' : parsed.kind, secid: parsed.secid });
+            const src = { 'eastmoney': '东财', 'eastmoney-direct': '东财直连', 'sina': '新浪', 'local-aggregate': '本地日线聚合' }[out.source] || out.source;
+            // 前复权会把早期价格推到负数（累计扣减分红），不是脏数据而是口径后果，必须说清楚
+            const negCount = out.bars.filter(b => b.close <= 0).length;
+            const negNote = negCount > 0
+              ? `｜⚠ 前复权把最早 ${negCount} 根推到 ≤0（分红累计扣除所致），看长期趋势请切「后复权」，看真实盘面请切「不复权」`
+              : '';
+            this.applyDataToChart(out.bars, label,
+              `🎉 ${label} 同步成功：${out.bars.length} 根K线（源:${src}，末根 ${out.bars[out.bars.length - 1].date}）${negNote}`);
             this.refreshCacheListUI();
             return;
-          } catch (err) {
-            console.warn("在线同步失败:", err);
-            // 如果在线失败，检查有无本地历史缓存
-            const cached = await MarketDataCache.getCache(cacheKey);
-            if (cached && cached.data) {
-              this.applyDataToChart(cached.data, symbol, `已离线加载本地缓存 ${symbol} (${cached.data.length} 根K线)`);
-              return;
-            }
-            this.showToast(`提示: ${err.message}，已自动平滑降级为仿真行情`);
           }
+          throw new Error(out.error || (out.attempted || []).map(a => `${a.channel}:${a.error}`).join('; ') || '无数据');
+        } catch (err) {
+          console.warn('在线同步失败:', err);
+          const cached = await MarketDataCache.getCache(cacheKey);
+          if (cached && cached.data) {
+            this.applyDataToChart(cached.data, label, `已离线加载本地缓存 ${label} (${cached.data.length} 根K线)`);
+            return;
+          }
+          this.showToast(`拉取失败：${err.message} —— 已降级为仿真行情`);
         }
 
-        // 3. 降级为仿真拟真行情
-        const mockBars = MockDataGenerator.generate(symbol, 260);
-        this.applyDataToChart(mockBars, symbol, `已载入 ${symbol} 拟真行情 (共 ${mockBars.length} 根K线)`);
+        const mockBars = attachDefaultMAs(MockDataGenerator.generate(rawCode, 260));
+        this.applyDataToChart(mockBars, label, `已载入 ${label} 拟真行情 (共 ${mockBars.length} 根K线)`);
         this.refreshCacheListUI();
       }
+
+      /** 合约规格 → 账户参数输入框（乘数/保证金率）。用户仍可手改；手续费按品种费率暂不覆盖手填值。 */
+      applyContractSpec(spec) {
+        const set = (id, val) => {
+          const el = document.getElementById(id);
+          if (el && val !== undefined && val !== null) {
+            el.value = val;
+            el.dispatchEvent(new Event('change'));   // 参数绑定听的是 change（不是 input）
+          }
+        };
+        set('contractMultiplier', spec.multiplier);
+        set('marginRatio', Math.round(spec.marginRate * 10000) / 100);
+        this.currentSpec = spec;
+      }
+
 
       applyDataToChart(bars, symbol, toastMsg) {
         this.chartModule.setData(bars);
@@ -3440,18 +3260,32 @@
             container.innerHTML = `<div style="color:var(--text-muted); text-align:center; padding:8px;">暂无本地缓存数据。可点击上方【🌐 在线同步】抓取真实行情并自动缓存。</div>`;
             return;
           }
+          const PERIOD_CN = { daily: '日线', weekly: '周线', monthly: '月线', '60m': '60分钟' };
+          const ADJUST_CN = { none: '不复权', qfq: '前复权', hfq: '后复权' };
+          // 按末根日期倒序：最近抓过的排前面，用户才找得到
+          list.sort((a, b) => String(b.lastDate || b.updateTime || '').localeCompare(String(a.lastDate || a.updateTime || '')));
           let html = '';
           for (const item of list) {
+            const bars = item.data || [];
+            const marketTag = item.market === 'ashare' ? 'A股' : (item.market === 'futures' ? '期货' : '其他');
+            const periodCn = PERIOD_CN[item.period] || item.period || '';
+            const adjustCn = item.adjust && item.adjust !== 'none' ? ` ${ADJUST_CN[item.adjust] || item.adjust}` : '';
+            const legacy = item.key && !String(item.key).includes(':') ? ' ⚠旧格式' : '';
             html += `<div style="display:flex; justify-content:space-between; align-items:center; padding:4px 6px; border-bottom:1px solid rgba(42,49,66,0.5);">
               <div>
-                <b style="color:#60a5fa;">${item.key}</b>
-                <span style="color:var(--text-muted); margin-left:6px;">${item.data.length} 根</span>
-                <span style="color:#848c9e; font-size:10px; margin-left:6px;">(${item.updateTime || '已存'})</span>
+                <b style="color:#60a5fa;">${item.symbol || item.key}</b>
+                <span style="color:#8b5cf6; font-size:10px; margin-left:4px;">${marketTag}${periodCn}${adjustCn}</span>
+                <span style="color:var(--text-muted); margin-left:6px;">${bars.length} 根</span>
+                <span style="color:#848c9e; font-size:10px; margin-left:6px;">(${item.lastDate || '日期未知'} · ${item.updateTime || '已存'})</span>${legacy}
               </div>
-              <button class="btn btn-sm btn-primary" onclick="window.app.loadFromCacheKey('${item.key}')" style="height:18px; padding:0 6px; font-size:10px;">载入</button>
+              <button class="btn btn-sm btn-primary" data-cache-key="${item.key}" style="height:18px; padding:0 6px; font-size:10px;">载入</button>
             </div>`;
           }
           container.innerHTML = html;
+          // 用事件委托而不是内联 onclick：内联串在全局作用域求值，模块重构后最容易静默失效
+          container.querySelectorAll('button[data-cache-key]').forEach(btn => {
+            btn.addEventListener('click', () => this.loadFromCacheKey(btn.getAttribute('data-cache-key')));
+          });
         } catch (e) {
           container.innerHTML = `<div style="color:var(--text-muted); text-align:center;">读取缓存异常</div>`;
         }
@@ -3459,20 +3293,51 @@
 
       async loadFromCacheKey(key) {
         const cached = await MarketDataCache.getCache(key);
-        if (cached && cached.data) {
-          const symbol = cached.meta ? cached.meta.symbol : key.split('_')[0];
-          this.currentSymbol = symbol;
-          this.applyDataToChart(cached.data, symbol, `已载入缓存: ${key} (${cached.data.length} 根)`);
+        if (cached && cached.data && cached.data.length) {
+          const symbol = cached.symbol || (cached.meta ? cached.meta.symbol : key.split(/[:_]/)[0]);
+          this.applyDataToChart(cached.data, symbol, `已载入缓存: ${symbol} (${cached.data.length} 根)`);
+          const sel = document.getElementById('symbolSelect');
+          if (sel) {
+            const match = Array.from(sel.options).find(o => o.value.toUpperCase() === String(symbol).toUpperCase());
+            if (match) sel.value = match.value;
+          }
+        } else {
+          this.showToast(`缓存里没有 ${key} 的有效数据`);
         }
       }
+
 
       bindEvents() {
         document.getElementById('symbolSelect').addEventListener('change', (e) => {
           this.loadSymbolData(e.target.value, false);
         });
 
+        // 任意代码输入：解析权交给 symbolMeta，不在这里写正则
+        const loadTypedCode = () => {
+          const el = document.getElementById('symbolInput');
+          const code = (el && el.value || '').trim();
+          if (!code) { this.showToast('请先输入代码，例如 rb2610 / 600519 / sh000001'); return; }
+          this.loadSymbolData(code, false);
+        };
+        if (document.getElementById('btnLoadCode')) {
+          document.getElementById('btnLoadCode').addEventListener('click', loadTypedCode);
+        }
+        if (document.getElementById('symbolInput')) {
+          document.getElementById('symbolInput').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') loadTypedCode();
+          });
+        }
+
         if (document.getElementById('periodSelect')) {
           document.getElementById('periodSelect').addEventListener('change', () => {
+            const sym = document.getElementById('symbolSelect').value;
+            this.loadSymbolData(sym, false);
+          });
+        }
+
+        // 复权口径一变就是另一份数据，缓存键含 adjust，必须重新载入
+        if (document.getElementById('adjustSelect')) {
+          document.getElementById('adjustSelect').addEventListener('change', () => {
             const sym = document.getElementById('symbolSelect').value;
             this.loadSymbolData(sym, false);
           });
@@ -4181,76 +4046,17 @@
 
       parseAndLoadCSV(text, filename) {
         try {
-          const lines = text.trim().split(String.fromCharCode(10));
-          if (lines.length < 5) throw new Error("CSV 文件行数不足");
-
-          const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
-          const dateIdx = headers.findIndex(h => h.includes('date') || h.includes('time') || h.includes('时间') || h.includes('日期'));
-          const openIdx = headers.findIndex(h => h === 'open' || h === 'o' || h.includes('开盘'));
-          const highIdx = headers.findIndex(h => h === 'high' || h === 'h' || h.includes('最高'));
-          const lowIdx = headers.findIndex(h => h === 'low' || h === 'l' || h.includes('最低'));
-          const closeIdx = headers.findIndex(h => h === 'close' || h === 'c' || h.includes('收盘'));
-          const volIdx = headers.findIndex(h => h.includes('vol') || h.includes('volume') || h.includes('量') || h.includes('成交'));
-
-          if (dateIdx === -1 || openIdx === -1 || highIdx === -1 || lowIdx === -1 || closeIdx === -1) {
-            throw new Error("未能识别完整的 OHLC 字段，请确保包含 date, open, high, low, close 列。");
-          }
-
-          const parsedData = [];
-          for (let i = 1; i < lines.length; i++) {
-            const row = lines[i].split(',').map(c => c.trim());
-            if (row.length < 5) continue;
-
-            const date = row[dateIdx];
-            const open = parseFloat(row[openIdx]);
-            const high = parseFloat(row[highIdx]);
-            const low = parseFloat(row[lowIdx]);
-            const close = parseFloat(row[closeIdx]);
-            const volume = volIdx !== -1 ? parseFloat(row[volIdx]) : 50000;
-
-            if (isNaN(open) || isNaN(high) || isNaN(low) || isNaN(close)) continue;
-            parsedData.push({ date, open, high, low, close, volume });
-          }
-
-          if (parsedData.length < 5) throw new Error("有效行情数据少于 5 条");
-
-          for (let i = 0; i < parsedData.length; i++) {
-            parsedData[i].ma5 = MockDataGenerator.calcMA(parsedData, i, 5);
-            parsedData[i].ma10 = MockDataGenerator.calcMA(parsedData, i, 10);
-            parsedData[i].ma20 = MockDataGenerator.calcMA(parsedData, i, 20);
-          }
-
-          this.chartModule.setData(parsedData);
-          this.tradingEngine.reset(parseFloat(document.getElementById('inputInitialCapital').value) || 100000);
-          this.syncUI();
-          this.showToast(`🎉 成功导入 ${filename}，共 ${parsedData.length} 根 K 线！`);
+          const { bars, detectedSymbol } = parseCSV(text);
+          const symbol = detectedSymbol || filename.replace(/\.[^.]+$/, '');
+          this.applyDataToChart(bars, symbol, `🎉 成功导入 ${filename}，共 ${bars.length} 根 K 线！`);
           document.querySelector('.tab-btn[data-tab="tabTrades"]').click();
-
         } catch (err) {
-          alert("CSV 解析失败: " + err.message);
+          alert('CSV 解析失败: ' + err.message);
         }
       }
 
       downloadSampleCSV() {
-        const sample = `date,open,high,low,close,volume
-2025-09-01,4210,4265,4195,4258,85420
-2025-09-02,4255,4290,4240,4282,92100
-2025-09-03,4280,4315,4260,4270,78300
-2025-09-04,4272,4285,4220,4235,69500
-2025-09-05,4230,4250,4180,4190,83200
-2025-09-08,4195,4245,4190,4240,75100
-2025-09-09,4242,4288,4235,4275,88900
-2025-09-10,4278,4320,4270,4310,95400
-2025-09-11,4315,4360,4305,4352,112000
-2025-09-12,4350,4385,4340,4365,104500`;
-
-        const blob = new Blob([sample], { type: 'text/csv;charset=utf-8;' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'sample_futures_kline.csv';
-        a.click();
-        URL.revokeObjectURL(url);
+        downloadText('sample_kline.csv', SAMPLE_CSV);
       }
 
       exportTradesToCSV() {
@@ -4259,36 +4065,8 @@
           this.showToast('当前暂无交易记录可供导出');
           return;
         }
-
-        const rows = [
-          ['序号', '合约代码', '交易方向', '开仓时间', '平仓时间', '开仓价', '平仓价', '手数', '点数差', '涨跌幅%', '手续费', '净盈亏', '持仓根数', '平仓后资金权益']
-        ];
-        for (const t of history) {
-          rows.push([
-            t.id,
-            t.symbol,
-            t.direction === 'long' ? '做多' : '做空',
-            t.entryTime,
-            t.exitTime,
-            t.entryPrice,
-            t.exitPrice,
-            t.lots,
-            t.points,
-            t.pct ? t.pct.toFixed(2) + '%' : '',
-            t.fee,
-            t.netPnL,
-            t.holdingBars,
-            t.equityAfter
-          ]);
-        }
-        const csvContent = '﻿' + rows.map(r => r.join(',')).join(String.fromCharCode(10));
-        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'futures_backtest_trades_' + Date.now() + '.csv';
-        a.click();
-        URL.revokeObjectURL(url);
+        const market = this.currentMarket || 'futures';
+        downloadText(`${market}_backtest_trades_${Date.now()}.csv`, tradesToCSV(history, market));
         this.showToast('✅ 交易明细 CSV 导出成功！');
       }
 
@@ -4303,9 +4081,14 @@
       }
     }
 
-    window.addEventListener('DOMContentLoaded', () => {
-      window.app = new AppController();
-    });
+    // module 脚本在文档解析完成后才执行，此刻 readyState 多为 'interactive'（DOMContentLoaded 还没触发）。
+    // 两条路径都可能走到，所以用幂等启动 —— 装两个 AppController 会让事件重复绑定、画布被接管。
+    const bootApp = () => { if (!window.app) window.app = new AppController(); };
+    if (document.readyState === 'loading') {
+      window.addEventListener('DOMContentLoaded', bootApp);
+    } else {
+      bootApp();
+    }
   </script>
 </body>
 </html>
