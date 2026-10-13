@@ -35,12 +35,19 @@ export class BacktestEngine {
      */
     this.sizing = opts.sizing ?? 'fixed';
     this.notionalPct = opts.notionalPct ?? 0.25;
+    /**
+     * 市场规则（M2）。不传就退回引擎内置的期货口径，保证已有跑批不受影响。
+     * 传了之后：开仓方向限制、涨跌停板锁、T+1、成本模型全部交给规则决定。
+     */
+    this.rules = opts.rules || null;
     this.trades = [];
+    this.rejects = [];
     this.equityCurve = [];
     this.rejected = { margin: 0, noLiquidity: 0, shortDisabled: 0 };
   }
 
-  _fee(price, lots, { closeToday = false } = {}) {
+  _fee(price, lots, { closeToday = false, side = 'buy', sell = false } = {}) {
+    if (this.rules) return this.rules.cost(price, lots, { closeToday, sell: sell || side === 'sell' });
     const plan = closeToday && this.spec.closeTodayFee ? this.spec.closeTodayFee : this.spec.fee;
     if (!plan) return 0;
     const raw = plan.mode === 'rate' ? price * this.spec.multiplier * lots * plan.value : plan.value * lots;
@@ -120,6 +127,22 @@ export class BacktestEngine {
             const fb = bars[fillIdx];
             const side = wantDir === DIR.LONG ? 'buy' : 'sell';
             const px = this._slip(fb.open, side);
+            const prevClose = bars[fillIdx - 1]?.close;
+
+            // 规则闸门一：该方向能不能开（A股默认仅做多）
+            const openGate = this.rules ? this.rules.canOpen(wantDir) : { ok: true };
+            if (!openGate.ok) {
+              this.rejected.rules = (this.rejected.rules || 0) + 1;
+              this.rejects.push({ idx: fillIdx, kind: 'open', reason: openGate.reason });
+            }
+            // 规则闸门二：涨跌停板锁（封板时开单价排队成交不了）
+            const fillGate = openGate.ok && this.rules
+              ? this.rules.canFillAt(side, px, prevClose, { closing: false }) : { ok: true };
+            if (openGate.ok && !fillGate.ok) {
+              this.rejected.boardLock = (this.rejected.boardLock || 0) + 1;
+              this.rejects.push({ idx: fillIdx, kind: 'boardLock', reason: fillGate.reason });
+            }
+            if (openGate.ok && fillGate.ok) {
             const marginRate = this.spec.marginRate ?? 0.1;
             const perLotMargin = px * this.spec.multiplier * marginRate;
             const lots = this.sizing === 'notional'
@@ -138,6 +161,7 @@ export class BacktestEngine {
               };
               peak = wantDir === DIR.LONG ? fb.high : Infinity;
               trough = wantDir === DIR.LONG ? -Infinity : fb.low;
+            }
             }
           }
         }
@@ -180,6 +204,15 @@ export class BacktestEngine {
    */
   _checkExit(pos, bar, idx) {
     if (idx <= pos.entryIdx) return null;   // 成交那根不再判出场，避免同一根进出
+
+    // T+1：当日买入的股票当日不能卖。不满足就作废这笔出场，而不是假装成交 ——
+    // 后者正是让 A股回测虚高的原因。
+    // 只比日期部分：日内 bar 的 date 带时分秒，整串比较会让这条规则永远不触发。
+    if (this.rules?.tPlus1 &&
+        String(bar.date).slice(0, 10) === String(this.bars[pos.entryIdx].date).slice(0, 10)) {
+      this.rejects.push({ idx, kind: 'tPlus1', reason: 'T+1：当日买入不可当日卖出' });
+      return null;
+    }
 
     const isLong = pos.dir === DIR.LONG;
     const openBreachStop = isLong ? bar.open <= (pos.stop ?? -Infinity) : bar.open >= (pos.stop ?? Infinity);
@@ -224,6 +257,7 @@ export class BacktestEngine {
       trades: this.trades,
       equityCurve: this.equityCurve,
       rejected: { ...this.rejected },
+      rejects: this.rejects.slice(),
       finalEquity: this.equityCurve.length ? this.equityCurve[this.equityCurve.length - 1].equity : this.capital0,
       capital: this.capital0,
       spec: { multiplier: this.spec.multiplier, tick: this.spec.tick, marginRate: this.spec.marginRate }

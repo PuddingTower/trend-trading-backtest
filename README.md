@@ -123,4 +123,4 @@ tests/         零依赖单测骨架 + 用例；migration-probe.html 验证 Inde
 
 ## 许可
 
-待补 `LICENSE` 文件。
+MIT —— 详见 `LICENSE`。行情数据版权归各交易所与数据源，本仓库不再分发原始行情。

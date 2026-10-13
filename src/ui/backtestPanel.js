@@ -9,6 +9,7 @@ import { STRATEGIES } from '../strategy/library.js';
 import { BacktestEngine } from '../core/backtestEngine.js';
 import { computeMetrics, benchmarkCompare } from '../report/metrics.js';
 import { resolveTradeSpec } from '../markets/instrumentSpec.js';
+import { rulesFor } from '../markets/marketRules.js';
 
 const pct = (v, d = 1) => (v === null || v === undefined || !Number.isFinite(v)) ? '—' : (v * 100).toFixed(d) + '%';
 const num = (v, d = 2) => (v === null || v === undefined || !Number.isFinite(v)) ? '—' : Number(v).toFixed(d);
@@ -144,9 +145,12 @@ export class BacktestPanel {
     let res;
     try {
       const signals = def.signals(bars, params);
+      const rules = rulesFor(spec);
+      if (!s.allowShort && rules.canOpen(-1).ok) { rules.spec = { ...spec, allowShort: false }; }
       const eng = new BacktestEngine(bars, spec, {
         capital: s.capital, sizing: s.sizing, notionalPct: s.notionalPct,
-        lots: s.lots, slippageTicks: s.slippageTicks, allowShort: s.allowShort
+        lots: s.lots, slippageTicks: s.slippageTicks, allowShort: s.allowShort,
+        rules
       });
       const raw = eng.run(signals);
       const metrics = computeMetrics({
@@ -219,6 +223,8 @@ export class BacktestPanel {
         <span>平均持仓 <b>${num(m.avgHoldingBars, 1)} 根</b></span>
         <span>资金不足拒单 <b>${res.rejected.margin}</b></span>
         <span>强平次数 <b>${res.rejected.marginCalls || 0}</b></span>
+        <span>涨停买不进 <b>${res.rejected.boardLock || 0}</b></span>
+        <span>T+1/方向被拒 <b>${(res.rejects || []).filter(x => x.kind === 'tPlus1').length} / ${res.rejected.rules || 0}</b></span>
         <span>同期持有涨幅 <b class="${sign(cmp.benchReturn)}">${pct(cmp.benchReturn)}</b></span>
         <span>超额 <b class="${sign(cmp.alpha)}">${pct(cmp.alpha)}</b></span>
       </div>
