@@ -11,16 +11,7 @@
  * 第 1 条尤其重要：只靠 UI 遮罩的话，控制台里改一下 visibleDataCount 就穿透了。
  */
 
-/** 可复现的伪随机（mulberry32）。抽题要能重放，否则"我刚才那题没做好，再来一次同样的"做不到。 */
-export function makeRng(seed = Date.now()) {
-  let a = (seed >>> 0) || 1;
-  return function rng() {
-    a |= 0; a = (a + 0x6D2B79F5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
+import { makeRng } from '../core/rng.js';
 
 /**
  * 从池子里抽一道题。

@@ -1,5 +1,6 @@
 import { test, assert } from './harness.js';
-import { makeRng, pickBlindSegment, canReveal, blindBadge, segmentFingerprint } from '../src/replay/blind.js';
+import { pickBlindSegment, canReveal, blindBadge, segmentFingerprint } from '../src/replay/blind.js';
+import { makeRng } from '../src/core/rng.js';
 import { makeEntry, journalId, attachNotes, groupStats, reconcile, CHECKLIST, TAG_GROUPS, DEFAULT_TAGS } from '../src/replay/journal.js';
 
 const mk = (date, o, h, l, c, v = 1000) => ({ date, open: o, high: h, low: l, close: c, volume: v });

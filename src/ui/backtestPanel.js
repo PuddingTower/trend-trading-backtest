@@ -10,6 +10,7 @@ import { BacktestEngine } from '../core/backtestEngine.js';
 import { computeMetrics, benchmarkCompare } from '../report/metrics.js';
 import { resolveTradeSpec } from '../markets/instrumentSpec.js';
 import { rulesFor } from '../markets/marketRules.js';
+import { annotateGaps, checkAdjustmentContinuity, checkRolloverGaps } from '../markets/dataQuality.js';
 
 const pct = (v, d = 1) => (v === null || v === undefined || !Number.isFinite(v)) ? '—' : (v * 100).toFixed(d) + '%';
 const num = (v, d = 2) => (v === null || v === undefined || !Number.isFinite(v)) ? '—' : Number(v).toFixed(d);
@@ -33,6 +34,10 @@ export class BacktestPanel {
       lots: Number(this.root.querySelector('#btLots').value) || 1,
       slippageTicks: Number(this.root.querySelector('#btSlip').value) || 0,
       allowShort: this.root.querySelector('#btAllowShort').checked,
+      settlement: this.root.querySelector('#btSettle')?.checked ?? false,
+      maintenanceRatio: (Number(this.root.querySelector('#btMaint')?.value) || 75) / 100,
+      breakevenR: Number(this.root.querySelector('#btBe')?.value) || 0,
+      timeStopBars: Number(this.root.querySelector('#btTimeStop')?.value) || 0,
       range: this.root.querySelector('#btRange').value
     };
   }
@@ -71,10 +76,24 @@ export class BacktestPanel {
           <input id="btSlip" class="form-input" type="number" value="1" min="0" style="width:48px;" /></label>
         <label style="font-size:11px; color:var(--text-muted); display:flex; align-items:center; gap:4px;">
           <input id="btAllowShort" type="checkbox" checked /> 允许做空</label>
+        <label style="font-size:11px; color:var(--text-muted); display:flex; align-items:center; gap:4px;"
+          title="当日无负债结算：每天按收盘价盯市、重算占用保证金，浮亏真的从可用资金里扣。关掉则浮盈浮亏只在平仓时入账（旧口径）。">
+          <input id="btSettle" type="checkbox" /> 逐日盯市结算</label>
+        <label style="font-size:11px; color:var(--text-muted); display:flex; align-items:center; gap:4px;"
+          title="权益跌破「占用保证金 × 该比例」时次日强平">维持比例%
+          <input id="btMaint" class="form-input" type="number" value="75" min="10" max="100" style="width:52px;" /></label>
+        <label style="font-size:11px; color:var(--text-muted); display:flex; align-items:center; gap:4px;"
+          title="浮盈达到该倍初始风险后，把止损抬到开仓价（保本）。0=不启用；策略没挂初始止损时无法定义 1R，会自动跳过">保本×R
+          <input id="btBe" class="form-input" type="number" value="0" min="0" step="0.5" style="width:48px;" /></label>
+        <label style="font-size:11px; color:var(--text-muted); display:flex; align-items:center; gap:4px;"
+          title="持仓超过该根数仍未脱离成本，下一根开盘平仓（趋势不启动就走人）。0=不启用">时间止损(根)
+          <input id="btTimeStop" class="form-input" type="number" value="0" min="0" step="1" style="width:48px;" /></label>
         <button class="btn btn-primary btn-sm" id="btRun">▶ 运行回测</button>
+        <button class="btn btn-sm" id="btCheck" title="只体检数据不跑策略：停牌缺口、复权断崖、换月跳空">🩺 数据体检</button>
         <button class="btn btn-sm" id="btClearMarks">清除图上标记</button>
       </div>
       <div id="btParams" style="display:flex; flex-wrap:wrap; gap:10px; padding:0 4px 8px; border-bottom:1px solid var(--border-color);"></div>
+      <div id="btDq" style="padding:6px 4px 0; font-size:11px; color:var(--text-muted);"></div>
       <div id="btOut" style="padding:8px 4px; color:var(--text-muted); font-size:12px;">
         选策略与参数后点【运行回测】。成交口径为<b style="color:var(--accent-gold);">信号次日开盘成交</b>，
         含手续费、平今费与滑点；跳空穿透止损按开盘价成交，不做美化。
@@ -82,6 +101,11 @@ export class BacktestPanel {
     this.renderParams();
     this.root.querySelector('#btStrategy').addEventListener('change', () => this.renderParams());
     this.root.querySelector('#btRun').addEventListener('click', () => this.run());
+    this.root.querySelector('#btCheck').addEventListener('click', () => {
+      const bars = this.sliceBars(this.state.range);
+      const code = this.chart.backtestCode || this.chart.data?.[0]?.symbol;
+      this.renderDataQuality(bars, code, { standalone: true });
+    });
     this.root.querySelector('#btClearMarks').addEventListener('click', () => {
       this.chart.backtestMarkers = null; this.chart.requestRender();
     });
@@ -110,6 +134,52 @@ export class BacktestPanel {
       out[k] = t === 'bool' ? el.checked : t === 'num' ? Number(el.value) : el.value;
     });
     return { def: st, id: st.id, params: out };
+  }
+
+  /**
+   * 数据体检：缺口/停牌标注 + 复权连续性 + 换月跳空，并产出**带标记字段的 K 线副本**给撮合层。
+   *
+   * 结论必须显示出来，而不是只在后台悄悄改字段：复权没做好时回测照样能跑出很漂亮曲线，
+   * 这类错不会报错，只会让结果不可信 —— 所以「体检」既是提示，也是本次回测的输入口径。
+   * 标注函数按日期重排过，顺序和图表不一致的话图上标记会错位到别的 K 线，因此显式校验一次。
+   */
+  qualityCheck(bars, code) {
+    const host = this.root.querySelector('#btDq');
+    const resolved = resolveTradeSpec(code || 'RB0');
+    const spec = resolved.ok ? resolved.spec : null;
+    const limitPct = spec && Number(spec.limitPct) > 0 ? Number(spec.limitPct) : 0;
+    if (!bars || bars.length < 2) {
+      if (host) host.innerHTML = '<span style="color:var(--up-color);">数据不足两根，无法体检。</span>';
+      return { bars: bars || [], usable: false };
+    }
+    const ann = annotateGaps(bars, {});
+    const keepsOrder = ann.bars.length === bars.length
+      && ann.bars.every((b, i) => String(b.date).slice(0, 10) === String(bars[i].date).slice(0, 10));
+    const isFutures = !!spec && spec.market === 'futures';
+    const cont = isFutures
+      ? { issues: checkRolloverGaps(bars, { limitPct: limitPct > 0 ? limitPct : 0.08 }),
+          label: '换月跳空', tail: '连续合约在换月当天的价差不是行情。若拼接模式用的是「原始价位」，这些缺口会被当成真突破/真跌破。' }
+      : { ...checkAdjustmentContinuity(bars, { limitPct: limitPct > 0 ? limitPct : 0.10 }), label: '复权断崖' };
+    const gaps = ann.longGaps;
+    const worst = gaps.length ? gaps.reduce((a, b) => (b.naturalDays > a.naturalDays ? b : a)) : null;
+    const staleCount = ann.bars.filter(b => b.stalePrevClose).length;
+
+    const parts = [];
+    parts.push(`自然日缺口 <b>${gaps.length}</b> 处（≥4 天）${worst ? `，最长 ${worst.naturalDays} 天：${esc(worst.from)}→${esc(worst.to)}（${esc(worst.to)} 那根不套用板锁）` : ''}`);
+    parts.push(ann.calendarKnown
+      ? '已用参照交易日历区分停牌与节假日'
+      : '<span style="color:var(--accent-gold);">无参照序列：长假与停牌在单品种数据里无法区分，只报自然日缺口</span>');
+    if (cont.issues.length) {
+      parts.push(`<span style="color:var(--accent-gold);">${cont.label} <b>${cont.issues.length}</b> 处：`
+        + cont.issues.slice(0, 5).map(x => `${esc(x.date)} ${(x.jump * 100).toFixed(1)}%`).join('、')
+        + (cont.issues.length > 5 ? '…' : '') + (cont.note ? `。${esc(cont.note)}` : (cont.tail ? `。${esc(cont.tail)}` : '')) + '</span>');
+    } else {
+      parts.push(esc(cont.note || cont.tail || '未发现异常跳空'));
+    }
+    if (!keepsOrder) parts.push('<span style="color:var(--up-color);">K 线日期不是升序，缺口标注已跳过（否则图上标记会错位）</span>');
+    if (staleCount) parts.push(`前收盘失效（缺口过长）<b>${staleCount}</b> 根：这些 bar 的涨跌停判定已跳过`);
+    if (host) host.innerHTML = `🩺 数据体检 · ${parts.join(' · ')}`;
+    return { bars: keepsOrder ? ann.bars : bars, usable: keepsOrder, gaps, suspensions: ann.suspensions, continuity: cont };
   }
 
   sliceBars(range) {
@@ -141,23 +211,30 @@ export class BacktestPanel {
     const spec = resolved.spec;
     const { def, params } = this.collectParams();
     const s = this.state;
+    // 先体检再用带缺口标记的那份 K 线：停牌日不许成交、前收盘失效的 bar 不套用板锁，
+    // 这些都靠 annotateGaps 写进 bar 的字段，撮合层只认字段不认提示。
+    const qc = this.qualityCheck(bars, code);
+    const useBars = qc.bars && qc.bars.length ? qc.bars : bars;
 
     let res;
     try {
-      const signals = def.signals(bars, params);
+      const signals = def.signals(useBars, params);
       const rules = rulesFor(spec);
       if (!s.allowShort && rules.canOpen(-1).ok) { rules.spec = { ...spec, allowShort: false }; }
-      const eng = new BacktestEngine(bars, spec, {
+      const eng = new BacktestEngine(useBars, spec, {
         capital: s.capital, sizing: s.sizing, notionalPct: s.notionalPct,
         lots: s.lots, slippageTicks: s.slippageTicks, allowShort: s.allowShort,
+        settlement: { enabled: s.settlement, maintenanceRatio: s.maintenanceRatio },
+        breakeven: s.breakevenR > 0 ? { afterR: s.breakevenR, extraPct: 0 } : null,
+        timeStop: s.timeStopBars > 0 ? { bars: s.timeStopBars, requireLoss: true } : null,
         rules
       });
       const raw = eng.run(signals);
       const metrics = computeMetrics({
         equityCurve: raw.equityCurve, trades: raw.trades, capital: s.capital,
-        periodsPerYear: this.chart.periodsPerYear || 252, bars
+        periodsPerYear: this.chart.periodsPerYear || 252, bars: useBars
       });
-      res = { ...raw, metrics, bars, spec, strategy: def.name, params, signals, rejected: raw.rejected };
+      res = { ...raw, metrics, bars: useBars, spec, strategy: def.name, params, signals, rejected: raw.rejected, settlementOn: s.settlement };
     } catch (e) {
       out.innerHTML = `<span style="color:var(--up-color);">回测失败：${esc(e.message)}</span>`;
       console.error(e);
@@ -223,6 +300,11 @@ export class BacktestPanel {
         <span>平均持仓 <b>${num(m.avgHoldingBars, 1)} 根</b></span>
         <span>资金不足拒单 <b>${res.rejected.margin}</b></span>
         <span>强平次数 <b>${res.rejected.marginCalls || 0}</b></span>
+        <span>逐日盯市 <b>${res.settlementOn ? '开' : '关'}</b></span>
+        <span>追保通知 <b>${(res.marginNotices || []).length}</b></span>
+        <span>保本止损 <b>${res.riskControls && res.riskControls.breakeven ? res.riskControls.breakeven.afterR + 'R' : '关'}</b></span>
+        <span>时间止损 <b>${res.riskControls && res.riskControls.timeStop ? res.riskControls.timeStop.bars + ' 根' : '关'}</b></span>
+        <span>时间止损出场 <b>${(res.trades || []).filter(t => t.exitReason === 'time_stop').length}</b> 笔</span>
         <span>涨停买不进 <b>${res.rejected.boardLock || 0}</b></span>
         <span>T+1/方向被拒 <b>${(res.rejects || []).filter(x => x.kind === 'tPlus1').length} / ${res.rejected.rules || 0}</b></span>
         <span>同期持有涨幅 <b class="${sign(cmp.benchReturn)}">${pct(cmp.benchReturn)}</b></span>

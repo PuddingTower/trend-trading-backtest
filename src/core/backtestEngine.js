@@ -51,6 +51,36 @@ export class BacktestEngine {
      * 不等额递增加仓会把平均成本推到接近现价，一个正常回调就能把整段浮盈打成亏损。
      */
     this.pyramid = opts.pyramid && opts.pyramid.maxAdds > 0 ? { stepPct: 0.02, decay: 0.5, ...opts.pyramid } : null;
+    /**
+     * 保本止损（Minervini/海龟都在用的一步）：浮盈达到 afterR 倍初始风险后，
+     * 把止损抬到开仓价（可再加 extraPct 覆盖手续费），此后这笔最多打平。
+     * 没有初始止损就算不出"1 倍风险"是多少，因此会跳过（不猜）。
+     */
+    this.breakeven = opts.breakeven && Number(opts.breakeven.afterR) > 0
+      ? { afterR: Number(opts.breakeven.afterR), extraPct: Number(opts.breakeven.extraPct) || 0 } : null;
+    /**
+     * 时间止损：持仓超过 bars 根仍未脱离成本，就下一根开盘走人。
+     * 趋势交易的机会成本是真实的 —— 资金压在不动的仓位上，等于同时错过下一波。
+     */
+    this.timeStop = opts.timeStop && Number(opts.timeStop.bars) > 0
+      ? { bars: Number(opts.timeStop.bars), requireLoss: opts.timeStop.requireLoss !== false } : null;
+    this._pendingTimeStop = -1;
+    /**
+     * 完整逐日盯市（期货「当日无负债结算」）。默认关，开着会影响每一根的计算。
+     *   maintenanceRatio —— 维持保证金 = 占用保证金 × 该比例，权益跌破它才强平
+     *   warningRatio     —— 可用资金为负（权益 < 占用）即发追保通知
+     *
+     * 与原来那道"底线强平"的三点区别：
+     *   1. 每日按结算价把浮动盈亏**划转进现金**（真实结算价是当日加权均价，这里用收盘价代理并写明）；
+     *   2. 保证金占用按结算价**重算**，不是按开仓价挂着不动 —— 价格涨上去多头占用跟着涨，
+     *      否则杠杆品种的回撤会被系统性低估；
+     *   3. 先追保通知、再到维持线才强平，且强平在**次根开盘**成交（不当根假设能出掉）。
+     */
+    this.settlement = opts.settlement && opts.settlement.enabled
+      ? { maintenanceRatio: 0.75, warningRatio: 1.0, ...opts.settlement }
+      : null;
+    this.marginNotices = [];
+    this._pendingLiquidation = -1;
     this.trades = [];
     this.rejects = [];
     this.equityCurve = [];
@@ -92,15 +122,26 @@ export class BacktestEngine {
 
       // ---- 0. 逐日盯市强平：权益跌破维持保证金就必须先平仓，再谈别的 ----
       // 没有这一步，杠杆品种回测会出现「权益为负」的荒谬结果 —— 现金可以无限亏，
-      // 而真实账户在保证金不足时已被强平。这是 M2 规则引擎的正式课题，这里先立一道底线。
+      // 而真实账户在保证金不足时已被强平。
       if (pos && i > pos.entryIdx) {
+        const settledCall = this.settlement && this._pendingLiquidation === i - 1;
         const prevEq = this.equityCurve.length ? this.equityCurve[this.equityCurve.length - 1].equity : this.capital0;
-        if (prevEq <= pos.margin * (this.maintenanceRatio ?? 0.5)) {
+        const legacyCall = !this.settlement && prevEq <= pos.margin * (this.maintenanceRatio ?? 0.5);
+        if (settledCall || legacyCall) {
           const px = this._slip(bar.open, pos.dir === DIR.LONG ? 'sell' : 'buy');
           cash = this._closePosition(pos, px, i, 'margin_call', cash);
           pos = null;
+          if (this._pendingLiquidation === i - 1) this._pendingLiquidation = -1;
           this.rejected.marginCalls = (this.rejected.marginCalls || 0) + 1;
         }
+      }
+
+      // ---- 0.5 时间止损：上一根收盘决定"这笔不动了"，本根开盘执行 ----
+      if (pos && this._pendingTimeStop === i - 1) {
+        const px = this._slip(bar.open, pos.dir === DIR.LONG ? 'sell' : 'buy');
+        cash = this._closePosition(pos, px, i, 'time_stop', cash);
+        pos = null;
+        this._pendingTimeStop = -1;
       }
 
       // ---- 1. 出场与加仓（用当前 bar 的 high/low 判定，成交价保守取） ----
@@ -109,6 +150,19 @@ export class BacktestEngine {
       // 回测里那条「移动止损」是个装饰品。
       if (pos) {
         this._applyTrails(pos, peak, trough);
+        // 保本止损：浮盈够了就把止损抬到成本。peak/trough 此刻只含到上一根为止的极值，
+        // 所以这条判定用的是"已经走完的行情"，不偷看本根。
+        if (this.breakeven && !pos.beDone && Number.isFinite(pos.riskPerUnit) && pos.riskPerUnit > 0) {
+          const base = pos.dir === DIR.LONG ? peak : trough;
+          const prog = Number.isFinite(base) ? (pos.dir === DIR.LONG ? base - pos.entryPrice : pos.entryPrice - base) : -Infinity;
+          if (prog >= this.breakeven.afterR * pos.riskPerUnit) {
+            const to = pos.dir === DIR.LONG
+              ? pos.entryPrice * (1 + this.breakeven.extraPct)
+              : pos.entryPrice * (1 - this.breakeven.extraPct);
+            pos.stop = ratchetStop(pos.stop ?? null, to, pos.dir);
+            pos.beDone = true;
+          }
+        }
         if (pendingTrail !== null) {
           pos.stop = ratchetStop(pos.stop ?? null, pendingTrail, pos.dir);
         }
@@ -159,13 +213,20 @@ export class BacktestEngine {
               this.rejects.push({ idx: fillIdx, kind: 'open', reason: openGate.reason });
             }
             // 规则闸门二：涨跌停板锁（封板时开单价排队成交不了）
-            const fillGate = openGate.ok && this.rules
+            // 两个例外：停牌复牌首日前收可能是几周前的价，拿它算板幅是错的；
+            // 以及该品种当天本身停牌（合成出来的空 bar）时根本不该成交。
+            const boardJudgable = !fb.stalePrevClose && !fb.suspended;
+            const fillGate = openGate.ok && this.rules && boardJudgable
               ? this.rules.canFillAt(side, px, prevClose, { closing: false }) : { ok: true };
+            if (openGate.ok && fb.suspended) {
+              this.rejected.suspended = (this.rejected.suspended || 0) + 1;
+              this.rejects.push({ idx: fillIdx, kind: 'suspended', reason: '停牌日不可成交' });
+            }
             if (openGate.ok && !fillGate.ok) {
               this.rejected.boardLock = (this.rejected.boardLock || 0) + 1;
               this.rejects.push({ idx: fillIdx, kind: 'boardLock', reason: fillGate.reason });
             }
-            if (openGate.ok && fillGate.ok) {
+            if (openGate.ok && fillGate.ok && !fb.suspended) {
             const marginRate = this.spec.marginRate ?? 0.1;
             const perLotMargin = px * this.spec.multiplier * marginRate;
             const lots = this.sizing === 'notional'
@@ -182,6 +243,10 @@ export class BacktestEngine {
                 margin, feePaid: fee, stop: sig.stop ?? null, target: sig.target ?? null,
                 trail: sig.trail ?? null, reason: sig.reason || 'signal', openBarIdx: i,
                 orders: this._buildOrders(sig, wantDir, px, lots),
+                lastSettle: px,
+                // 初始风险（每单位价格距离）：保本止损的"1R"就是它。没挂止损就没有 R，不猜。
+                riskPerUnit: (sig.stop !== null && sig.stop !== undefined) ? Math.abs(px - sig.stop) : null,
+                beDone: false,
                 addCount: 0
               };
               peak = wantDir === DIR.LONG ? fb.high : Infinity;
@@ -195,22 +260,50 @@ export class BacktestEngine {
       if (pos) {
         peak = Math.max(peak, bar.high);
         trough = Math.min(trough, bar.low);
+        // 时间止损的判定放在收盘：收盘还没脱离成本才算"没启动"，下一根开盘走。
+        if (this.timeStop && this._pendingTimeStop < i && i - pos.entryIdx >= this.timeStop.bars) {
+          const notWorking = this.timeStop.requireLoss ? bar.close <= pos.entryPrice : true;
+          if (notWorking) this._pendingTimeStop = i;
+        }
       }
 
       // ---- 3. 逐 bar 盯市权益 ----
       const float = pos ? this._floating(pos, bar) : 0;
-      const equity = cash + (pos ? pos.margin : 0) + float;
+      let equity = cash + (pos ? pos.margin : 0) + float;
+      // 结算之后账面上不再存在"浮动盈亏"—— 那笔钱已经划进现金了。
+      // 记录时若仍填划转前的浮动值，就会出现 cash + 占用 + 浮动 ≠ 权益，
+      // 而任何拿这三个字段做二次计算的上层（组合、报表）都会算错。
+      let recordFloat = float, settled = false, settledPnl = 0;
+      // ---- 4. 当日无负债结算 ----
+      if (pos && this.settlement && i > pos.entryIdx) {
+        const s = this._markToMarket(pos, bar, cash, i);
+        cash = s.cash;
+        equity = s.equity;                       // 划转后 cash + margin 恒等于原盯市权益
+        recordFloat = 0;
+        settled = true;
+        settledPnl = s.segPnl;
+        if (s.notice) this.marginNotices.push({ idx: i, date: bar.date, kind: s.notice, equity, margin: pos.margin });
+        this._pendingLiquidation = s.liquidate ? i : -1;
+      }
       // margin 一并记下来：组合回测要算「合并保证金占用」才能执行总仓位上限，
       // 曲线里没这个数，上层就只能靠成交记录反推，反推出来的敞口是错的。
       this.equityCurve.push({ idx: i, date: bar.date, equity, cash, margin: pos ? pos.margin : 0,
-                             floating: float, inPosition: !!pos, dir: pos ? pos.dir : 0 });
+                             floating: recordFloat, settled, settledPnl,
+                             inPosition: !!pos, dir: pos ? pos.dir : 0 });
     }
 
     // 收尾：末根收盘强平，避免最后一笔浮盈被当成已实现收益
+    const tail = this.equityCurve[this.equityCurve.length - 1] || null;
+    let endCash = tail ? tail.cash : this.capital0;
     if (pos) {
       const last = bars[bars.length - 1];
-      this._closePosition(pos, last.close, bars.length - 1, 'end_of_data', this.equityCurve[this.equityCurve.length - 1].cash);
+      endCash = this._closePosition(pos, last.close, bars.length - 1, 'end_of_data', endCash);
     }
+    // 收尾这笔的 exitDate 就是最后一根，平仓费属于那一天 —— 末点必须把它算进去。
+    // 漏掉的话「期末权益 = 本金 + Σ净盈亏」会差出一笔平仓费，报表末值也跟着偏高，
+    // 而组合回测按末值相加时品种越多差得越明显。
+    this._endCash = Math.round(endCash * 100) / 100;
+    if (tail) { tail.equity = this._endCash; tail.cash = this._endCash; tail.margin = 0; tail.floating = 0; tail.inPosition = false; tail.dir = 0; }
     return this.result();
   }
 
@@ -231,6 +324,48 @@ export class BacktestEngine {
       }
     }
     return cash;
+  }
+
+  /**
+   * 当日无负债结算。
+   *
+   * 一个容易算错的点：盈亏划转进现金之后，浮动盈亏必须改从**结算价**起算。
+   * 还从开仓价算的话，同一段盈亏会既躺在现金里、又挂在浮动里，被算两遍 ——
+   * 权益曲线看上去"更平稳"，实际上是凭空多出来的钱。
+   *
+   * 划转公式：cash' = cash + 原占用 + 本段盈亏 - 新占用。
+   * 这样 cash' + 新占用 恒等于划转前的 cash + 原占用 + 本段盈亏，权益不会因为结算本身而变动。
+   *
+   * @returns {{cash:number, equity:number, notice:string|null, liquidate:boolean}}
+   */
+  _markToMarket(pos, bar, cash, i) {
+    const mult = this.spec.multiplier;
+    const rate = this.spec.marginRate ?? 0.1;
+    const settle = bar.close;                    // 真实结算价是当日加权均价，这里用收盘价代理
+    const base = pos.lastSettle ?? pos.entryPrice;
+    const segPnl = (pos.dir === DIR.LONG ? settle - base : base - settle) * mult * pos.lots;
+    const equity = cash + pos.margin + segPnl;
+    const newMargin = settle * mult * rate * pos.lots;
+
+    pos.margin = Math.round(newMargin * 100) / 100;
+    // 现金按「取整后的占用」倒推，而不是取整前的理论值：否则 cash + margin 与记录下来的
+    // equity 差着几厘钱，「开不开盯市权益必须一致」这条不变量就没法严格断言。
+    const nextCash = equity - pos.margin;
+    pos.lastSettle = settle;
+    pos.settledIdx = i;
+
+    const maintenance = pos.margin * (this.settlement.maintenanceRatio ?? 0.75);
+    const notice = nextCash < 0 ? 'margin_call' : null;                 // 可用资金为负 → 追保通知
+    const liquidate = equity < maintenance;                             // 权益跌破维持线 → 强平
+    return { cash: nextCash, equity, segPnl, notice, liquidate };
+  }
+
+  /**
+   * 结算一根 bar 上该做的强平判定（在下一根开盘执行，不在当根假设能出掉）。
+   * @returns {boolean} 是否需要在下一根开盘前处理挂起的强平
+   */
+  hasPendingLiquidation() {
+    return this._pendingLiquidation === undefined ? false : this._pendingLiquidation >= 0;
   }
 
   /**
@@ -265,7 +400,13 @@ export class BacktestEngine {
 
       cash -= (addMargin + fee);
       const total = pos.lots + lots;
-      pos.entryPrice = Math.round(((pos.entryPrice * pos.lots + px * lots) / total) * 1e6) / 1e6;
+      const oldLots = pos.lots;
+      // 盯市基准也要按「加权」重算：老仓位从上一个基准价算，新加的这批从它的成交价算，
+      // 合起来等价于把基准挪到两者的加权平均。只改 entryPrice 不改 lastSettle 的话，
+      // 加仓那几手的成本差就凭空消失了 —— 账面会在平仓时多出（或少出）一笔钱。
+      const base = pos.lastSettle ?? pos.entryPrice;
+      pos.lastSettle = Math.round(((base * oldLots + px * lots) / total) * 1e6) / 1e6;
+      pos.entryPrice = Math.round(((pos.entryPrice * oldLots + px * lots) / total) * 1e6) / 1e6;
       pos.lots = total;
       pos.margin += addMargin;
       pos.feePaid += fee;
@@ -278,15 +419,21 @@ export class BacktestEngine {
     return cash;
   }
 
+  /**
+   * 浮动盈亏。开了逐日盯市之后必须从**上一次结算价**起算：
+   * 之前段落的盈亏已经划进现金了，再从开仓价算一遍就是双重计算。
+   */
   _floating(pos, bar) {
-    const diff = pos.dir === DIR.LONG ? bar.close - pos.entryPrice : pos.entryPrice - bar.close;
+    const base = pos.lastSettle ?? pos.entryPrice;
+    const diff = pos.dir === DIR.LONG ? bar.close - base : base - bar.close;
     return diff * this.spec.multiplier * pos.lots;
   }
 
   /** 当前总权益 = 现金 + 占用保证金 + 浮动盈亏（用给定价格盯市）。 */
   _equity(cash, pos, price) {
     if (!pos) return cash;
-    const diff = pos.dir === DIR.LONG ? price - pos.entryPrice : pos.entryPrice - price;
+    const base = pos.lastSettle ?? pos.entryPrice;
+    const diff = pos.dir === DIR.LONG ? price - base : base - price;
     return cash + pos.margin + diff * this.spec.multiplier * pos.lots;
   }
 
@@ -414,12 +561,17 @@ export class BacktestEngine {
     const frac = closing / pos.lots;
     const marginReleased = pos.margin * frac;
     const gross = (pos.dir === DIR.LONG ? price - pos.entryPrice : pos.entryPrice - price) * this.spec.multiplier * closing;
+    // 现金划转用「上次结算价」起算，成交记录用「开仓价」起算。两者不是一回事：
+    // 开了逐日盯市时前面段位的盈亏已经结算进现金，现金只能再加本段，否则重复计算；
+    // 而净盈亏必须是从开仓到平仓的完整盈亏，否则单笔统计会把一段拆成多段、看不出全貌。
+    const settleBase = pos.lastSettle ?? pos.entryPrice;
+    const cashPnl = (pos.dir === DIR.LONG ? price - settleBase : settleBase - price) * this.spec.multiplier * closing;
     const sameDay = idx === pos.entryIdx;
     const exitFee = this._fee(price, closing, { closeToday: sameDay });
     // 建仓时已按整笔手数扣过的开仓费，这里只按比例摊到本次平仓上，避免部分平仓重复扣。
     const entryFeeShare = pos.feePaid * frac;
     const net = gross - entryFeeShare - exitFee;
-    cash += marginReleased + gross - exitFee;
+    cash += marginReleased + cashPnl - exitFee;
     pos.lots -= closing;
     pos.margin = Math.round((pos.margin - marginReleased) * 100) / 100;
     pos.feePaid = Math.round((pos.feePaid - entryFeeShare) * 100) / 100;
@@ -447,8 +599,11 @@ export class BacktestEngine {
       trades: this.trades,
       equityCurve: this.equityCurve,
       rejected: { ...this.rejected },
+      marginNotices: this.marginNotices.slice(),
+      settlement: this.settlement ? { ...this.settlement, note: '结算价用收盘价代理（真实为当日加权均价）' } : null,
+      riskControls: { breakeven: this.breakeven, timeStop: this.timeStop, pyramid: this.pyramid },
       rejects: this.rejects.slice(),
-      finalEquity: this.equityCurve.length ? this.equityCurve[this.equityCurve.length - 1].equity : this.capital0,
+      finalEquity: this._endCash ?? (this.equityCurve.length ? this.equityCurve[this.equityCurve.length - 1].equity : this.capital0),
       capital: this.capital0,
       spec: { multiplier: this.spec.multiplier, tick: this.spec.tick, marginRate: this.spec.marginRate }
     };
