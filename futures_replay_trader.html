@@ -1153,6 +1153,7 @@
       <div class="tab-buttons">
         <button class="tab-btn active" data-tab="tabTrades">📝 交易明细与记录</button>
         <button class="tab-btn" data-tab="tabEquity">📈 资金净值曲线 (Equity)</button>
+        <button class="tab-btn" data-tab="tabBacktest">🤖 策略自动回测</button>
         <button class="tab-btn" data-tab="tabUpload">🌐 行情与缓存中心 (真实在线 / IndexedDB / CSV)</button>
         <button class="tab-btn" data-tab="tabHelp">⌨️ 快捷键与使用指南</button>
       </div>
@@ -1235,6 +1236,11 @@
         <span id="equityHighWaterMark" style="font-size:11px; color:var(--accent-gold);">最高资产峰值: 100,000 元</span>
       </div>
       <canvas id="equityCanvas"></canvas>
+    </div>
+
+    <!-- Tab 2.5: 策略自动回测（撮合在 src/core/backtestEngine.js，面板只收集参数与展示） -->
+    <div id="tabBacktest" class="tab-content">
+      <div id="backtestPanelRoot"></div>
     </div>
 
     <!-- Tab 3: Online Real Data & Local Cache Center -->
@@ -1512,6 +1518,7 @@
     import { parseSymbol, classifyAShare, MARKETS } from './src/markets/symbolMeta.js';
     import { getFuturesSpec } from './src/markets/contractSpecs.js';
     import { OverlayManager } from './src/ui/overlays.js';
+    import { BacktestPanel } from './src/ui/backtestPanel.js';
 
     // 兼容旧调用点：内联 UI 代码里仍在用 MarketDataCache.xxx()，这里做一层薄转发，
     // 让 M1 不动 3000 行 UI 代码就能接上 v2 schema。M2 起再逐步改成直接调 BarStore。
@@ -2844,6 +2851,7 @@
         this.drawCandlesticks(start, end);
         this.drawMovingAverages(start, end);
         this.drawTradeMarkers();
+        this.drawBacktestMarkers();
 
         // 叠加指标（VP / Supertrend / Pivot / 形态 / 供需区）—— 画在 K线之上、用户画线之下
         if (this.overlayManager) this.overlayManager.render(this);
@@ -3026,6 +3034,41 @@
         }
       }
 
+      /** 自动回测的成交点：与手动复盘的标记分开画，两套数字不能混在同一个视觉层里。 */
+      drawBacktestMarkers() {
+        const marks = this.backtestMarkers;
+        if (!marks || !marks.length) return;
+        const { ctx } = this;
+        const lastIdx = this.visibleDataCount - 1;
+        ctx.save();
+        ctx.font = '10px Consolas, monospace';
+        for (const t of marks) {
+          if (t.entryIdx > lastIdx) continue;
+          const long = t.dir === 'long';
+          const x0 = this.barIndexToX(t.entryIdx);
+          const y0 = this.priceToY(t.entryPrice);
+          ctx.fillStyle = long ? '#ef4444' : '#10b981';
+          ctx.beginPath();
+          if (long) { ctx.moveTo(x0, y0 + 12); ctx.lineTo(x0 - 4, y0 + 20); ctx.lineTo(x0 + 4, y0 + 20); }
+          else { ctx.moveTo(x0, y0 - 12); ctx.lineTo(x0 - 4, y0 - 20); ctx.lineTo(x0 + 4, y0 - 20); }
+          ctx.closePath(); ctx.fill();
+
+          if (t.exitIdx <= lastIdx) {
+            const x1 = this.barIndexToX(t.exitIdx), y1 = this.priceToY(t.exitPrice);
+            ctx.strokeStyle = t.netPnL >= 0 ? 'rgba(239,68,68,0.75)' : 'rgba(16,185,129,0.75)';
+            ctx.lineWidth = 1.2; ctx.setLineDash([4, 3]);
+            ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.beginPath(); ctx.arc(x1, y1, 3, 0, Math.PI * 2); ctx.fill();
+            if (x1 > 40) {
+              ctx.fillStyle = t.netPnL >= 0 ? '#ef4444' : '#10b981';
+              ctx.fillText((t.netPnL >= 0 ? '+' : '') + Math.round(t.netPnL), x1 - 38, y1 - 4);
+            }
+          }
+        }
+        ctx.restore();
+      }
+
       drawScales(minPrice, maxPrice, start, end, barPitch) {
         const { ctx, width, height, mainWidth, totalChartHeight } = this;
         ctx.save();
@@ -3146,6 +3189,7 @@
         this.chartModule = new ChartModule('chartContainer', 'chartCanvas');
         this.chartModule.tradingEngine = this.tradingEngine;
         this.chartModule.overlayManager = new OverlayManager();
+        this.backtestPanel = new BacktestPanel(this.chartModule, 'backtestPanelRoot');
 
         this.autoPlayTimer = null;
         this.currentSymbol = 'eg9999';
@@ -3182,6 +3226,10 @@
         this.currentMarket = parsed.market;
         const adjust = isFutures ? 'none' : (adjustSel ? adjustSel.value : 'qfq');
         const symbol = isFutures ? parsed.contractCode : parsed.code;
+        // 换品种必须清掉上一轮的回测标记，否则旧成交点会叠在新K线上
+        this.chartModule.backtestMarkers = null;
+        this.chartModule.backtestCode = symbol;
+        this.chartModule.periodsPerYear = period === 'daily' ? 252 : (period === 'weekly' ? 52 : (period === 'monthly' ? 12 : 1000));
         const cacheKey = barKey(parsed.market, symbol, period, adjust);
         const label = isFutures
           ? `${parsed.name}${parsed.isDominant ? ' 主连' : ''} (${symbol})`

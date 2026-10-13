@@ -2,6 +2,10 @@
 const cases = [];
 export const test = (name, fn) => cases.push({ name, fn });
 
+/** 依赖外部数据的用例在数据缺失时明确 skip —— 报"通过"是撒谎，报"失败"是噪音。 */
+class Skipped extends Error {}
+export const skip = (why) => { throw new Skipped(why); };
+
 export const assert = {
   ok(v, msg) { if (!v) throw new Error(msg || `期望真值，得到 ${JSON.stringify(v)}`); },
   eq(a, b, msg) {
@@ -24,19 +28,22 @@ export const assert = {
 };
 
 export async function runAll(label = '') {
-  let pass = 0, fail = 0;
-  const failures = [];
+  let pass = 0, fail = 0, skipped = 0;
   for (const c of cases) {
     try {
       await c.fn();
       pass++;
       process.stdout.write(`  \x1b[32m✓\x1b[0m ${c.name}\n`);
     } catch (e) {
+      if (e instanceof Skipped) {
+        skipped++;
+        process.stdout.write(`  \x1b[33m○\x1b[0m ${c.name} \x1b[33m(skip: ${e.message})\x1b[0m\n`);
+        continue;
+      }
       fail++;
-      failures.push({ name: c.name, err: e });
       process.stdout.write(`  \x1b[31m✗\x1b[0m ${c.name}\n      ${String(e.message).split('\n').join('\n      ')}\n`);
     }
   }
-  process.stdout.write(`\n${label} ${pass} passed, ${fail} failed\n`);
-  return { pass, fail, failures };
+  process.stdout.write(`\n${label} ${pass} passed, ${fail} failed${skipped ? `, ${skipped} skipped` : ''}\n`);
+  return { pass, fail, skipped };
 }

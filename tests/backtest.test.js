@@ -1,4 +1,4 @@
-import { test, assert } from './harness.js';
+import { test, assert, skip } from './harness.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,11 +9,14 @@ import { ema, sma, rsi, macd, atr, priorExtreme, crosses } from '../src/strategy
 
 const DIRNAME = path.dirname(fileURLToPath(import.meta.url));
 const FIX = path.join(DIRNAME, '..', 'fixtures');
+/** 夹具不入库（可由 tools/fetch_fixtures.py 重抓），所以缺时相关用例跳过而不是报错。 */
+const HAS_FIXTURES = fs.existsSync(path.join(FIX, 'index.json'));
 const SPEC = { multiplier: 10, tick: 1, marginRate: 0.1, fee: { mode: 'fixed', value: 3 }, closeTodayFee: { mode: 'fixed', value: 3 } };
 const mk = (date, o, h, l, c, v = 1000) => ({ date, open: o, high: h, low: l, close: c, volume: v });
 
 // ---------- 确定性 ----------
 test('确定性：同一输入跑两次，逐字段完全一致', () => {
+  if (!HAS_FIXTURES) skip('未抓取 fixtures/（跑 python tools/fetch_fixtures.py 后可用）');
   const bars = JSON.parse(fs.readFileSync(path.join(FIX, 'futures_rbm_daily_none.json'), 'utf8')).bars;
   const sig = STRATEGIES[0].signals(bars, {});
   const run = () => new BacktestEngine(bars, SPEC, { capital: 200000, slippageTicks: 1 }).run(sig);
@@ -24,6 +27,7 @@ test('确定性：同一输入跑两次，逐字段完全一致', () => {
 });
 
 test('确定性：策略信号与品种无关的全局状态不存在（连续调用稳定）', () => {
+  if (!HAS_FIXTURES) skip('未抓取 fixtures/（跑 python tools/fetch_fixtures.py 后可用）');
   const bars = JSON.parse(fs.readFileSync(path.join(FIX, 'futures_egm_daily_none.json'), 'utf8')).bars;
   for (const st of STRATEGIES) {
     const s1 = JSON.stringify(st.signals(bars, {}));
@@ -221,6 +225,7 @@ test('指标：胜率/盈亏比/Sharpe 与手算一致', () => {
 
 // ---------- 真实夹具健全性 ----------
 test('夹具数据本身没有 OHLC 关系违例（字段序错会在这里暴露）', () => {
+  if (!HAS_FIXTURES) skip('未抓取 fixtures/（跑 python tools/fetch_fixtures.py 后可用）');
   const files = fs.readdirSync(FIX).filter(f => f.endsWith('.json') && f !== 'index.json');
   assert.ok(files.length >= 10, `夹具太少：${files.length}`);
   for (const f of files) {
@@ -263,6 +268,7 @@ test('爆仓要标 ruined，而不是让年化/Sharpe 静默变 NaN 冒充"业�
 });
 
 test('真实数据上跑全部策略不抛错，且每笔交易 exitIdx > entryIdx', () => {
+  if (!HAS_FIXTURES) skip('未抓取 fixtures/（跑 python tools/fetch_fixtures.py 后可用）');
   for (const f of fs.readdirSync(FIX).filter(x => x.endsWith('.json') && x !== 'index.json').slice(0, 6)) {
     const { bars, meta } = JSON.parse(fs.readFileSync(path.join(FIX, f), 'utf8'));
     const spec = meta.market === 'futures' ? SPEC : { multiplier: 100, tick: 0.01, marginRate: 1, fee: { mode: 'rate', value: 0.00025 } };

@@ -15,3 +15,8 @@ Desktop.ini
 
 # Local only
 *.log
+
+# 行情夹具：可由 tools/fetch_fixtures.py 重新抓取，不入库
+# （公开仓库不再生成时再分发上游抓取数据）
+fixtures/
+tools/backtest_result.json
