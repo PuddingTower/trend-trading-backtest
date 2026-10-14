@@ -1583,76 +1583,20 @@ kbd {
    Narrow windows — the rail and the toolbars reflow; the split layout itself
    is unchanged. Below ~1180px the 336px rail would crush the plot.
    ========================================================================== */
-/* ==========================================================================
-   Touch surfaces
-   The chart owns the gesture. Without touch-action:none the browser steals
-   one-finger pan for page scroll and two-finger pinch for page zoom, which
-   arrives as pointercancel and leaves the crosshair stranded off-screen.
-   ========================================================================== */
-.chart-container,
-#chartCanvas,
-#equityCanvas,
-#modalEquityCanvas,
-#modalPositionCanvas {
-  touch-action: none;
-  -webkit-touch-callout: none;
-}
-
-/* The rail toggle only exists in drawer mode; hidden on desktop. */
-.sidebar-toggle {
-  display: none;
-}
-
-/* Advanced-report tables and the strategy KPI grid are built at runtime by
-   src/ui/backtestPanel.js and had no stylesheet rules at all. */
-.data-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: var(--md-type-body-sm);
-  font-variant-numeric: tabular-nums;
-}
-.data-table th {
-  background: var(--md-sys-color-surface-container-high);
-  color: var(--md-sys-color-on-surface-variant);
-  font-weight: var(--md-weight-semibold);
-  text-align: left;
-  padding: var(--md-space-2) var(--md-space-3);
-  white-space: nowrap;
-}
-.data-table td {
-  padding: var(--md-space-2) var(--md-space-3);
-  border-bottom: 1px solid var(--md-sys-color-outline-variant);
-  color: var(--md-sys-color-on-surface);
-}
-.data-table tr:hover td {
-  background: var(--md-sys-color-surface-container-high);
-}
-.kpi-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-  gap: var(--md-space-3);
-}
-
-/* ==========================================================================
-   Window-width behaviour
-   ========================================================================== */
 @media (max-width: 1760px) {
   .brand-badge,
   .tab-hint {
     display: none;
   }
 }
-@media (max-width: 1220px) {
+@media (max-width: 1180px) {
   :root {
-    --md-rail-w: 280px;
+    --md-rail-w: 288px;
   }
   .form-grid {
     gap: var(--md-space-2);
   }
 }
-
-/* Narrow windows: the trading rail becomes an off-canvas drawer. The .open
-   class is toggled by #btnToggleSidebar in the app script — keep in sync. */
 @media (max-width: 900px) {
   .navbar {
     flex-wrap: wrap;
@@ -1662,74 +1606,15 @@ kbd {
     width: 100%;
     justify-content: center;
   }
-  .sidebar-toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
+  .workspace {
+    flex-direction: column;
   }
   .side-panel {
-    position: absolute;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    width: min(340px, 90vw);
-    z-index: 1500;
-    transform: translateX(103%);
-    transition: transform var(--md-motion-medium2) var(--md-motion-standard);
-    box-shadow: var(--md-elev-5);
-  }
-  .side-panel.open {
-    transform: translateX(0);
+    width: auto;
+    max-height: 44vh;
+    border-top: 1px solid var(--md-sys-color-outline-variant);
   }
   .bottom-panel {
-    height: 220px;
-  }
-}
-
-/* Coarse pointers: 40px targets, 16px inputs (iOS auto-zooms below that), and
-   hover affordances dropped because they latch on after a tap. */
-@media (pointer: coarse) {
-  .tool-btn,
-  .btn,
-  .btn-sm,
-  .tab-btn {
-    min-height: 40px;
-    padding-left: var(--md-space-3);
-    padding-right: var(--md-space-3);
-    font-size: var(--md-type-body-lg);
-  }
-  input,
-  select,
-  textarea {
-    font-size: 16px;
-  }
-  .navbar {
-    height: auto;
-    min-height: 52px;
-    padding-top: 6px;
-    padding-bottom: 6px;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-  .toolbar {
-    height: auto;
-    min-height: 48px;
-    padding-top: var(--md-space-1);
-    padding-bottom: var(--md-space-1);
-  }
-  .kpi-grid {
-    grid-template-columns: 1fr;
-  }
-  .bottom-panel {
-    height: min(230px, 30dvh);
-  }
-  .panel-section {
-    padding: var(--md-space-3);
-  }
-  .btn:hover::after,
-  .tool-btn:hover::after,
-  .tab-btn:hover::after,
-  .pill-tab:hover::after {
-    opacity: 0;
+    height: 210px;
   }
 }

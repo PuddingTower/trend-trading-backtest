@@ -18,7 +18,7 @@
       </div>
 
       <div class="contract-selector">
-        <label for="symbolSelect" style="color:var(--text-muted);">品种:</label>
+        <label for="symbolSelect">品种:</label>
         <select id="symbolSelect">
           <optgroup label="期货主连 (东财真实行情)">
             <option value="EG0" selected>EG0 乙二醇主连</option>
@@ -47,21 +47,21 @@
             <option value="m9999">m9999 豆粕仿真</option>
           </optgroup>
         </select>
-        <select id="periodSelect" style="background:transparent; border:none; color:#60a5fa; font-size:11px; font-weight:600; outline:none; cursor:pointer;" title="K线周期">
+        <select id="periodSelect" title="K线周期" aria-label="K线周期">
           <option value="daily" selected>日线</option>
           <option value="weekly">周线</option>
           <option value="monthly">月线</option>
           <option value="60m">60分钟</option>
         </select>
-        <select id="adjustSelect" style="background:transparent; border:none; color:#60a5fa; font-size:11px; font-weight:600; outline:none; cursor:pointer;" title="价格复权口径（A股）；期货用主连拼接">
+        <select id="adjustSelect" title="价格复权口径（A股）；期货用主连拼接" aria-label="价格复权口径">
           <option value="qfq" selected>前复权</option>
           <option value="none">不复权</option>
           <option value="hfq">后复权</option>
         </select>
-        <input id="symbolInput" class="form-input" placeholder="代码/名称 如 rb2610、600519" title="也可直接输入代码：期货 rb2610 / RB0 / 螺纹钢主连，A股 600519 / sh000001"
-               style="width:150px; height:22px; padding:0 6px; font-size:11px;" />
-        <button class="btn btn-sm" id="btnLoadCode" style="height:22px; padding:0 6px; font-size:10px;" title="解析输入的任意代码并载入">载入</button>
-        <button class="btn btn-sm btn-primary" id="btnSyncOnlineData" style="height:22px; padding:0 6px; font-size:10px;" title="在线拉取真实行情并缓存至本地">🌐 在线同步</button>
+        <input id="symbolInput" class="form-input" placeholder="代码/名称 如 rb2610、600519" aria-label="按代码或名称载入"
+               title="也可直接输入代码：期货 rb2610 / RB0 / 螺纹钢主连，A股 600519 / sh000001" />
+        <button class="btn btn-sm" id="btnLoadCode" title="解析输入的任意代码并载入">载入</button>
+        <button class="btn btn-sm btn-primary" id="btnSyncOnlineData" title="在线拉取真实行情并缓存至本地">🌐 在线同步</button>
       </div>
 
       <div class="contract-quote">
@@ -73,32 +73,28 @@
     <!-- Center Replay Controls -->
     <div class="nav-center">
       <span class="replay-status-badge" id="replayBarIndexBadge">进度: 120 / 260</span>
+      <select id="startOffset" class="mini-select" aria-label="回测起点" title="回测起点：只载入该时间之后的数据，切换后重载当前品种并重置账户">
+        <option value="0" selected>全部数据</option>
+        <option value="0.5">近6个月</option>
+        <option value="1">近1年</option>
+        <option value="2">近2年</option>
+        <option value="3">近3年</option>
+      </select>
       <button class="btn btn-sm" id="btnReplayReset" title="重置回测到初始位置">⏮ 重置</button>
-      <button class="btn btn-sm btn-primary" id="btnReplayStep" title="快捷键: 空格 或 F">⏭ 单步推进 (Space)</button>
-      <button class="btn btn-sm" id="btnReplayAutoPlay">▶ 自动播放</button>
-      <select id="replaySpeed" style="background:var(--bg-tertiary); color:#fff; border:none; padding:2px 4px; border-radius:3px; font-size:11px;">
+      <button class="btn btn-sm btn-primary" id="btnReplayStep" title="单步推进下一根 K 线 · 快捷键: 空格 或 F">⏭ 单步</button>
+      <button class="btn btn-sm" id="btnReplayAutoPlay">▶ 播放</button>
+      <select id="replaySpeed" class="mini-select" aria-label="自动播放速度">
         <option value="1000">1.0秒/根</option>
         <option value="500" selected>0.5秒/根</option>
         <option value="200">0.2秒/根</option>
         <option value="100">极速(0.1s)</option>
       </select>
-      <button class="btn btn-sm" id="btnShowAllBars" title="显示全部K线">⏩ 全部显示</button>
-      <!-- 盲复盘：抽一段行情、遮住品种与日期，只留价格行为 -->
-      <span id="blindCtl" style="display:flex;align-items:center;gap:5px;">
-        <label style="font-size:11px;color:var(--text-muted);">长度</label>
-        <input type="number" id="blindLen" value="120" min="40" max="400" step="10" style="background:var(--bg-tertiary);color:#fff;border:1px solid var(--border-color);padding:2px 4px;border-radius:3px;font-size:11px;width:56px;" />
-        <button class="btn btn-sm" id="btnBlindStart" title="从自选池随机抽一个品种的一段行情，遮住名称与日期">🎲 盲复盘</button>
-      </span>
-      <span id="blindBadge" style="display:none;font-size:11px;color:#93c5fd;background:rgba(41,98,255,.18);border:1px solid var(--accent-blue);border-radius:4px;padding:2px 8px;"></span>
-      <button class="btn btn-sm" id="btnBlindExit" style="display:none;" title="退回盲复盘，恢复原来的品种与进度">⏏ 退出盲复盘</button>
+      <button class="btn btn-sm" id="btnShowAllBars" title="显示全部K线">⏩ 全部</button>
     </div>
 
     <!-- Right Quick Actions -->
     <div class="nav-right">
-      <!-- 只在窄屏（iPad 竖屏）出现：此时 .side-panel 已变成右侧抽屉，不开就下不了单 -->
-      <button class="btn btn-sm sidebar-toggle" id="btnToggleSidebar" title="展开/收起交易侧栏">📋 交易面板</button>
-      <button class="btn btn-sm btn-warning" id="btnOpenAnalysisModal">📊 账户分析 (本次曲线)</button>
-      <button class="btn btn-sm" id="btnImportDataModal">📂 导入数据</button>
+      <button class="btn btn-sm btn-warning" id="btnOpenAnalysisModal">📊 账户分析</button>
       <button class="btn btn-sm" id="btnExportCSV">📥 导出明细</button>
       <button class="btn btn-sm" id="btnResetAccount">🔄 清空回测</button>
     </div>
@@ -107,21 +103,25 @@
   <!-- Drawing & Measurement Toolbar -->
   <div class="toolbar">
     <div class="toolbar-group">
-      <span class="toolbar-title">工具</span>
-      <button class="tool-btn active" data-tool="select" title="选择与平移模式 (V)">↖ 选择/拖动</button>
-      <button class="tool-btn" data-tool="hline" title="水平支撑/阻力线 (W)">— 水平线 (W)</button>
-      <button class="tool-btn" data-tool="segment" title="两点趋势线段 (E)">╱ 趋势线段 (E)</button>
-      <button class="tool-btn" data-tool="ray" title="两点向右无限延伸射线 (Q)">↗ 趋势射线 (Q)</button>
-      <button class="tool-btn" data-tool="measure" title="测量价格变化、点数、涨跌幅、K线周期 (D)">📐 测量尺 (D)</button>
-      <button class="tool-btn" data-tool="riskreward" title="盈亏比测算工具：设定进场点、止盈目标与止损风险 (R)">⚖️ 盈亏比工具 (R)</button>
+      <span class="toolbar-title" id="grpDraw">绘制</span>
+      <!-- 单选工具：互斥，故为分段控件 -->
+      <div class="seg-group" role="group" aria-labelledby="grpDraw">
+        <button class="tool-btn active" data-tool="select" aria-pressed="true" title="选择与平移模式 (V)">↖ 选择</button>
+        <button class="tool-btn" data-tool="hline" aria-pressed="false" title="水平支撑/阻力线 (W)">— 水平线 (W)</button>
+        <button class="tool-btn" data-tool="segment" aria-pressed="false" title="两点趋势线段 (E)">╱ 线段 (E)</button>
+        <button class="tool-btn" data-tool="ray" aria-pressed="false" title="两点向右无限延伸射线 (Q)">↗ 射线 (Q)</button>
+        <button class="tool-btn" data-tool="measure" aria-pressed="false" title="测量价格变化、点数、涨跌幅、K线周期 (D)">📐 测量尺 (D)</button>
+        <button class="tool-btn" data-tool="riskreward" aria-pressed="false" title="盈亏比测算工具：设定进场点、止盈目标与止损风险 (R)">⚖️ 盈亏比 (R)</button>
+      </div>
     </div>
 
     <div class="toolbar-group">
-      <span class="toolbar-title">辅助</span>
-      <button class="tool-btn" id="btnToggleMagnet" title="自动吸附到最近K线的高/低/开/收 (M)">🧲 磁吸: 关</button>
-      <button class="tool-btn active" id="btnToggleTradePaths" title="在K线图上显示多空平仓连线与盈亏统计">📍 交易连线: 开</button>
-      <input type="color" id="drawColorPicker" value="#f59e0b" style="width:22px; height:22px; border:none; background:transparent; cursor:pointer; vertical-align:middle;" title="画线颜色" />
-      <select id="drawLineWidth" style="background:var(--bg-tertiary); color:#fff; border:none; padding:2px 4px; border-radius:3px; font-size:11px;">
+      <span class="toolbar-title" id="grpAssist">辅助</span>
+      <button class="tool-btn" id="btnToggleMagnet" aria-pressed="false" title="自动吸附到最近K线的高/低/开/收 (M)">🧲 磁吸: 关</button>
+      <button class="tool-btn active" id="btnToggleTradePaths" aria-pressed="true" title="在K线图上显示多空平仓连线与盈亏统计">📍 交易连线: 开</button>
+      <button class="tool-btn" id="btnToggleAnchor" aria-pressed="false" title="最新K线固定在图表中央，推进/播放时视角自动跟随">🎯 居中: 关</button>
+      <input type="color" id="drawColorPicker" value="#f59e0b" class="swatch" aria-label="画线颜色" title="画线颜色" />
+      <select id="drawLineWidth" class="mini-select" aria-label="画线粗细">
         <option value="1">细 1px</option>
         <option value="2" selected>中 2px</option>
         <option value="3">粗 3px</option>
@@ -129,29 +129,33 @@
     </div>
 
     <div class="toolbar-group">
-      <span class="toolbar-title">叠加</span>
-      <button class="tool-btn" data-overlay="vp" title="Volume Profile：POC / VAH / VAL / HVN·LVN。自动锚定=从最近显著高低点起算">📊 VP 量能剖面</button>
-      <button class="tool-btn" data-overlay="supertrend" title="Supertrend：单向动态支撑/阻力线，变色即趋势翻转">〰 SuperTrend</button>
-      <button class="tool-btn" data-overlay="pivots" title="Pivot Points：上一期高低收算出的关键位（只用已收盘数据，不预测未来）。每期只画在自己的区间内，历史期淡出；HL 摆动位被收盘穿越即截止并标「破」">✛ Pivot 关键位</button>
-      <button class="tool-btn" data-overlay="patterns" title="自动形态：头肩/双顶底/三角/楔形/旗形，标出 突破·目标·止损 三条关键位，并跟踪到 在途中/已突破/已达标/已失效/已过期 —— 走完的形态线会截止，不会一直挂着。启发式，可能误报">◈ 形态识别</button>
-      <button class="tool-btn" data-overlay="zones" title="供需区 + Wyckoff 事件（spring/ut/sos/sow）。区带截止在被穿越那一根并标「已失效」；脱离棒还是最新一根时标「形成中」；名额按强度×新鲜度排序，老区不再长期霸屏">▧ 供需区</button>
+      <span class="toolbar-title" id="grpLayers">图层</span>
+      <!-- 多选叠加：可任意组合，故为筛选片 -->
+      <div class="chip-row" role="group" aria-labelledby="grpLayers">
+        <button class="tool-btn" data-overlay="vp" aria-pressed="false" title="Volume Profile：POC / VAH / VAL / HVN·LVN。自动锚定=从最近显著高低点起算">📊 VP 剖面</button>
+        <button class="tool-btn" data-overlay="supertrend" aria-pressed="false" title="Supertrend：单向动态支撑/阻力线，变色即趋势翻转">〰 SuperTrend</button>
+        <button class="tool-btn" data-overlay="pivots" aria-pressed="false" title="Pivot Points：上一期高低收算出的关键位（只用已收盘数据，不预测未来）">✛ Pivot</button>
+        <button class="tool-btn" data-overlay="patterns" aria-pressed="false" title="自动形态：头肩/双顶底/三角/楔形/旗形，标出 突破·目标·止损 三条关键位。启发式，可能误报">◈ 形态识别</button>
+        <button class="tool-btn" data-overlay="zones" aria-pressed="false" title="供需区 + Wyckoff 事件（spring/ut/sos/sow）。已跌破的区自动移除">▧ 供需区</button>
+      </div>
     </div>
 
-    <div class="toolbar-group" style="border-right:none;">
-      <button class="tool-btn" id="btnDeleteSelectedLine" title="删除当前选中的线 (Delete)">🗑 删除选中线</button>
-      <button class="tool-btn" id="btnClearAllLines" title="清空全部画线">🧹 清空画线</button>
+    <div class="toolbar-group">
+      <span class="toolbar-title">清理</span>
+      <button class="tool-btn" id="btnDeleteSelectedLine" title="删除当前选中的线 (Delete)">🗑 删除线</button>
+      <button class="tool-btn tool-btn--danger" id="btnClearAllLines" title="清空全部画线（不可撤销）">🧹 清空画线</button>
     </div>
 
-    <div style="margin-left:auto; display:flex; align-items:center; gap:10px; font-size:11px; color:var(--text-muted);">
-      <span>K线配色: <b style="color:var(--up-color);">红涨</b> / <b style="color:var(--down-color);">绿跌</b></span>
-      <span>|</span>
-      <span>滚轮缩放 / 拖拽平移</span>
+    <div class="toolbar-hint">
+      <span>K线配色：<b class="val-up">▲ 红涨</b> / <b class="val-down">▼ 绿跌</b></span>
+      <span aria-hidden="true">·</span>
+      <span>滚轮缩放 · 拖拽平移</span>
     </div>
   </div>
 
   <!-- 叠加指标参数条：开启任一叠加层时出现（TradingView 式“指标+设置”分离） -->
-  <div id="overlaySettings" class="toolbar" style="display:none; padding:4px 10px; min-height:26px; border-top:none;">
-    <span id="overlaySettingsBody" style="display:flex; flex-wrap:wrap; gap:14px; align-items:center; font-size:11px; color:var(--text-muted);"></span>
+  <div id="overlaySettings" class="toolbar" style="display:none">
+    <span id="overlaySettingsBody"></span>
   </div>
 
   <!-- Main Split Area -->
@@ -167,9 +171,9 @@
         <div class="legend-item"><span class="legend-label">收:</span> <span class="legend-val" id="legendClose">--</span></div>
         <div class="legend-item"><span class="legend-label">涨跌:</span> <span class="legend-val" id="legendChange">--</span></div>
         <div class="legend-item"><span class="legend-label">成交量:</span> <span class="legend-val" id="legendVol">--</span></div>
-        <div class="legend-item" style="color:#f59e0b;"><span class="legend-label" style="color:#f59e0b;">MA5:</span> <span class="legend-val" id="legendMA5" style="color:#f59e0b;">--</span></div>
-        <div class="legend-item" style="color:#06b6d4;"><span class="legend-label" style="color:#06b6d4;">MA10:</span> <span class="legend-val" id="legendMA10" style="color:#06b6d4;">--</span></div>
-        <div class="legend-item" style="color:#a855f7;"><span class="legend-label" style="color:#a855f7;">MA20:</span> <span class="legend-val" id="legendMA20" style="color:#a855f7;">--</span></div>
+        <div class="legend-item legend-ma5"><span class="legend-label">MA5:</span> <span class="legend-val" id="legendMA5">--</span></div>
+        <div class="legend-item legend-ma10"><span class="legend-label">MA10:</span> <span class="legend-val" id="legendMA10">--</span></div>
+        <div class="legend-item legend-ma20"><span class="legend-label">MA20:</span> <span class="legend-val" id="legendMA20">--</span></div>
       </div>
 
       <!-- Canvas Container -->
@@ -184,7 +188,7 @@
       <div class="panel-section">
         <div class="section-title">
           <span>账户资金概况</span>
-          <span style="font-size:11px; color:var(--text-muted);">T+0 双向交易</span>
+          <span>T+0 双向交易</span>
         </div>
         <div class="form-grid">
           <div class="form-group">
@@ -193,18 +197,18 @@
           </div>
           <div class="form-group">
             <span class="form-label">可用资金(元)</span>
-            <div id="displayAvailableCash" class="form-input" style="background:var(--bg-tertiary); font-weight:700;">100,000</div>
+            <div id="displayAvailableCash" class="form-input is-readonly">100,000</div>
           </div>
         </div>
 
         <div class="form-grid">
           <div class="form-group">
             <span class="form-label">动态总权益(元)</span>
-            <div id="displayTotalEquity" class="form-input" style="background:var(--bg-tertiary); font-weight:700; color:#fff;">100,000</div>
+            <div id="displayTotalEquity" class="form-input is-readonly">100,000</div>
           </div>
           <div class="form-group">
             <span class="form-label">占用保证金(元)</span>
-            <div id="displayMarginUsed" class="form-input" style="background:var(--bg-tertiary); color:var(--text-muted);">0</div>
+            <div id="displayMarginUsed" class="form-input is-readonly">0</div>
           </div>
         </div>
       </div>
@@ -236,15 +240,26 @@
           </div>
         </div>
 
+        <div class="form-grid">
+          <div class="form-group">
+            <span class="form-label">止损 %（0=关闭）</span>
+            <input type="number" id="stopLossPct" class="form-input" value="5" min="0" step="0.5" />
+          </div>
+          <div class="form-group">
+            <span class="form-label">止盈 %（0=不止盈）</span>
+            <input type="number" id="takeProfitPct" class="form-input" value="0" min="0" step="0.5" />
+          </div>
+        </div>
+
         <!-- Order Execution Buttons -->
         <div class="trade-actions">
           <button class="btn-trade-long" id="btnBuyLong" title="快捷键: B">
             <span>买入开多 (B)</span>
-            <span style="font-size:11px; opacity:0.85;" id="btnLongPriceLabel">@ 4320</span>
+            <span id="btnLongPriceLabel">@ 4320</span>
           </button>
           <button class="btn-trade-short" id="btnSellShort" title="快捷键: S">
             <span>卖出开空 (S)</span>
-            <span style="font-size:11px; opacity:0.85;" id="btnShortPriceLabel">@ 4320</span>
+            <span id="btnShortPriceLabel">@ 4320</span>
           </button>
           <button class="btn-trade-close" id="btnClosePosition" title="快捷键: C">
             一键平仓 (C)
@@ -312,34 +327,34 @@
       <div class="panel-section">
         <div class="section-title">
           <span>当前持仓监控</span>
-          <span id="posSymbolBadge" class="badge" style="background:#374151; color:#9ca3af;">eg9999</span>
+          <span id="posSymbolBadge" class="badge">eg9999</span>
         </div>
 
         <div class="position-card">
           <div class="position-header">
-            <span style="color:var(--text-muted);">方向 & 手数:</span>
+            <span>方向 & 手数:</span>
             <span id="posDirectionBadge" class="pos-badge flat">空仓观望</span>
           </div>
 
           <div class="pos-row">
-            <span style="color:var(--text-muted);">持仓均价:</span>
-            <span id="posAvgPrice" style="font-weight:600;">--</span>
+            <span>持仓均价:</span>
+            <span id="posAvgPrice">--</span>
           </div>
 
           <div class="pos-row">
-            <span style="color:var(--text-muted);">现价 / 点差:</span>
-            <span id="posPriceDiff" style="font-weight:600;">--</span>
+            <span>现价 / 点差:</span>
+            <span id="posPriceDiff">--</span>
           </div>
 
           <div class="pos-row">
-            <span style="color:var(--text-muted);">保证金占用:</span>
-            <span id="posMarginAmount" style="color:var(--text-muted);">0.00 元</span>
+            <span>保证金占用:</span>
+            <span id="posMarginAmount" class="muted">0.00 元</span>
           </div>
 
-          <hr style="border:none; border-top:1px dashed var(--border-color); margin:6px 0;" />
+          <hr class="divider" />
 
-          <div style="display:flex; justify-content:space-between; align-items:baseline;">
-            <span style="color:var(--text-muted);">浮动盈亏:</span>
+          <div class="pos-row">
+            <span>浮动盈亏:</span>
             <span id="posFloatingPnL" class="pos-pnl">0.00 元</span>
           </div>
         </div>
@@ -349,13 +364,11 @@
       <div class="panel-section" style="flex:1;">
         <div class="section-title">
           <span>已了结明细</span>
-          <span id="closedCountBadge" style="font-size:11px; color:var(--text-muted);">共 0 单</span>
+          <span id="closedCountBadge">共 0 单</span>
         </div>
 
         <div class="ledger-list" id="miniLedgerList">
-          <div style="text-align:center; color:var(--text-muted); padding:16px 0; font-size:11px;">
-            暂无已了结交易
-          </div>
+          <div class="empty-state">暂无已了结交易</div>
         </div>
 
         <div class="ledger-actions">
@@ -382,7 +395,7 @@
         <button class="tab-btn" data-tab="tabHelp">⌨️ 快捷键与使用指南</button>
       </div>
 
-      <div style="font-size:11px; color:var(--text-muted);">
+      <div class="tab-hint">
         回测统计实时计算已平仓记录 · 点击右上角【📊 账户分析】查看高级多维绩效
       </div>
     </div>
@@ -411,7 +424,7 @@
       </div>
       <div class="kpi-card">
         <span class="kpi-title">最大回撤 (Drawdown)</span>
-        <span class="kpi-val" id="kpiMaxDrawdown" style="color:var(--down-color);">0.00 (0.00%)</span>
+        <span class="kpi-val val-down" id="kpiMaxDrawdown">0.00 (0.00%)</span>
       </div>
       <div class="kpi-card">
         <span class="kpi-title">盈利 / 亏损笔数</span>
@@ -445,8 +458,8 @@
         </thead>
         <tbody id="tradeLogTableBody">
           <tr>
-            <td colspan="13" style="text-align:center; color:var(--text-muted); padding:20px;">
-              暂无已平仓交易。请在上方点击【单步推进 (Space)】进行复盘，配合【买入开多】/【卖出开空】/【平仓】体验模拟回测。
+            <td colspan="13" class="cell-empty">
+              暂无已平仓交易。请在上方点击【单步 (Space)】进行复盘，配合【买入开多】/【卖出开空】/【平仓】体验模拟回测。
             </td>
           </tr>
         </tbody>
@@ -456,8 +469,8 @@
     <!-- Tab 2: Equity Curve -->
     <div id="tabEquity" class="tab-content">
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-        <span style="font-size:12px; color:var(--text-muted);">账户资金权益走势曲线 (按每笔平仓结算)</span>
-        <span id="equityHighWaterMark" style="font-size:11px; color:var(--accent-gold);">最高资产峰值: 100,000 元</span>
+        <span class="muted">账户资金权益走势曲线 (按每笔平仓结算)</span>
+        <span id="equityHighWaterMark" class="hint-gold">最高资产峰值: 100,000 元</span>
       </div>
       <canvas id="equityCanvas"></canvas>
     </div>
@@ -487,12 +500,12 @@
     <div id="tabUpload" class="tab-content">
       <div style="display:grid; grid-template-columns: 1fr 1fr; gap:16px; max-width:960px; margin:0 auto;">
         <!-- Left: Online Real Data Sync -->
-        <div style="background:var(--bg-card); border:1px solid var(--border-color); border-radius:6px; padding:14px;">
-          <div style="font-size:13px; font-weight:700; color:#fff; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center;">
+        <div class="card">
+          <div class="card-title">
             <span>🌐 在线真实行情同步 (新浪源 JSONP)</span>
-            <span style="font-size:10px; background:rgba(16, 185, 129, 0.2); color:#10b981; padding:1px 6px; border-radius:3px;">无需Token·直连免跨域</span>
+            <span class="pill-live">无需Token·直连免跨域</span>
           </div>
-          <div style="font-size:11px; color:var(--text-muted); margin-bottom:12px; line-height:1.5;">
+          <div class="muted-block">
             输入国内期货主力连续代码，一键直连新浪财经行情接口抓取真实数据，自动解析开高低收成交量，并<b>持久化缓存至本地 IndexedDB 数据库</b>。
           </div>
 
@@ -507,7 +520,7 @@
             <button class="btn btn-primary" id="btnTriggerFetchOnline">立即拉取并缓存</button>
           </div>
 
-          <div style="font-size:11px; color:var(--text-muted); line-height:1.6;">
+          <div class="muted-block">
             <b>常见主力代码速查：</b><br/>
             • 乙二醇: <code>EG0</code> | 螺纹钢: <code>RB0</code> | 豆粕: <code>M0</code><br/>
             • 铁矿石: <code>I0</code> | 沪铜: <code>CU0</code> | PTA: <code>TA0</code> | 纯碱: <code>SA0</code>
@@ -515,17 +528,17 @@
         </div>
 
         <!-- Right: Local Cache & CSV Import -->
-        <div style="background:var(--bg-card); border:1px solid var(--border-color); border-radius:6px; padding:14px; display:flex; flex-direction:column;">
-          <div style="font-size:13px; font-weight:700; color:#fff; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center;">
+        <div class="card card-fill">
+          <div class="card-title">
             <span>💾 本地 IndexedDB 缓存数据</span>
-            <button class="btn btn-sm" id="btnRefreshCacheList" style="height:20px; font-size:10px;">刷新列表</button>
+            <button class="btn btn-sm" id="btnRefreshCacheList">刷新列表</button>
           </div>
 
-          <div id="cacheListContainer" style="flex:1; max-height:110px; overflow-y:auto; background:var(--bg-primary); border:1px solid var(--border-color); border-radius:4px; padding:6px; margin-bottom:10px; font-size:11px;">
-            <div style="color:var(--text-muted); text-align:center; padding:8px;">暂无本地缓存数据</div>
+          <div id="cacheListContainer" class="cache-list">
+            <div class="empty-state">暂无本地缓存数据</div>
           </div>
 
-          <div style="display:flex; gap:8px; border-top:1px dashed var(--border-color); padding-top:10px;">
+          <div class="card-footer">
             <input type="file" id="csvFileInput" accept=".csv" style="display:none;" />
             <button class="btn btn-sm" onclick="document.getElementById('csvFileInput').click();" style="flex:1;">📂 导入本地 CSV 文件</button>
             <button class="btn btn-sm" id="btnDownloadSampleCSV" style="flex:1;">📥 下载 CSV 模板</button>
@@ -539,22 +552,22 @@
     <div id="tabHelp" class="tab-content">
       <div style="display:grid; grid-template-columns:1fr 1fr; gap:20px; max-width:800px; font-size:12px; line-height:1.7;">
         <div>
-          <h4 style="color:var(--text-white); margin-bottom:8px;">⌨️ 快捷键说明</h4>
-          <p><kbd style="background:var(--bg-tertiary); padding:2px 6px; border-radius:3px;">Space</kbd> 或 <kbd style="background:var(--bg-tertiary); padding:2px 6px; border-radius:3px;">F</kbd> : 单步推进下一根 K 线</p>
-          <p><kbd style="background:var(--bg-tertiary); padding:2px 6px; border-radius:3px;">B</kbd> : 买入开多 (Buy Long)</p>
-          <p><kbd style="background:var(--bg-tertiary); padding:2px 6px; border-radius:3px;">S</kbd> : 卖出开空 (Sell Short)</p>
-          <p><kbd style="background:var(--bg-tertiary); padding:2px 6px; border-radius:3px;">C</kbd> : 一键平仓 (Close Position)</p>
-          <p><kbd style="background:var(--bg-tertiary); padding:2px 6px; border-radius:3px;">W</kbd> : 水平线画线模式</p>
-          <p><kbd style="background:var(--bg-tertiary); padding:2px 6px; border-radius:3px;">E</kbd> : 趋势线段画线模式</p>
-          <p><kbd style="background:var(--bg-tertiary); padding:2px 6px; border-radius:3px;">Q</kbd> : 射线画线模式</p>
-          <p><kbd style="background:var(--bg-tertiary); padding:2px 6px; border-radius:3px;">D</kbd> : 测量尺工具</p>
-          <p><kbd style="background:var(--bg-tertiary); padding:2px 6px; border-radius:3px;">R</kbd> : 盈亏比测算工具</p>
-          <p><kbd style="background:var(--bg-tertiary); padding:2px 6px; border-radius:3px;">M</kbd> : 开启 / 关闭磁吸高低点</p>
-          <p><kbd style="background:var(--bg-tertiary); padding:2px 6px; border-radius:3px;">Delete</kbd> / <kbd style="background:var(--bg-tertiary); padding:2px 6px; border-radius:3px;">Backspace</kbd> : 删除选中的画线</p>
-          <p><kbd style="background:var(--bg-tertiary); padding:2px 6px; border-radius:3px;">Esc</kbd> : 取消当前画线，回到选择模式</p>
+          <h4>⌨️ 快捷键说明</h4>
+          <p><kbd>Space</kbd> 或 <kbd>F</kbd> : 单步推进下一根 K 线</p>
+          <p><kbd>B</kbd> : 买入开多 (Buy Long)</p>
+          <p><kbd>S</kbd> : 卖出开空 (Sell Short)</p>
+          <p><kbd>C</kbd> : 一键平仓 (Close Position)</p>
+          <p><kbd>W</kbd> : 水平线画线模式</p>
+          <p><kbd>E</kbd> : 趋势线段画线模式</p>
+          <p><kbd>Q</kbd> : 射线画线模式</p>
+          <p><kbd>D</kbd> : 测量尺工具</p>
+          <p><kbd>R</kbd> : 盈亏比测算工具</p>
+          <p><kbd>M</kbd> : 开启 / 关闭磁吸高低点</p>
+          <p><kbd>Delete</kbd> / <kbd>Backspace</kbd> : 删除选中的画线</p>
+          <p><kbd>Esc</kbd> : 取消当前画线，回到选择模式</p>
         </div>
         <div>
-          <h4 style="color:var(--text-white); margin-bottom:8px;">🎯 划线与复盘技巧</h4>
+          <h4>🎯 划线与复盘技巧</h4>
           <p>• <b>多空平仓连线</b>：开启后图表自动在进场点和出场点之间绘制连线轨迹与盈亏幅度框，一目了然！</p>
           <p>• <b>测量尺 (D)</b>：两点测量任意波段的价格差、涨跌幅、K线周期以及预期模拟盈亏。</p>
           <p>• <b>盈亏比工具 (R)</b>：点击进场价，设定止盈目标与止损位，自动生成红绿风险收益区间并计算R:R盈亏比！</p>
@@ -566,20 +579,20 @@
   </div>
 
   <!-- Advanced Account Analysis Modal (Matching Images 1 & 5) -->
-  <div class="modal-overlay" id="accountAnalysisModal">
+  <div class="modal-overlay" id="accountAnalysisModal" role="dialog" aria-modal="true" aria-labelledby="analysisModalTitle" tabindex="-1">
     <div class="modal-box">
       <!-- Header -->
       <div class="modal-header">
         <div>
-          <div class="modal-title">
+          <div class="modal-title" id="analysisModalTitle">
             <span>📈 账户分析</span>
-            <span style="font-size:12px; font-weight:normal; color:#848c9e;" id="modalSubtitle">全局账户 · 已结束复盘练习 · 0 次操作</span>
+            <span class="modal-subtitle" id="modalSubtitle">全局账户 · 已结束复盘练习 · 0 次操作</span>
           </div>
-          <div style="font-size:11px; color:#60a5fa; margin-top:2px;">
+          <div class="modal-subtitle">
             趋势交易最该看的几个数：赢面、爆发力、以及回撤控制
           </div>
         </div>
-        <button class="modal-close" id="btnCloseAnalysisModal">✕</button>
+        <button class="modal-close" id="btnCloseAnalysisModal" aria-label="关闭账户分析">✕</button>
       </div>
 
       <!-- Body -->
@@ -588,19 +601,20 @@
         <div class="modal-chart-section">
           <div class="modal-chart-header">
             <div style="display:flex; align-items:center; gap:12px;">
-              <span style="font-weight:700; color:#fff;">账户权益走势 (元)</span>
-              <div class="pill-tabs">
-                <button class="pill-tab active" id="modalTabRealized">已实现权益</button>
-                <button class="pill-tab" id="modalTabFloating">含浮动动态权益</button>
+              <span>账户权益走势 (元)</span>
+              <div class="pill-tabs" role="group" aria-label="权益曲线口径">
+                <button class="pill-tab active" id="modalTabRealized" aria-pressed="true">已实现权益</button>
+                <button class="pill-tab" id="modalTabFloating" aria-pressed="false">含浮动动态权益</button>
               </div>
             </div>
             <div style="display:flex; align-items:center; gap:8px;">
-              <span id="modalPeakEquity" style="color:var(--accent-gold); font-size:11px; font-weight:600;">最高峰值: 100,000 元</span>
+              <span id="modalPeakEquity" class="hint-gold">最高峰值: 100,000 元</span>
             </div>
           </div>
           <canvas id="modalEquityCanvas"></canvas>
+          <div class="chart-axis-note" id="modalEquityNote"><span>横轴：平仓笔数（仅已实现，浮盈不计入）</span></div>
 
-          <div style="display:flex; justify-content:space-between; align-items:center; font-size:11px; color:var(--text-muted); margin-top:4px;">
+          <div class="chart-axis-note">
             <span>平仓前账户仓位占用率 (%)</span>
             <span id="modalMaxMarginRate">最大仓位: 10%</span>
           </div>
@@ -613,7 +627,7 @@
           <div class="analysis-card">
             <div class="analysis-card-title">
               <span>方向准头</span>
-              <span style="font-size:11px; font-weight:normal; color:var(--text-muted);">胜率与交易赢面</span>
+              <span class="section-sub">胜率与交易赢面</span>
             </div>
             <div class="metric-row">
               <span class="metric-label">已了结</span>
@@ -649,7 +663,7 @@
           <div class="analysis-card">
             <div class="analysis-card-title">
               <span>爆发力</span>
-              <span style="font-size:11px; font-weight:normal; color:var(--text-muted);">单笔盈亏与期望值</span>
+              <span class="section-sub">单笔盈亏与期望值</span>
             </div>
             <div class="metric-row">
               <span class="metric-label">每单期望</span>
@@ -685,7 +699,7 @@
           <div class="analysis-card">
             <div class="analysis-card-title">
               <span>回撤控制</span>
-              <span style="font-size:11px; font-weight:normal; color:var(--text-muted);">风险承受与底线</span>
+              <span class="section-sub">风险承受与底线</span>
             </div>
             <div class="metric-row">
               <span class="metric-label">最大回撤</span>
@@ -713,7 +727,7 @@
           <div class="analysis-card">
             <div class="analysis-card-title">
               <span>交易频率</span>
-              <span style="font-size:11px; font-weight:normal; color:var(--text-muted);">节奏与摩擦成本</span>
+              <span class="section-sub">节奏与摩擦成本</span>
             </div>
             <div class="metric-row">
               <span class="metric-label">成交笔数</span>
@@ -742,7 +756,7 @@
   </div>
 
   <!-- Toast Element -->
-  <div id="toast">提示信息</div>
+  <div id="toast" role="status" aria-live="polite"></div>
 
   <!-- JAVASCRIPT APPLICATION CODE -->
   <script type="module">
@@ -908,6 +922,42 @@
         this.actionHistory.push({ action: 'open', prevState });
 
         return { success: true, message: `成功卖出开空 ${lots} 手 @ ${price}` };
+      }
+
+      /**
+       * 逐根 mark-to-market 权益序列。口径与已实现曲线严格一致：
+       * 已实现部分只在平仓那一根切换到引擎自己记的 equityAfter（含双边手续费），
+       * 持仓期间按该根收盘价计浮动盈亏并挂着开仓费——与 getTotalEquity 逐项等价。
+       * 本引擎为单笔持仓模型，故任一时刻至多一笔在持仓。
+       */
+      buildFloatingEquitySeries(bars) {
+        const out = [];
+        const closed = this.tradesHistory;
+        const open = this.position;
+        let ci = 0;
+        for (let i = 0; i < bars.length; i++) {
+          // 平仓那一根起，权益直接取引擎自己记的 equityAfter，避免二次推导产生偏差
+          while (ci < closed.length && closed[ci].exitIndex <= i) ci++;
+          let equity = ci === 0 ? this.initialCapital : closed[ci - 1].equityAfter;
+
+          let held = null;
+          for (const t of closed) {
+            if (t.entryIndex <= i && i < t.exitIndex) { held = t; break; }
+          }
+          const holdingOpen = !held && open && open.entryIndex <= i;
+          if (holdingOpen) held = open;
+
+          if (held) {
+            // 开仓费在进场时已从现金扣走、平仓才退回，持仓期间必须挂着它
+            const openFee = held.fee !== undefined ? held.fee / 2 : this.commission * held.lots;
+            const diff = held.direction === 'long'
+              ? bars[i].close - held.entryPrice
+              : held.entryPrice - bars[i].close;
+            equity += diff * this.multiplier * held.lots - openFee;
+          }
+          out.push({ barIndex: i, date: bars[i].date, equity });
+        }
+        return out;
       }
 
       closePosition(exitPrice, exitTime, exitBarIndex) {
@@ -1633,11 +1683,14 @@
 
           if (line.type === 'hline') {
             const y = chart.priceToY(line.p1.price);
+            if (line.dash) ctx.setLineDash(line.dash);
             ctx.beginPath();
             ctx.moveTo(0, y);
             ctx.lineTo(width, y);
             ctx.stroke();
-            this.drawPriceTag(ctx, line.p1.price, line.color);
+            ctx.setLineDash([]);
+            this.drawPriceTag(ctx, line.p1.price, line.color,
+              line.role ? { entry: '开仓', sl: '止损', tp: '止盈' }[line.role] : null);
 
           } else if (line.type === 'segment' && line.p2) {
             const p1 = this.getPointScreenXY(line.p1);
@@ -2023,10 +2076,10 @@
         ctx.restore();
       }
 
-      drawPriceTag(ctx, price, color) {
+      drawPriceTag(ctx, price, color, label) {
         const y = this.chart.priceToY(price);
         const x = this.chart.mainWidth;
-        const text = price.toFixed(1);
+        const text = (label ? label + ' ' : '') + price.toFixed(1);
 
         ctx.save();
         ctx.fillStyle = color || '#f59e0b';
@@ -2058,6 +2111,7 @@
         this.barWidth = 9;
         this.barSpacing = 4;
         this.scrollOffset = 0;
+        this.centerLatest = false;   // true → 最新K线锚定在图表中线
 
         this.isPanning = false;
         this.lastMousePos = null;
@@ -2263,7 +2317,7 @@
       calcVisibleRange() {
         const barPitch = this.barWidth + this.barSpacing;
         const totalVisibleData = this.visibleDataCount;
-        const rightEdgeX = this.mainWidth - 10;
+        const rightEdgeX = this.centerLatest ? Math.round(this.mainWidth * 0.5) : this.mainWidth - 10;
         const latestBarX = rightEdgeX + this.scrollOffset * barPitch;
 
         const startIdx = Math.max(0, Math.floor((0 - latestBarX) / barPitch + (totalVisibleData - 1)));
@@ -2970,7 +3024,19 @@
 
 
       applyDataToChart(bars, symbol, toastMsg) {
-        this.chartModule.setData(bars);
+        this._loadedBars = bars;                       // 全量留存，切换起点时免重新拉取
+        const years = parseFloat(document.getElementById('startOffset').value) || 0;
+        let view = bars;
+        if (years > 0 && bars.length > 0) {
+          const last = new Date(bars[bars.length - 1].date);
+          if (!isNaN(last)) {
+            const cutoff = new Date(last);
+            cutoff.setMonth(cutoff.getMonth() - Math.round(years * 12));
+            const sliced = bars.filter(b => new Date(b.date) >= cutoff);
+            if (sliced.length >= 30) view = sliced;    // 切完太窄会没图可看，回退全量
+          }
+        }
+        this.chartModule.setData(view);
         this.tradingEngine.reset(parseFloat(document.getElementById('inputInitialCapital').value) || 100000);
         this.syncUI();
         if (toastMsg) this.showToast(toastMsg);
@@ -3042,7 +3108,7 @@
         if (on.length === 0) { bar.style.display = 'none'; body.innerHTML = ''; return; }
         bar.style.display = 'flex';
 
-        const INP = 'background:var(--bg-tertiary); color:#fff; border:1px solid var(--border-color); padding:1px 4px; border-radius:3px; font-size:11px; width:58px;';
+        const INP = 'background:var(--md-sys-color-surface-container-high); color:var(--md-sys-color-on-surface); border:1px solid var(--md-sys-color-outline-variant); padding:1px 4px; border-radius:var(--md-shape-xs); font-size:var(--md-type-label-sm); width:58px;';
         const ctl = (key, field, { type = 'number', min, max, step, options } = {}) => {
           const v = om.state[key][field];
           const id = `ovs_${key}_${field}`;
@@ -3171,8 +3237,12 @@
         // 画线与测量工具切换
         document.querySelectorAll('.tool-btn[data-tool]').forEach(btn => {
           btn.addEventListener('click', () => {
-            document.querySelectorAll('.tool-btn[data-tool]').forEach(b => b.classList.remove('active'));
+            document.querySelectorAll('.tool-btn[data-tool]').forEach(b => {
+              b.classList.remove('active');
+              b.setAttribute('aria-pressed', 'false');
+            });
             btn.classList.add('active');
+            btn.setAttribute('aria-pressed', 'true');
             this.chartModule.drawingModule.setTool(btn.dataset.tool);
             this.showToast(`已切换至: ${btn.textContent.trim()}`);
           });
@@ -3184,6 +3254,7 @@
           const on = this.chartModule.drawingModule.toggleMagnet();
           magnetBtn.textContent = on ? '🧲 磁吸: 开' : '🧲 磁吸: 关';
           magnetBtn.classList.toggle('active', on);
+          magnetBtn.setAttribute('aria-pressed', String(on));
           this.showToast(on ? '磁吸已开启 (自动吸附 K 线高低开收)' : '磁吸已关闭');
         });
 
@@ -3193,6 +3264,7 @@
           const on = this.chartModule.drawingModule.toggleTradePaths();
           pathsBtn.textContent = on ? '📍 交易连线: 开' : '📍 交易连线: 关';
           pathsBtn.classList.toggle('active', on);
+          pathsBtn.setAttribute('aria-pressed', String(on));
           this.showToast(on ? '图表已显示多空平仓连线与盈亏统计' : '图表已隐藏平仓连线');
         });
 
@@ -3202,6 +3274,7 @@
             const name = btn.getAttribute('data-overlay');
             const on = this.chartModule.overlayManager.toggle(name);
             btn.classList.toggle('active', on);
+            btn.setAttribute('aria-pressed', String(on));
             this.renderOverlaySettings();
             this.chartModule.requestRender();
             const cn = { vp: 'VP 量能剖面', supertrend: 'SuperTrend', pivots: 'Pivot 关键位', patterns: '形态识别', zones: '供需区' }[name];
@@ -3235,8 +3308,26 @@
         // 复盘控制
         document.getElementById('btnReplayStep').addEventListener('click', () => this.stepForward());
         document.getElementById('btnReplayReset').addEventListener('click', () => this.resetReplay());
-        document.getElementById('btnBlindStart').addEventListener('click', () => this.startBlind());
-        document.getElementById('btnBlindExit').addEventListener('click', () => this.exitBlind(true));
+
+        // 回测起点：从留存的全量数据里重新切片，无需重新联网拉取
+        document.getElementById('startOffset').addEventListener('change', () => {
+          if (this._loadedBars && this._loadedBars.length) {
+            this.applyDataToChart(this._loadedBars, this.currentSymbol);
+            this.showToast('已按新起点重新载入，回测进度已重置');
+          }
+        });
+
+        // 最新K线居中锚定
+        const anchorBtn = document.getElementById('btnToggleAnchor');
+        anchorBtn.addEventListener('click', () => {
+          const on = !this.chartModule.centerLatest;
+          this.chartModule.centerLatest = on;
+          anchorBtn.textContent = on ? '🎯 居中: 开' : '🎯 居中: 关';
+          anchorBtn.classList.toggle('active', on);
+          anchorBtn.setAttribute('aria-pressed', String(on));
+          this.chartModule.scrollOffset = 0;
+          this.chartModule.requestRender();
+        });
         document.getElementById('btnReplayAutoPlay').addEventListener('click', () => this.toggleAutoPlay());
         document.getElementById('btnShowAllBars').addEventListener('click', () => {
           this.stopAutoPlay();
@@ -3276,6 +3367,20 @@
         document.getElementById('btnSideOpenAnalysis').addEventListener('click', () => this.openAnalysisModal());
         document.getElementById('btnCloseAnalysisModal').addEventListener('click', () => this.closeAnalysisModal());
 
+        // 权益曲线口径切换：已实现（按平仓笔数）/ 含浮动（逐根 mark-to-market）
+        ;[['modalTabRealized', 'realized'], ['modalTabFloating', 'floating']].forEach(([id, m]) => {
+          document.getElementById(id).addEventListener('click', () => {
+            this._modalEquityMode = m;
+            [['modalTabRealized', 'realized'], ['modalTabFloating', 'floating']].forEach(([bid, bm]) => {
+              const el = document.getElementById(bid);
+              const on = bm === m;
+              el.classList.toggle('active', on);
+              el.setAttribute('aria-pressed', String(on));
+            });
+            this.renderModalCharts();
+          });
+        });
+
         document.getElementById('btnSideClearAll').addEventListener('click', () => {
           document.getElementById('btnResetAccount').click();
         });
@@ -3302,9 +3407,13 @@
         // 底部 Tab 切换
         document.querySelectorAll('.tab-btn').forEach(btn => {
           btn.addEventListener('click', () => {
-            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+            document.querySelectorAll('.tab-btn').forEach(b => {
+              b.classList.remove('active');
+              b.setAttribute('aria-selected', 'false');
+            });
             document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
             btn.classList.add('active');
+            btn.setAttribute('aria-selected', 'true');
             const target = document.getElementById(btn.dataset.tab);
             if (target) target.classList.add('active');
 
@@ -3332,10 +3441,6 @@
             this.showToast('账户与交易历史已重置');
           }
         });
-        document.getElementById('btnImportDataModal').addEventListener('click', () => {
-          document.querySelector('.tab-btn[data-tab="tabUpload"]').click();
-        });
-
         // 键盘全局快捷键
         window.addEventListener('keydown', (e) => {
           if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName)) return;
@@ -3380,12 +3485,7 @@
       stepForward() {
         const bar = this.chartModule.stepForward();
         if (bar) {
-          // 条件单在每揭示一根 bar 时结算一次 —— 手动复盘里它是"自动帮你盯盘"的那一半
-          const idx = this.chartModule.getCurrentIndex();
-          const closed = this.tradingEngine.evaluateConditional(bar, idx);
-          for (const t of closed) {
-            this.showToast(`⚡ 条件单触发：${t.exitTag || t.exitReason} ${t.lots} 手 @ ${t.exitPrice}（${t.netPnL >= 0 ? '+' : ''}${t.netPnL.toFixed(0)}）`);
-          }
+          this.checkStopLevels(bar);
           this.syncUI();
         } else {
           this.stopAutoPlay();
@@ -3406,15 +3506,7 @@
           this.stopAutoPlay();
         } else {
           const speed = parseInt(document.getElementById('replaySpeed').value) || 500;
-          this.autoPlayTimer = setInterval(() => {
-            const bar = this.chartModule.stepForward();
-            if (bar) {
-              this.syncUI();
-            } else {
-              this.stopAutoPlay();
-              this.showToast('自动播放完毕，已达最新K线');
-            }
-          }, speed);
+          this.autoPlayTimer = setInterval(() => this.stepForward(), speed);
           const btn = document.getElementById('btnReplayAutoPlay');
           btn.textContent = '⏸ 暂停播放';
           btn.classList.add('btn-primary');
@@ -3539,25 +3631,61 @@
         }
       }
 
-      /** 把已挂的条件单显示出来。挂单看不见就等于没挂 —— 复盘的人会以为自己在按纪律出场。 */
-      renderConditionalStatus() {
-        const badge = document.getElementById('condBadge');
-        const list = document.getElementById('condOrderList');
-        if (!badge || !list) return;
-        const pos = this.tradingEngine.position;
-        const orders = (pos && pos.orders) || [];
-        if (!pos) { badge.textContent = '无持仓'; badge.style.cssText = 'background:#374151; color:#9ca3af;'; list.innerHTML = ''; return; }
-        if (!orders.length) { badge.textContent = '未挂单'; badge.style.cssText = 'background:#374151; color:#9ca3af;'; list.innerHTML = '<div>未挂条件单。持仓裸奔时，出场全靠你自己按。</div>'; return; }
-        badge.textContent = `${orders.length} 张在途`;
-        badge.style.cssText = 'background:rgba(41,98,255,.2); color:#93c5fd;';
-        const dir = pos.direction === 'long' ? 1 : -1;
-        list.innerHTML = orders.map(o => {
-          const dist = ((o.price - pos.entryPrice) / pos.entryPrice * 100 * dir).toFixed(2);
-          return `<div>· <b>${o.label}</b> ${o.price}${o.qtyLots && o.qtyLots < pos.lots ? `（平 ${o.qtyLots}/${pos.lots} 手）` : ''} <span style="color:var(--text-muted);">距均价 ${dist}%</span></div>`;
-        }).join('') + (pos.trailCfg ? `<div style="color:var(--accent-cyan);">· 移动止损 ${((pos.trailCfg.pct || 0) * 100).toFixed(1)}% → 当前 ${pos.stop ?? '—'}</div>` : '');
+      /** 持仓止损/止盈线：画在图上、可拖动；签名未变时不动，保住用户拖出来的价位。 */
+      syncPositionLevels() {
+        const dm = this.chartModule.drawingModule;
+        const pos = this.tradingEngine && this.tradingEngine.position;
+        const slPct = parseFloat(document.getElementById('stopLossPct').value) || 0;
+        const tpPct = parseFloat(document.getElementById('takeProfitPct').value) || 0;
+        const sig = pos ? [pos.direction, pos.entryPrice, slPct, tpPct].join('|') : 'flat';
+        if (sig === this._posLevelSig) return;
+        this._posLevelSig = sig;
+        dm.lines = dm.lines.filter(l => !l.role);
+        if (pos && pos.entryPrice) {
+          const entry = pos.entryPrice;
+          const long = pos.direction === 'long';
+          const mk = (role, price, color) => ({
+            id: 'pos_' + role, type: 'hline', role,
+            p1: { barIndex: 0, price }, color, width: 1, dash: [6, 4]
+          });
+          dm.lines.push(mk('entry', entry, '#9aa1ae'));
+          if (slPct > 0) dm.lines.push(mk('sl', long ? entry * (1 - slPct / 100) : entry * (1 + slPct / 100), '#ef4444'));
+          if (tpPct > 0) dm.lines.push(mk('tp', long ? entry * (1 + tpPct / 100) : entry * (1 - tpPct / 100), '#10b981'));
+        }
+        this.chartModule.requestRender();
+      }
+
+      /** 推进一根后检查止损/止盈：读图上的线（拖过就按拖后的价），穿越即按线价平仓。同根同时穿越时优先止损。 */
+      checkStopLevels(bar) {
+        const pos = this.tradingEngine && this.tradingEngine.position;
+        if (!pos || !bar) return;
+        const dm = this.chartModule.drawingModule;
+        const level = role => {
+          const l = dm.lines.find(x => x.role === role);
+          return l ? l.p1.price : null;
+        };
+        const sl = level('sl'), tp = level('tp');
+        const long = pos.direction === 'long';
+        let exit = null, why = '';
+        if (sl !== null && ((long && bar.low <= sl) || (!long && bar.high >= sl))) {
+          exit = sl; why = '止损';
+        } else if (tp !== null && ((long && bar.high >= tp) || (!long && bar.low <= tp))) {
+          exit = tp; why = '止盈';
+        }
+        if (exit === null) return;
+        try {
+          const res = this.tradingEngine.closePosition(exit, bar.date, this.chartModule.getCurrentIndex());
+          const t = res.trade;
+          const pnlText = (t.netPnL >= 0 ? '+' : '') + t.netPnL.toFixed(1) + ' 元';
+          this.showToast('🔔 触发' + why + '! 净盈亏: ' + pnlText);
+          this.renderEquityCurve();
+        } catch (err) {
+          this.showToast('❌ ' + why + '触发失败: ' + err.message);
+        }
       }
 
       syncUI() {
+        this.syncPositionLevels();
         const bar = this.chartModule.getCurrentBar();
         const currentPrice = bar ? bar.close : 4200;
         this.renderConditionalStatus();
@@ -3640,8 +3768,8 @@
         const history = this.tradingEngine.tradesHistory;
 
         if (history.length === 0) {
-          tbody.innerHTML = `<tr><td colspan="13" style="text-align:center; color:var(--text-muted); padding:20px;">
-            暂无已平仓交易。请在上方点击【单步推进 (Space)】进行复盘，配合【买入开多】/【卖出开空】/【平仓】体验模拟回测。
+          tbody.innerHTML = `<tr><td colspan="13" class="cell-empty">
+            暂无已平仓交易。请在上方点击【单步 (Space)】进行复盘，配合【买入开多】/【卖出开空】/【平仓】体验模拟回测。
           </td></tr>`;
           return;
         }
@@ -3681,9 +3809,7 @@
         document.getElementById('closedCountBadge').textContent = `共 ${history.length} 单`;
 
         if (history.length === 0) {
-          container.innerHTML = `<div style="text-align:center; color:var(--text-muted); padding:16px 0; font-size:11px;">
-            暂无已了结交易
-          </div>`;
+          container.innerHTML = `<div class="empty-state">暂无已了结交易</div>`;
           return;
         }
 
@@ -3796,6 +3922,8 @@
       openAnalysisModal() {
         const modal = document.getElementById('accountAnalysisModal');
         modal.classList.add('show');
+        this._modalReturnFocus = document.activeElement;
+        modal.focus();
 
         const bar = this.chartModule.getCurrentBar();
         const curPrice = bar ? bar.close : 4200;
@@ -3843,7 +3971,10 @@
       }
 
       closeAnalysisModal() {
-        document.getElementById('accountAnalysisModal').classList.remove('show');
+        const modal = document.getElementById('accountAnalysisModal');
+        modal.classList.remove('show');
+        if (this._modalReturnFocus && document.contains(this._modalReturnFocus)) this._modalReturnFocus.focus();
+        this._modalReturnFocus = null;
       }
 
       renderModalCharts() {
@@ -3862,12 +3993,22 @@
         ctxEq.scale(dpr, dpr);
         ctxEq.clearRect(0, 0, w, 180);
 
-        const snaps = this.tradingEngine.equitySnapshots;
+        const mode = this._modalEquityMode || 'realized';
+        const noteEl = document.getElementById('modalEquityNote');
+        let snaps;
+        if (mode === 'floating') {
+          const bars = this.chartModule.data.slice(0, this.chartModule.visibleDataCount);
+          snaps = this.tradingEngine.buildFloatingEquitySeries(bars);
+          if (noteEl) noteEl.textContent = '横轴：K线根数（逐根 mark-to-market，含未平仓浮动）';
+        } else {
+          snaps = this.tradingEngine.equitySnapshots;
+          if (noteEl) noteEl.textContent = '横轴：平仓笔数（仅已实现，浮盈不计入）';
+        }
         if (snaps.length < 2) {
           ctxEq.fillStyle = '#848c9e';
           ctxEq.font = '12px sans-serif';
           ctxEq.textAlign = 'center';
-          ctxEq.fillText('暂无平仓历史，请先复盘至少平仓一笔', w / 2, 90);
+          ctxEq.fillText(mode === 'floating' ? '至少推进两根 K 线后绘制动态权益' : '暂无平仓历史，请先复盘至少平仓一笔', w / 2, 90);
         } else {
           let minEq = Infinity, maxEq = -Infinity;
           for (const s of snaps) {
@@ -3910,11 +4051,13 @@
           ctxEq.fillStyle = grad;
           ctxEq.fill();
 
-          for (let i = 0; i < snaps.length; i++) {
-            ctxEq.fillStyle = '#ffffff';
-            ctxEq.beginPath();
-            ctxEq.arc(getX(i), getY(snaps[i].equity), 3, 0, Math.PI * 2);
-            ctxEq.fill();
+          if (snaps.length <= 60) {
+            for (let i = 0; i < snaps.length; i++) {
+              ctxEq.fillStyle = '#ffffff';
+              ctxEq.beginPath();
+              ctxEq.arc(getX(i), getY(snaps[i].equity), 3, 0, Math.PI * 2);
+              ctxEq.fill();
+            }
           }
 
           ctxEq.fillStyle = '#848c9e';
