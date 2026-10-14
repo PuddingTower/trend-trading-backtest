@@ -1,0 +1,1735 @@
+/* ==========================================================================
+   趋势交易回测系统 — Material Design 3 theme
+   Semantic tokens only. Screens must not hardcode colors; the one deliberate
+   exception is the --data-* palette, documented at the bottom of :root.
+   ========================================================================== */
+
+:root {
+  /* --- Color roles: M3 dark scheme, blue seed ------------------------- */
+  --md-sys-color-primary: #a4c8ff;
+  --md-sys-color-on-primary: #002e5b;
+  --md-sys-color-primary-container: #08457e;
+  --md-sys-color-on-primary-container: #d4e3ff;
+  --md-sys-color-secondary: #bcc8dc;
+  --md-sys-color-on-secondary: #263141;
+  --md-sys-color-secondary-container: #3c4859;
+  --md-sys-color-on-secondary-container: #d8e4f9;
+  --md-sys-color-tertiary: #cfd0ff;
+  --md-sys-color-on-tertiary: #1a1b4a;
+  --md-sys-color-tertiary-container: #313263;
+  --md-sys-color-on-tertiary-container: #e2e1ff;
+  --md-sys-color-error: #ffb4ab;
+  --md-sys-color-on-error: #690005;
+  --md-sys-color-error-container: #93000a;
+  --md-sys-color-on-error-container: #ffdad6;
+  --md-sys-color-success: #7adeae;
+  --md-sys-color-on-success: #00391f;
+  --md-sys-color-success-container: #135a3a;
+  --md-sys-color-on-success-container: #c8f6dc;
+
+  /* Surface tint ramp — one hue, increasing elevation */
+  --md-sys-color-background: #101319;
+  --md-sys-color-surface: #12151c;
+  --md-sys-color-surface-dim: #101319;
+  --md-sys-color-surface-bright: #383b44;
+  --md-sys-color-surface-container-lowest: #0c0e13;
+  --md-sys-color-surface-container-low: #1a1d25;
+  --md-sys-color-surface-container: #1e2129;
+  --md-sys-color-surface-container-high: #292c35;
+  --md-sys-color-surface-container-highest: #33363f;
+  --md-sys-color-on-surface: #e2e5ec;
+  --md-sys-color-on-surface-variant: #b6bcc9;
+  --md-sys-color-outline: #868d9b;
+  --md-sys-color-outline-variant: #333a47;
+  --md-sys-color-inverse-surface: #e2e5ec;
+  --md-sys-color-inverse-on-surface: #1e2129;
+  --md-sys-color-inverse-primary: #2a63c6;
+  --md-sys-color-scrim: rgba(0, 0, 0, 0.62);
+
+  /* --- Typography ------------------------------------------------------ */
+  --md-sys-typescale-font: "Segoe UI", system-ui, -apple-system, Roboto,
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --md-sys-typescale-font-num: "Segoe UI", system-ui, Roboto, sans-serif;
+  --md-type-display: 22px;
+  --md-type-title-lg: 18px;
+  --md-type-title-md: 16px;
+  --md-type-title-sm: 14px;
+  --md-type-body-lg: 14px;
+  --md-type-body-md: 13px;
+  --md-type-body-sm: 12px;
+  --md-type-label-md: 12px;
+  --md-type-label-sm: 11px; /* floor — 10px text is below the M3 minimum */
+  --md-weight-regular: 400;
+  --md-weight-medium: 500;
+  --md-weight-semibold: 600;
+  --md-weight-bold: 700;
+
+  /* --- Shape ----------------------------------------------------------- */
+  --md-shape-xs: 4px;
+  --md-shape-sm: 8px;
+  --md-shape-md: 12px;
+  --md-shape-lg: 16px;
+  --md-shape-xl: 28px;
+  --md-shape-full: 999px;
+
+  /* --- Spacing: 4px base ---------------------------------------------- */
+  --md-space-1: 4px;
+  --md-space-2: 8px;
+  --md-space-3: 12px;
+  --md-space-4: 16px;
+  --md-space-5: 20px;
+  --md-space-6: 24px;
+  --md-space-8: 32px;
+
+  /* --- Elevation (M3 dark shadows) ------------------------------------ */
+  --md-elev-0: none;
+  --md-elev-1: 0 1px 2px rgba(0, 0, 0, 0.30), 0 1px 3px 1px rgba(0, 0, 0, 0.15);
+  --md-elev-2: 0 1px 2px rgba(0, 0, 0, 0.30), 0 2px 6px 2px rgba(0, 0, 0, 0.15);
+  --md-elev-3: 0 1px 3px rgba(0, 0, 0, 0.30), 0 4px 8px 3px rgba(0, 0, 0, 0.15);
+  --md-elev-4: 0 2px 4px rgba(0, 0, 0, 0.30), 0 8px 16px 4px rgba(0, 0, 0, 0.15);
+  --md-elev-5: 0 4px 8px rgba(0, 0, 0, 0.30), 0 12px 24px 6px rgba(0, 0, 0, 0.15);
+
+  /* --- Motion ---------------------------------------------------------- */
+  --md-motion-short: 100ms;
+  --md-motion-short4: 200ms;
+  --md-motion-medium2: 300ms;
+  --md-motion-standard: cubic-bezier(0.2, 0, 0, 1);
+  --md-motion-emphasize-decel: cubic-bezier(0.05, 0.7, 0.1, 1);
+
+  /* --- State layer opacities ----------------------------------------- */
+  --md-state-hover: 0.08;
+  --md-state-focus: 0.10;
+  --md-state-pressed: 0.12;
+  --md-state-disabled: 0.38;
+  --md-focus-ring: 2px;
+
+  /* --- Data palette: NOT M3 semantic roles ---------------------------- *
+   * 红涨绿跌 is the CN-market convention and these exact hexes are what the
+   * canvas renderer paints, so UI text must equal them or labels disagree with
+   * the candles. Directional, therefore not interchangeable with error/success.
+   * Every consumer pairs them with text or an arrow, never color alone.       */
+  --data-up: #ef4444;
+  /* Text variant: #ef4444 is only 4.28:1 on the app bar and 3.71:1 on
+   * container-high, below AA for small text. Candles keep #ef4444 (graphics
+   * need 3:1, and they must match what the canvas paints). */
+  --data-up-text: #ff8282;
+  --data-up-bg: rgba(239, 68, 68, 0.14);
+  --data-up-border: rgba(239, 68, 68, 0.42);
+  --data-down: #10b981;
+  --data-down-bg: rgba(16, 185, 129, 0.14);
+  --data-down-border: rgba(16, 185, 129, 0.42);
+  --data-ma5: #f59e0b;
+  --data-ma10: #06b6d4;
+  --data-ma20: #a855f7;
+  --data-ma20-text: #c084fc;
+  --data-flat: #9aa1ae;
+
+  /* --- Density: desktop terminal, not touch --------------------------- *
+   * 32px controls instead of M3's 48dp minimum target. Deliberate: this is a
+   * mouse-and-keyboard surface; focus visibility carries the keyboard cost.    */
+  --md-control-h: 30px;
+  --md-control-h-sm: 26px;
+  --md-rail-w: 336px;
+}
+
+/* ==========================================================================
+   Legacy aliases
+   The old flat-token names still appear in 70+ places: inline styles in the
+   markup and, more sticky, inside JS template strings that build DOM at runtime
+   (cache list, overlay parameter strip, ledger rows). They resolve to the M3
+   roles above, so nothing renders off-system. New markup uses --md-sys-* /
+   --data-* directly; do not add new users of these names.
+   ========================================================================== */
+:root {
+  --bg-primary: var(--md-sys-color-surface-container-lowest);
+  --bg-secondary: var(--md-sys-color-surface-container);
+  --bg-tertiary: var(--md-sys-color-surface-container-high);
+  --bg-card: var(--md-sys-color-surface-container-high);
+  --bg-hover: var(--md-sys-color-surface-container-highest);
+  --border-color: var(--md-sys-color-outline-variant);
+  --border-light: var(--md-sys-color-outline);
+  --text-main: var(--md-sys-color-on-surface);
+  --text-muted: var(--md-sys-color-on-surface-variant);
+  --text-white: var(--md-sys-color-on-surface);
+  --up-color: var(--data-up);
+  --up-hover: var(--data-up);
+  --up-bg: var(--data-up-bg);
+  --down-color: var(--data-down);
+  --down-hover: var(--data-down);
+  --down-bg: var(--data-down-bg);
+  --accent-blue: var(--md-sys-color-primary);
+  --accent-blue-hover: var(--md-sys-color-inverse-primary);
+  --accent-gold: var(--data-ma5);
+  --accent-cyan: var(--data-ma10);
+  --accent-purple: var(--data-ma20);
+  --font-mono: var(--md-sys-typescale-font);
+}
+
+/* ==========================================================================
+   Base
+   ========================================================================== */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--md-sys-color-background);
+  color: var(--md-sys-color-on-surface);
+  font-family: var(--md-sys-typescale-font);
+  font-size: var(--md-type-body-md);
+  line-height: 1.5;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Selection stays off the drag path, but every number must be copyable. */
+body,
+button,
+select,
+.navbar,
+.toolbar,
+.tab-header,
+.chart-container {
+  user-select: none;
+}
+.form-input,
+input,
+textarea,
+.table-container td,
+.table-container th,
+.kpi-val,
+.kpi-title,
+.metric-value,
+.metric-label,
+.legend-val,
+.legend-label,
+.pos-row span,
+.pos-pnl,
+.quote-price,
+.quote-change,
+.ledger-item,
+.modal-body,
+.help-body {
+  user-select: text;
+}
+
+/* Numerals align in columns wherever values are compared vertically. */
+.quote-price,
+.quote-change,
+.kpi-val,
+.metric-value,
+.pos-pnl,
+.legend-val,
+.table-container td,
+.form-input,
+.ledger-item {
+  font-family: var(--md-sys-typescale-font-num);
+  font-variant-numeric: tabular-nums;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--md-sys-color-outline-variant);
+  border-radius: var(--md-shape-full);
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--md-sys-color-outline);
+  background-clip: content-box;
+}
+
+/* ==========================================================================
+   Focus + state layers (accessibility baseline)
+   ========================================================================== */
+:where(button, a, input, select, textarea, [tabindex]):focus-visible {
+  outline: var(--md-focus-ring) solid var(--md-sys-color-primary);
+  outline-offset: 2px;
+  border-radius: var(--md-shape-xs);
+}
+/* Chrome 111- fallback keeps a plain :focus ring where :focus-visible is absent. */
+select:focus,
+input:focus {
+  outline: var(--md-focus-ring) solid var(--md-sys-color-primary);
+  outline-offset: 1px;
+}
+
+/* State layer: tinted with the element's own on-color, so it reads correctly
+   on both filled and outlined surfaces. */
+.btn,
+.tool-btn,
+.tab-btn,
+.pill-tab,
+.modal-close {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  transition: color var(--md-motion-short4) var(--md-motion-standard),
+    background-color var(--md-motion-short4) var(--md-motion-standard),
+    border-color var(--md-motion-short4) var(--md-motion-standard),
+    box-shadow var(--md-motion-short4) var(--md-motion-standard);
+}
+.btn::after,
+.tool-btn::after,
+.tab-btn::after,
+.pill-tab::after,
+.modal-close::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: currentColor;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--md-motion-short) linear;
+}
+.btn:hover::after,
+.tool-btn:hover::after,
+.tab-btn:hover::after,
+.pill-tab:hover::after,
+.modal-close:hover::after {
+  opacity: var(--md-state-hover);
+}
+.btn:active::after,
+.tool-btn:active::after,
+.tab-btn:active::after,
+.pill-tab:active::after,
+.modal-close:active::after {
+  opacity: var(--md-state-pressed);
+}
+.btn:focus-visible::after,
+.tool-btn:focus-visible::after,
+.tab-btn:focus-visible::after {
+  opacity: var(--md-state-focus);
+}
+.btn:disabled,
+.tool-btn:disabled {
+  opacity: var(--md-state-disabled);
+  cursor: not-allowed;
+}
+.btn:disabled::after,
+.tool-btn:disabled::after {
+  opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ==========================================================================
+   App bar
+   ========================================================================== */
+.navbar {
+  min-height: 56px;
+  background: var(--md-sys-color-surface-container);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--md-space-2);
+  padding: 6px var(--md-space-3);
+  flex-shrink: 0;
+  box-shadow: var(--md-elev-2);
+  position: relative;
+  z-index: 20;
+}
+.nav-left {
+  display: flex;
+  align-items: center;
+  gap: var(--md-space-2);
+  min-width: 0;
+}
+.nav-right {
+  display: flex;
+  align-items: center;
+  gap: var(--md-space-2);
+  flex-shrink: 0;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--md-space-2);
+  font-size: var(--md-type-title-sm);
+  font-weight: var(--md-weight-bold);
+  color: var(--md-sys-color-on-surface);
+  letter-spacing: 0.4px;
+  white-space: nowrap;
+}
+/* Leading accent mark replaces the emoji-as-logo. */
+.brand::before {
+  content: "";
+  width: 4px;
+  height: 20px;
+  border-radius: var(--md-shape-full);
+  background: var(--md-sys-color-primary);
+  flex-shrink: 0;
+}
+.brand-badge {
+  font-size: var(--md-type-label-sm);
+  font-weight: var(--md-weight-medium);
+  padding: 2px var(--md-space-2);
+  border-radius: var(--md-shape-full);
+  background: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+  white-space: nowrap;
+}
+
+/* Contract selector: one outlined field group, not four ad-hoc controls. */
+.contract-selector {
+  display: flex;
+  align-items: center;
+  gap: var(--md-space-1);
+  background: var(--md-sys-color-surface-container-low);
+  padding: var(--md-space-1) var(--md-space-1) var(--md-space-1) var(--md-space-3);
+  border-radius: var(--md-shape-sm);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  font-size: var(--md-type-body-sm);
+  flex-shrink: 0;
+}
+.contract-selector > label {
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: var(--md-type-label-sm);
+  white-space: nowrap;
+}
+.contract-selector select {
+  background: var(--md-sys-color-surface-container-high);
+  border: 1px solid transparent;
+  color: var(--md-sys-color-on-surface);
+  font-weight: var(--md-weight-semibold);
+  font-size: var(--md-type-label-md);
+  font-family: inherit;
+  border-radius: var(--md-shape-xs);
+  padding: 3px 6px;
+  cursor: pointer;
+}
+.contract-selector select:hover {
+  border-color: var(--md-sys-color-outline);
+}
+.contract-selector select option {
+  background: var(--md-sys-color-surface-container-high);
+  color: var(--md-sys-color-on-surface);
+}
+.contract-selector .form-input {
+  width: 112px;
+  height: 26px;
+  padding: 0 var(--md-space-2);
+  font-size: var(--md-type-label-md);
+}
+
+.contract-quote {
+  display: flex;
+  align-items: baseline;
+  gap: var(--md-space-2);
+  font-size: var(--md-type-body-sm);
+  white-space: nowrap;
+}
+.quote-price {
+  font-size: var(--md-type-title-md);
+  font-weight: var(--md-weight-bold);
+  color: var(--md-sys-color-on-surface);
+}
+.quote-change {
+  font-weight: var(--md-weight-semibold);
+  font-size: var(--md-type-label-md);
+}
+
+/* Replay cluster: elevated container so it reads as the transport control. */
+.nav-center {
+  display: flex;
+  align-items: center;
+  gap: var(--md-space-1);
+  background: var(--md-sys-color-surface-container-high);
+  padding: 3px var(--md-space-2);
+  border-radius: var(--md-shape-xl);
+  box-shadow: var(--md-elev-1);
+  flex-shrink: 0;
+}
+.replay-status-badge {
+  font-size: var(--md-type-label-sm);
+  padding: 2px var(--md-space-2);
+  border-radius: var(--md-shape-full);
+  background: var(--md-sys-color-tertiary-container);
+  color: var(--md-sys-color-on-tertiary-container);
+  font-weight: var(--md-weight-semibold);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ==========================================================================
+   Buttons — M3 emphasis ladder
+   ========================================================================== */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 var(--md-space-3);
+  height: var(--md-control-h);
+  background: transparent;
+  color: var(--md-sys-color-primary);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-shape-full);
+  font-family: inherit;
+  font-size: var(--md-type-label-md);
+  font-weight: var(--md-weight-medium);
+  letter-spacing: 0.2px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn:hover {
+  border-color: var(--md-sys-color-outline);
+  color: var(--md-sys-color-primary);
+}
+.btn:active {
+  transform: scale(0.98);
+}
+
+/* filled — the single primary action of a region */
+.btn-primary {
+  background: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-primary);
+  border-color: transparent;
+  box-shadow: var(--md-elev-1);
+  font-weight: var(--md-weight-semibold);
+}
+.btn-primary:hover {
+  box-shadow: var(--md-elev-2);
+  color: var(--md-sys-color-on-primary);
+}
+
+/* tonal — secondary action */
+.btn-tonal {
+  background: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+  border-color: transparent;
+}
+
+/* warning — attention without destruction */
+.btn-warning {
+  background: var(--md-sys-color-tertiary-container);
+  color: var(--md-sys-color-on-tertiary-container);
+  border-color: transparent;
+}
+.btn-warning:hover {
+  color: var(--md-sys-color-on-tertiary-container);
+}
+
+/* danger — irreversible loss of user work or data. Was referenced in markup
+   but never defined, so destructive actions looked identical to safe ones. */
+.btn-danger {
+  background: transparent;
+  color: var(--md-sys-color-error);
+  border-color: var(--md-sys-color-error);
+}
+.btn-danger:hover {
+  color: var(--md-sys-color-error);
+  border-color: var(--md-sys-color-error);
+}
+.btn-danger.filled {
+  background: var(--md-sys-color-error-container);
+  color: var(--md-sys-color-on-error-container);
+  border-color: transparent;
+}
+
+.btn-success {
+  background: var(--data-up);
+  color: #fff;
+  border-color: transparent;
+}
+
+.btn-sm {
+  height: var(--md-control-h-sm);
+  padding: 0 10px;
+  font-size: var(--md-type-label-sm);
+}
+
+/* Toggle state: never color alone — leading tick + weight + outline. */
+.btn.active,
+.tool-btn.active {
+  background: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-primary);
+  border-color: transparent;
+  font-weight: var(--md-weight-semibold);
+}
+.tool-btn.active::before,
+.btn.active::before {
+  content: "✓";
+  font-size: var(--md-type-label-sm);
+  font-weight: var(--md-weight-bold);
+  margin-right: 2px;
+}
+
+/* ==========================================================================
+   Toolbars
+   ========================================================================== */
+.toolbar {
+  min-height: 44px;
+  background: var(--md-sys-color-surface-container-low);
+  display: flex;
+  align-items: center;
+  padding: 5px var(--md-space-3);
+  gap: var(--md-space-1);
+  flex-shrink: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+/* Grouping is structural, not a wall of dividers. */
+.toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-right: 6px;
+  margin-right: 2px;
+  border-right: 1px solid var(--md-sys-color-outline-variant);
+  flex-shrink: 0;
+}
+.toolbar-group:last-child {
+  border-right: none;
+}
+.toolbar-title {
+  font-size: var(--md-type-label-sm);
+  color: var(--md-sys-color-on-surface-variant);
+  margin-right: var(--md-space-1);
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  font-weight: var(--md-weight-semibold);
+  white-space: nowrap;
+}
+.toolbar-hint {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--md-space-2);
+  font-size: var(--md-type-label-sm);
+  color: var(--md-sys-color-on-surface-variant);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* Mutually exclusive drawing tools → segmented button row. Children keep the
+   .tool-btn class the JS toggles, so the group is pure chrome. */
+.seg-group {
+  display: flex;
+  align-items: center;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-shape-full);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.seg-group > .tool-btn {
+  border: none;
+  border-right: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: 0;
+  background: transparent;
+  color: var(--md-sys-color-on-surface-variant);
+}
+.seg-group > .tool-btn:last-child {
+  border-right: none;
+}
+.seg-group > .tool-btn:hover {
+  color: var(--md-sys-color-on-surface);
+}
+
+/* Multi-select analysis layers → filter chips. */
+.chip-row {
+  display: flex;
+  align-items: center;
+  gap: var(--md-space-1);
+  flex-shrink: 0;
+}
+.tool-btn {
+  padding: 0 7px;
+  height: var(--md-control-h-sm);
+  background: transparent;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  color: var(--md-sys-color-on-surface-variant);
+  border-radius: var(--md-shape-full);
+  font-family: inherit;
+  font-size: var(--md-type-label-sm);
+  font-weight: var(--md-weight-medium);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.tool-btn:hover {
+  color: var(--md-sys-color-on-surface);
+  border-color: var(--md-sys-color-outline);
+}
+.tool-btn.active {
+  background: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-primary);
+}
+/* Selected segment reads as "container", not "primary": inside a segmented
+   group the fill marks the current mode, it is not a call to action. */
+.seg-group > .tool-btn.active {
+  background: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+}
+/* Destructive tool, distinct from the toggle chips beside it. */
+.tool-btn--danger {
+  color: var(--md-sys-color-error);
+  border-color: transparent;
+}
+.tool-btn--danger:hover {
+  color: var(--md-sys-color-error);
+}
+
+/* Native controls that sit inside the toolbar. */
+.mini-select {
+  background: var(--md-sys-color-surface-container-high);
+  color: var(--md-sys-color-on-surface);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-shape-full);
+  padding: 0 var(--md-space-2);
+  height: var(--md-control-h-sm);
+  font-family: inherit;
+  font-size: var(--md-type-label-sm);
+  cursor: pointer;
+}
+.mini-select:hover {
+  border-color: var(--md-sys-color-outline);
+}
+.swatch {
+  width: 28px;
+  height: var(--md-control-h-sm);
+  padding: 2px;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-shape-full);
+  background: transparent;
+  cursor: pointer;
+}
+.swatch:hover {
+  border-color: var(--md-sys-color-outline);
+}
+
+/* Overlay parameter strip */
+#overlaySettings {
+  min-height: 36px;
+  padding: var(--md-space-1) var(--md-space-4);
+  background: var(--md-sys-color-surface-container);
+  border-top: 1px solid var(--md-sys-color-outline-variant);
+  box-shadow: var(--md-elev-1);
+}
+#overlaySettingsBody {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--md-space-4);
+  align-items: center;
+  font-size: var(--md-type-label-sm);
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+/* ==========================================================================
+   Workspace
+   ========================================================================== */
+.workspace {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+.chart-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  background: var(--md-sys-color-surface-container-lowest);
+  min-width: 0;
+}
+.chart-container {
+  flex: 1;
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  cursor: crosshair;
+}
+canvas#chartCanvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* OHLC readout: a surface-container pill, elevated off the plot. */
+.chart-legend {
+  position: absolute;
+  top: var(--md-space-2);
+  left: var(--md-space-2);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--md-space-1) var(--md-space-3);
+  font-size: var(--md-type-body-sm);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  z-index: 10;
+  background: var(--md-sys-color-surface-container);
+  padding: var(--md-space-1) var(--md-space-3);
+  border-radius: var(--md-shape-sm);
+  box-shadow: var(--md-elev-2);
+}
+.legend-item {
+  display: flex;
+  gap: var(--md-space-1);
+}
+.legend-label {
+  color: var(--md-sys-color-on-surface-variant);
+}
+.legend-val {
+  color: var(--md-sys-color-on-surface);
+  font-weight: var(--md-weight-semibold);
+}
+
+/* ==========================================================================
+   Side rail
+   ========================================================================== */
+.side-panel {
+  width: var(--md-rail-w);
+  background: var(--md-sys-color-surface-container);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  flex-shrink: 0;
+  box-shadow: var(--md-elev-1);
+}
+.panel-section {
+  padding: var(--md-space-3) var(--md-space-4);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+}
+.section-title {
+  font-size: var(--md-type-label-sm);
+  font-weight: var(--md-weight-semibold);
+  color: var(--md-sys-color-primary);
+  margin-bottom: var(--md-space-3);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--md-space-2);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+.section-title > span:last-child {
+  color: var(--md-sys-color-on-surface-variant);
+  font-weight: var(--md-weight-regular);
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: var(--md-type-label-sm);
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--md-space-3);
+  margin-bottom: var(--md-space-3);
+}
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--md-space-1);
+  min-width: 0;
+}
+.form-label {
+  font-size: var(--md-type-label-sm);
+  color: var(--md-sys-color-on-surface-variant);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.form-input {
+  background: var(--md-sys-color-surface-container-lowest);
+  border: 1px solid var(--md-sys-color-outline);
+  color: var(--md-sys-color-on-surface);
+  border-radius: var(--md-shape-xs);
+  padding: 6px var(--md-space-2);
+  font-size: var(--md-type-body-md);
+  font-weight: var(--md-weight-semibold);
+  font-family: inherit;
+  min-width: 0;
+  transition: border-color var(--md-motion-short4) var(--md-motion-standard);
+}
+.form-input:hover {
+  border-color: var(--md-sys-color-on-surface);
+}
+.form-input:focus {
+  border-color: var(--md-sys-color-primary);
+  border-width: 2px;
+  padding: 5px 7px;
+}
+/* Read-only value displayed in a field-shaped slot. */
+.form-input[readonly],
+div.form-input {
+  background: var(--md-sys-color-surface-container-high);
+  border-color: transparent;
+  color: var(--md-sys-color-on-surface);
+}
+
+/* ==========================================================================
+   Order entry
+   ========================================================================== */
+.trade-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--md-space-2);
+  margin-top: var(--md-space-1);
+}
+.btn-trade-long,
+.btn-trade-short {
+  color: #fff;
+  font-family: inherit;
+  font-weight: var(--md-weight-bold);
+  font-size: var(--md-type-body-lg);
+  padding: var(--md-space-2) var(--md-space-1);
+  border-radius: var(--md-shape-sm);
+  border: none;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  box-shadow: var(--md-elev-1);
+  transition: box-shadow var(--md-motion-short4) var(--md-motion-standard),
+    transform var(--md-motion-short) var(--md-motion-standard);
+}
+.btn-trade-long {
+  background: var(--data-up);
+}
+.btn-trade-short {
+  background: var(--data-down);
+}
+.btn-trade-long:hover,
+.btn-trade-short:hover {
+  box-shadow: var(--md-elev-2);
+}
+.btn-trade-long:active,
+.btn-trade-short:active {
+  transform: scale(0.98);
+}
+.btn-trade-long > span:last-child,
+.btn-trade-short > span:last-child {
+  font-size: var(--md-type-label-sm);
+  font-weight: var(--md-weight-medium);
+  opacity: 0.9;
+}
+.btn-trade-close {
+  grid-column: span 2;
+  background: transparent;
+  border: 1px solid var(--md-sys-color-outline);
+  color: var(--md-sys-color-on-surface);
+  font-family: inherit;
+  font-weight: var(--md-weight-semibold);
+  font-size: var(--md-type-body-lg);
+  padding: var(--md-space-2);
+  border-radius: var(--md-shape-full);
+  cursor: pointer;
+  margin-top: var(--md-space-1);
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  transition: border-color var(--md-motion-short4) var(--md-motion-standard);
+}
+.btn-trade-close::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: currentColor;
+  opacity: 0;
+  pointer-events: none;
+}
+.btn-trade-close:hover::after {
+  opacity: var(--md-state-hover);
+}
+
+/* ==========================================================================
+   Position + ledger
+   ========================================================================== */
+.position-card {
+  background: var(--md-sys-color-surface-container-high);
+  border-radius: var(--md-shape-md);
+  padding: var(--md-space-3);
+}
+.position-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: var(--md-space-2);
+  gap: var(--md-space-2);
+}
+.pos-badge {
+  font-size: var(--md-type-label-sm);
+  font-weight: var(--md-weight-bold);
+  padding: 2px var(--md-space-2);
+  border-radius: var(--md-shape-full);
+  white-space: nowrap;
+}
+.pos-badge.long {
+  background: var(--data-up-bg);
+  color: var(--data-up-text);
+  border: 1px solid var(--data-up-border);
+}
+.pos-badge.short {
+  background: var(--data-down-bg);
+  color: var(--data-down);
+  border: 1px solid var(--data-down-border);
+}
+.pos-badge.flat {
+  background: var(--md-sys-color-surface-container-highest);
+  color: var(--md-sys-color-on-surface-variant);
+  border: 1px solid transparent;
+}
+.pos-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--md-space-2);
+  font-size: var(--md-type-body-sm);
+  padding: 2px 0;
+}
+.pos-row > span:first-child {
+  color: var(--md-sys-color-on-surface-variant);
+}
+.pos-pnl {
+  font-size: var(--md-type-title-sm);
+  font-weight: var(--md-weight-bold);
+  font-variant-numeric: tabular-nums;
+}
+.divider {
+  border: none;
+  border-top: 1px solid var(--md-sys-color-outline-variant);
+  margin: var(--md-space-2) 0;
+}
+
+.ledger-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--md-space-1);
+  max-height: 180px;
+  overflow-y: auto;
+}
+.ledger-item {
+  background: var(--md-sys-color-surface-container-high);
+  border-radius: var(--md-shape-sm);
+  padding: var(--md-space-2);
+  font-size: var(--md-type-label-sm);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--md-space-2);
+}
+.ledger-actions {
+  display: flex;
+  gap: var(--md-space-1);
+  margin-top: var(--md-space-3);
+}
+.empty-state {
+  text-align: center;
+  color: var(--md-sys-color-on-surface-variant);
+  padding: var(--md-space-6) var(--md-space-2);
+  font-size: var(--md-type-body-sm);
+}
+
+/* ==========================================================================
+   Bottom dock
+   ========================================================================== */
+.bottom-panel {
+  height: 250px;
+  background: var(--md-sys-color-surface-container);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  box-shadow: var(--md-elev-3);
+  position: relative;
+  z-index: 10;
+}
+.tab-header {
+  height: 44px;
+  background: var(--md-sys-color-surface-container-low);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  display: flex;
+  align-items: center;
+  padding: 0 var(--md-space-3);
+  justify-content: space-between;
+  gap: var(--md-space-4);
+  flex-shrink: 0;
+}
+.tab-buttons {
+  display: flex;
+  gap: var(--md-space-1);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.tab-buttons::-webkit-scrollbar {
+  display: none;
+}
+.tab-btn {
+  padding: 0 var(--md-space-3);
+  height: 43px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--md-sys-color-on-surface-variant);
+  font-family: inherit;
+  font-size: var(--md-type-label-md);
+  font-weight: var(--md-weight-medium);
+  cursor: pointer;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.tab-btn:hover {
+  color: var(--md-sys-color-on-surface);
+}
+.tab-btn.active {
+  color: var(--md-sys-color-on-surface);
+  font-weight: var(--md-weight-semibold);
+  border-bottom-color: var(--md-sys-color-primary);
+}
+.tab-hint {
+  font-size: var(--md-type-label-sm);
+  color: var(--md-sys-color-on-surface-variant);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kpi-bar {
+  display: flex;
+  gap: var(--md-space-6);
+  padding: var(--md-space-2) var(--md-space-4);
+  background: var(--md-sys-color-surface-container-low);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+.kpi-card {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 96px;
+  flex-shrink: 0;
+}
+.kpi-title {
+  font-size: var(--md-type-label-sm);
+  color: var(--md-sys-color-on-surface-variant);
+  font-weight: var(--md-weight-medium);
+  white-space: nowrap;
+}
+.kpi-val {
+  font-size: var(--md-type-title-sm);
+  font-weight: var(--md-weight-bold);
+  color: var(--md-sys-color-on-surface);
+}
+
+.tab-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--md-space-3) var(--md-space-4);
+  display: none;
+}
+.tab-content.active {
+  display: block;
+}
+
+/* ==========================================================================
+   Tables
+   ========================================================================== */
+.table-container {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--md-type-body-sm);
+  font-variant-numeric: tabular-nums;
+}
+.table-container th {
+  background: var(--md-sys-color-surface-container-high);
+  color: var(--md-sys-color-on-surface-variant);
+  font-weight: var(--md-weight-semibold);
+  text-align: left;
+  padding: var(--md-space-2) var(--md-space-3);
+  position: sticky;
+  top: 0;
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  z-index: 2;
+  white-space: nowrap;
+}
+.table-container td {
+  padding: var(--md-space-2) var(--md-space-3);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  color: var(--md-sys-color-on-surface);
+}
+.table-container tbody tr:hover td,
+.table-container tr:hover td {
+  background: var(--md-sys-color-surface-container-high);
+}
+
+/* Data-direction utilities — paired with sign or text, never color alone. */
+.val-up {
+  color: var(--data-up-text) !important;
+}
+.val-down {
+  color: var(--data-down) !important;
+}
+.val-flat {
+  color: var(--data-flat) !important;
+}
+
+#equityCanvas,
+#modalEquityCanvas {
+  width: 100%;
+  height: 140px;
+  display: block;
+}
+#modalPositionCanvas {
+  width: 100%;
+  height: 45px;
+  display: block;
+}
+
+/* ==========================================================================
+   Badges
+   ========================================================================== */
+.badge {
+  display: inline-block;
+  padding: 1px var(--md-space-2);
+  font-size: var(--md-type-label-sm);
+  font-weight: var(--md-weight-semibold);
+  border-radius: var(--md-shape-full);
+  background: var(--md-sys-color-surface-container-highest);
+  color: var(--md-sys-color-on-surface-variant);
+  white-space: nowrap;
+}
+.badge-long {
+  background: var(--data-up-bg);
+  color: var(--data-up-text);
+  border: 1px solid var(--data-up-border);
+}
+.badge-short {
+  background: var(--data-down-bg);
+  color: var(--data-down);
+  border: 1px solid var(--data-down-border);
+}
+
+/* ==========================================================================
+   Dialog
+   ========================================================================== */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--md-sys-color-scrim);
+  z-index: 2000;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: var(--md-space-6);
+}
+.modal-overlay.show {
+  display: flex;
+}
+.modal-box {
+  width: 960px;
+  max-width: 95vw;
+  max-height: 92vh;
+  background: var(--md-sys-color-surface-container-high);
+  border-radius: var(--md-shape-xl);
+  box-shadow: var(--md-elev-5);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: var(--md-sys-color-on-surface);
+}
+.modal-header {
+  padding: var(--md-space-3) var(--md-space-5);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--md-space-3);
+  flex-shrink: 0;
+}
+.modal-title {
+  font-size: var(--md-type-title-lg);
+  font-weight: var(--md-weight-semibold);
+  color: var(--md-sys-color-on-surface);
+  display: flex;
+  align-items: center;
+  gap: var(--md-space-3);
+}
+.modal-close {
+  background: transparent;
+  border: none;
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: var(--md-type-title-md);
+  line-height: 1;
+  cursor: pointer;
+  padding: var(--md-space-2);
+  border-radius: var(--md-shape-full);
+  flex-shrink: 0;
+}
+.modal-close:hover {
+  color: var(--md-sys-color-on-surface);
+}
+.modal-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 var(--md-space-5) var(--md-space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--md-space-3);
+}
+
+.modal-chart-section {
+  background: var(--md-sys-color-surface-container);
+  border-radius: var(--md-shape-md);
+  padding: var(--md-space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--md-space-2);
+}
+.modal-chart-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--md-space-3);
+  font-size: var(--md-type-body-sm);
+  flex-wrap: wrap;
+}
+
+/* Segmented button (single-select inside a dialog) */
+.pill-tabs {
+  display: flex;
+  border: 1px solid var(--md-sys-color-outline);
+  border-radius: var(--md-shape-full);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.pill-tab {
+  padding: var(--md-space-1) var(--md-space-3);
+  font-size: var(--md-type-label-sm);
+  font-family: inherit;
+  background: transparent;
+  border: none;
+  border-right: 1px solid var(--md-sys-color-outline);
+  color: var(--md-sys-color-on-surface-variant);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.pill-tab:last-child {
+  border-right: none;
+}
+.pill-tab.active {
+  background: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+  font-weight: var(--md-weight-semibold);
+}
+.pill-tab.active::before {
+  content: "✓ ";
+}
+
+.analysis-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: var(--md-space-3);
+}
+.analysis-card {
+  background: var(--md-sys-color-surface-container);
+  border-radius: var(--md-shape-md);
+  padding: var(--md-space-3) var(--md-space-4);
+}
+.analysis-card-title {
+  font-size: var(--md-type-body-lg);
+  font-weight: var(--md-weight-semibold);
+  color: var(--md-sys-color-primary);
+  margin-bottom: var(--md-space-2);
+  display: flex;
+  justify-content: space-between;
+  gap: var(--md-space-2);
+  padding-bottom: var(--md-space-2);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+}
+.metric-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--md-space-3);
+  font-size: var(--md-type-body-sm);
+  padding: 5px 0;
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+}
+.metric-row:last-child {
+  border-bottom: none;
+}
+.metric-label {
+  color: var(--md-sys-color-on-surface-variant);
+}
+.metric-value {
+  font-weight: var(--md-weight-semibold);
+  color: var(--md-sys-color-on-surface);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ==========================================================================
+   Snackbar
+   ========================================================================== */
+#toast {
+  position: fixed;
+  bottom: var(--md-space-6);
+  left: var(--md-space-6);
+  right: auto;
+  max-width: min(560px, calc(100vw - var(--md-space-8)));
+  background: var(--md-sys-color-inverse-surface);
+  color: var(--md-sys-color-inverse-on-surface);
+  padding: var(--md-space-3) var(--md-space-4);
+  border-radius: var(--md-shape-xs);
+  box-shadow: var(--md-elev-3);
+  font-size: var(--md-type-body-md);
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(var(--md-space-2));
+  transition: opacity var(--md-motion-short4) var(--md-motion-standard),
+    transform var(--md-motion-short4) var(--md-motion-emphasize-decel);
+  z-index: 3000;
+}
+#toast.show {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* Screen-reader-only text. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ==========================================================================
+   Content blocks used by the data / help / cache tabs
+   ========================================================================== */
+.muted {
+  color: var(--md-sys-color-on-surface-variant);
+}
+.muted-block {
+  font-size: var(--md-type-label-sm);
+  color: var(--md-sys-color-on-surface-variant);
+  line-height: 1.6;
+}
+.section-sub {
+  font-size: var(--md-type-label-sm);
+  font-weight: var(--md-weight-regular);
+  color: var(--md-sys-color-on-surface-variant);
+}
+.hint-gold {
+  font-size: var(--md-type-label-sm);
+  font-weight: var(--md-weight-semibold);
+  color: var(--data-ma5);
+}
+.is-readonly {
+  background: var(--md-sys-color-surface-container-high);
+  border-color: transparent;
+  font-weight: var(--md-weight-bold);
+}
+.card {
+  background: var(--md-sys-color-surface-container);
+  border-radius: var(--md-shape-md);
+  padding: var(--md-space-4);
+}
+.card-fill {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.card-title {
+  font-size: var(--md-type-body-md);
+  font-weight: var(--md-weight-bold);
+  color: var(--md-sys-color-on-surface);
+  margin-bottom: var(--md-space-2);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--md-space-2);
+}
+.card-footer {
+  display: flex;
+  gap: var(--md-space-2);
+  border-top: 1px solid var(--md-sys-color-outline-variant);
+  padding-top: var(--md-space-3);
+}
+.cache-list {
+  flex: 1;
+  max-height: 110px;
+  overflow-y: auto;
+  background: var(--md-sys-color-surface-container-lowest);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-shape-xs);
+  padding: var(--md-space-2);
+  margin-bottom: var(--md-space-3);
+  font-size: var(--md-type-label-sm);
+}
+.cell-empty {
+  text-align: center;
+  color: var(--md-sys-color-on-surface-variant);
+  padding: var(--md-space-5);
+}
+.pill-live {
+  font-size: var(--md-type-label-sm);
+  background: var(--md-sys-color-success-container);
+  color: var(--md-sys-color-on-success-container);
+  padding: 1px var(--md-space-2);
+  border-radius: var(--md-shape-full);
+  white-space: nowrap;
+}
+.modal-subtitle {
+  font-size: var(--md-type-label-sm);
+  font-weight: var(--md-weight-regular);
+  color: var(--md-sys-color-on-surface-variant);
+}
+.chart-axis-note {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--md-space-3);
+  font-size: var(--md-type-label-sm);
+  color: var(--md-sys-color-on-surface-variant);
+}
+kbd {
+  background: var(--md-sys-color-surface-container-high);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-bottom-width: 2px;
+  border-radius: var(--md-shape-xs);
+  padding: 1px 6px;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: var(--md-type-label-sm);
+  color: var(--md-sys-color-on-surface);
+}
+.help-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--md-space-5);
+  max-width: 800px;
+  font-size: var(--md-type-body-sm);
+  line-height: 1.8;
+}
+.help-grid h4 {
+  font-size: var(--md-type-body-lg);
+  font-weight: var(--md-weight-bold);
+  color: var(--md-sys-color-on-surface);
+  margin-bottom: var(--md-space-2);
+}
+.help-grid p {
+  margin-bottom: var(--md-space-1);
+}
+.two-col {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: var(--md-space-4);
+  max-width: 960px;
+}
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--md-space-2);
+}
+.row-between {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--md-space-2);
+  margin-bottom: var(--md-space-2);
+}
+.grow {
+  flex: 1;
+  min-width: 0;
+}
+
+/* MA series colours are shared with the canvas renderer — see --data-* notes. */
+.legend-ma5 .legend-label,
+.legend-ma5 .legend-val {
+  color: var(--data-ma5);
+}
+.legend-ma10 .legend-label,
+.legend-ma10 .legend-val {
+  color: var(--data-ma10);
+}
+.legend-ma20 .legend-label,
+.legend-ma20 .legend-val {
+  color: var(--data-ma20-text);
+}
+
+/* ==========================================================================
+   Narrow windows — the rail and the toolbars reflow; the split layout itself
+   is unchanged. Below ~1180px the 336px rail would crush the plot.
+   ========================================================================== */
+/* ==========================================================================
+   Touch surfaces
+   The chart owns the gesture. Without touch-action:none the browser steals
+   one-finger pan for page scroll and two-finger pinch for page zoom, which
+   arrives as pointercancel and leaves the crosshair stranded off-screen.
+   ========================================================================== */
+.chart-container,
+#chartCanvas,
+#equityCanvas,
+#modalEquityCanvas,
+#modalPositionCanvas {
+  touch-action: none;
+  -webkit-touch-callout: none;
+}
+
+/* The rail toggle only exists in drawer mode; hidden on desktop. */
+.sidebar-toggle {
+  display: none;
+}
+
+/* Advanced-report tables and the strategy KPI grid are built at runtime by
+   src/ui/backtestPanel.js and had no stylesheet rules at all. */
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--md-type-body-sm);
+  font-variant-numeric: tabular-nums;
+}
+.data-table th {
+  background: var(--md-sys-color-surface-container-high);
+  color: var(--md-sys-color-on-surface-variant);
+  font-weight: var(--md-weight-semibold);
+  text-align: left;
+  padding: var(--md-space-2) var(--md-space-3);
+  white-space: nowrap;
+}
+.data-table td {
+  padding: var(--md-space-2) var(--md-space-3);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  color: var(--md-sys-color-on-surface);
+}
+.data-table tr:hover td {
+  background: var(--md-sys-color-surface-container-high);
+}
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--md-space-3);
+}
+
+/* ==========================================================================
+   Window-width behaviour
+   ========================================================================== */
+@media (max-width: 1760px) {
+  .brand-badge,
+  .tab-hint {
+    display: none;
+  }
+}
+@media (max-width: 1220px) {
+  :root {
+    --md-rail-w: 280px;
+  }
+  .form-grid {
+    gap: var(--md-space-2);
+  }
+}
+
+/* Narrow windows: the trading rail becomes an off-canvas drawer. The .open
+   class is toggled by #btnToggleSidebar in the app script — keep in sync. */
+@media (max-width: 900px) {
+  .navbar {
+    flex-wrap: wrap;
+  }
+  .nav-center {
+    order: 3;
+    width: 100%;
+    justify-content: center;
+  }
+  .sidebar-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .side-panel {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(340px, 90vw);
+    z-index: 1500;
+    transform: translateX(103%);
+    transition: transform var(--md-motion-medium2) var(--md-motion-standard);
+    box-shadow: var(--md-elev-5);
+  }
+  .side-panel.open {
+    transform: translateX(0);
+  }
+  .bottom-panel {
+    height: 220px;
+  }
+}
+
+/* Coarse pointers: 40px targets, 16px inputs (iOS auto-zooms below that), and
+   hover affordances dropped because they latch on after a tap. */
+@media (pointer: coarse) {
+  .tool-btn,
+  .btn,
+  .btn-sm,
+  .tab-btn {
+    min-height: 40px;
+    padding-left: var(--md-space-3);
+    padding-right: var(--md-space-3);
+    font-size: var(--md-type-body-lg);
+  }
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
+  .navbar {
+    height: auto;
+    min-height: 52px;
+    padding-top: 6px;
+    padding-bottom: 6px;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .toolbar {
+    height: auto;
+    min-height: 48px;
+    padding-top: var(--md-space-1);
+    padding-bottom: var(--md-space-1);
+  }
+  .kpi-grid {
+    grid-template-columns: 1fr;
+  }
+  .bottom-panel {
+    height: min(230px, 30dvh);
+  }
+  .panel-section {
+    padding: var(--md-space-3);
+  }
+  .btn:hover::after,
+  .tool-btn:hover::after,
+  .tab-btn:hover::after,
+  .pill-tab:hover::after {
+    opacity: 0;
+  }
+}
