@@ -40,7 +40,13 @@ export function tradingCalendarOf(bars, refBars) {
  *   没有参照时：只把 ≥ minSuspensionDays 的自然日缺口记进 longGaps，并明确标为"无法与长假区分"。
  */
 export function annotateGaps(bars, { refBars = null, minSuspensionDays = 4 } = {}) {
-  const list = (bars || []).slice().sort((a, b) => (dayKey(a.date) < dayKey(b.date) ? -1 : 1));
+  // 相等时必须返回 0：ES2019 起 Array#sort 稳定，同一天内的多根 bar 才会保持原顺序。
+  // 原来写成 `? -1 : 1` 永不返回 0，分钟级序列里同一天的 bar 会被任意重排，
+  // prevClose 就挂到了当天随便一根上 —— 停牌/缺口判定跟着一起错。
+  const list = (bars || []).slice().sort((a, b) => {
+    const x = dayKey(a.date), y = dayKey(b.date);
+    return x < y ? -1 : x > y ? 1 : 0;
+  });
   const { dates, own, calendarKnown } = tradingCalendarOf(list, refBars);
   const suspensions = [], longGaps = [];
   const dateSet = new Set(list.map(b => dayKey(b.date)));

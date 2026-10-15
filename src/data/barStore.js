@@ -196,6 +196,30 @@ export const BarStore = {
     return true;
   },
 
+  /**
+   * 删掉一条缓存。三个落点都要删：内存兜底、IndexedDB、localStorage 镜像 ——
+   * 少删一个，下一轮 getCache 就会从那个落点把坏数据又捞回来。
+   * 用途：序列的 bar 间隔和所标周期对不上（上游静默降级过）时，必须能把它踢掉重取。
+   */
+  async deleteCache(key) {
+    InMemoryFallback.set(key, null);
+    try { localStorage.removeItem(lsKey(key)); } catch (e) {}
+    try {
+      const db = await openDB();
+      if (db) {
+        return await new Promise((resolve) => {
+          const tx = db.transaction(STORE_BARS, 'readwrite');
+          const k = upgradeLegacyKey(key);
+          tx.objectStore(STORE_BARS).delete(k);
+          tx.objectStore(STORE_BARS).delete(key);   // 旧键形态也一并删，别让迁移前的记录复活
+          tx.oncomplete = () => resolve(true);
+          tx.onerror = () => resolve(false);
+        });
+      }
+    } catch (e) {}
+    return true;
+  },
+
   async getCache(key) {
     const inMem = InMemoryFallback.get(key);
     if (inMem) return inMem;

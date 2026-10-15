@@ -20,16 +20,29 @@
       <div class="contract-selector">
         <label for="symbolSelect">品种:</label>
         <select id="symbolSelect">
-          <optgroup label="期货主连 (东财真实行情)">
+          <optgroup label="期货主连 · 工业品 (东财真实行情, 日线可回溯 2015)">
             <option value="EG0" selected>EG0 乙二醇主连</option>
             <option value="RB0">RB0 螺纹钢主连</option>
-            <option value="M0">M0 豆粕主连</option>
-            <option value="I0">I0 铁矿石主连</option>
+            <option value="HC0">HC0 热卷主连</option>
             <option value="CU0">CU0 沪铜主连</option>
+            <option value="AL0">AL0 沪铝主连</option>
+            <option value="I0">I0 铁矿石主连</option>
             <option value="TA0">TA0 PTA主连</option>
+            <option value="MA0">MA0 甲醇主连</option>
+            <option value="FG0">FG0 玻璃主连</option>
+            <option value="SA0">SA0 纯碱主连</option>
+            <option value="FU0">FU0 燃料油主连</option>
+            <option value="SF0">SF0 硅铁主连</option>
+            <option value="LC0">LC0 碳酸锂主连</option>
+          </optgroup>
+          <optgroup label="期货主连 · 农产品 / 贵金属 / 股指">
+            <option value="M0">M0 豆粕主连</option>
+            <option value="C0">C0 玉米主连</option>
+            <option value="P0">P0 棕榈油主连</option>
             <option value="AU0">AU0 沪金主连</option>
             <option value="SC0">SC0 原油主连</option>
             <option value="IF0">IF0 沪深300股指主连</option>
+            <option value="IM0">IM0 中证1000股指主连</option>
           </optgroup>
           <optgroup label="A股 / ETF / 指数 (东财真实行情)">
             <option value="600519">600519 贵州茅台</option>
@@ -41,22 +54,18 @@
             <option value="000300">000300 沪深300指数</option>
             <option value="399001">399001 深证成指</option>
           </optgroup>
-          <optgroup label="仿真预置行情">
-            <option value="eg9999">eg9999 乙二醇仿真</option>
-            <option value="rb9999">rb9999 螺纹钢仿真</option>
-            <option value="m9999">m9999 豆粕仿真</option>
-          </optgroup>
         </select>
         <select id="periodSelect" title="K线周期" aria-label="K线周期">
           <option value="daily" selected>日线</option>
           <option value="weekly">周线</option>
           <option value="monthly">月线</option>
+          <option value="4h">4小时</option>
           <option value="60m">60分钟</option>
         </select>
         <select id="adjustSelect" title="价格复权口径（A股）；期货用主连拼接" aria-label="价格复权口径">
-          <option value="qfq" selected>前复权</option>
+          <option value="hfq" selected>后复权</option>
+          <option value="qfq">前复权</option>
           <option value="none">不复权</option>
-          <option value="hfq">后复权</option>
         </select>
         <input id="symbolInput" class="form-input" placeholder="代码/名称 如 rb2610、600519" aria-label="按代码或名称载入"
                title="也可直接输入代码：期货 rb2610 / RB0 / 螺纹钢主连，A股 600519 / sh000001" />
@@ -120,6 +129,7 @@
       <button class="tool-btn" id="btnToggleMagnet" aria-pressed="false" title="自动吸附到最近K线的高/低/开/收 (M)">🧲 磁吸: 关</button>
       <button class="tool-btn active" id="btnToggleTradePaths" aria-pressed="true" title="在K线图上显示多空平仓连线与盈亏统计">📍 交易连线: 开</button>
       <button class="tool-btn" id="btnToggleAnchor" aria-pressed="false" title="最新K线固定在图表中央，推进/播放时视角自动跟随">🎯 居中: 关</button>
+      <button class="tool-btn active" id="btnToggleLogScale" aria-pressed="true" title="Y 轴对数刻度：等距像素=等率涨跌，百分比止损/回撤/通道宽度才量得准。默认开启，切线性只为对照">📏 对数轴: 开</button>
       <input type="color" id="drawColorPicker" value="#f59e0b" class="swatch" aria-label="画线颜色" title="画线颜色" />
       <select id="drawLineWidth" class="mini-select" aria-label="画线粗细">
         <option value="1">细 1px</option>
@@ -174,6 +184,17 @@
         <div class="legend-item legend-ma5"><span class="legend-label">MA5:</span> <span class="legend-val" id="legendMA5">--</span></div>
         <div class="legend-item legend-ma10"><span class="legend-label">MA10:</span> <span class="legend-val" id="legendMA10">--</span></div>
         <div class="legend-item legend-ma20"><span class="legend-label">MA20:</span> <span class="legend-val" id="legendMA20">--</span></div>
+      </div>
+
+      <!-- 取数失败横幅：本项目不允许虚拟K线，所以拉不到真数据时图上必须什么都不画，
+           并把"哪条通道、什么错、下一步做什么"摆在图面上。toast 会自己消失，不足以承担这个责任。 -->
+      <div class="data-error" id="dataError" hidden>
+        <div class="data-error-head">
+          <span class="data-error-title" id="dataErrorTitle">行情拉取失败</span>
+          <button type="button" class="btn btn-sm" id="btnRetryData">重试</button>
+          <button type="button" class="data-error-close" id="btnDismissDataError" aria-label="关闭提示">✕</button>
+        </div>
+        <div class="data-error-body" id="dataErrorBody"></div>
       </div>
 
       <!-- Canvas Container -->
@@ -348,7 +369,7 @@
       <div class="panel-section">
         <div class="section-title">
           <span>当前持仓监控</span>
-          <span id="posSymbolBadge" class="badge">eg9999</span>
+          <span id="posSymbolBadge" class="badge">EG0</span>
         </div>
 
         <div class="position-card">
@@ -783,12 +804,12 @@
   <script type="module">
     // --- 0. 数据层与市场规则：已抽为 ES module（绞杀者模式第一步）---
     // 这里只 import，不再复制实现。旧的 InMemoryFallback / MarketDataCache /
-    // OnlineFuturesFetcher / MockDataGenerator 全部迁到 src/data/ 下。
+    // OnlineFuturesFetcher 全部迁到 src/data/ 下。MockDataGenerator 已删除：
+    // 本项目只画真实存在的K线，取不到就报错留白，不用合成数据把图填满。
     import { BarStore, barKey, upgradeLegacyKey, cacheBars } from './src/data/barStore.js';
     import { fetchBars, fetchSinaJSONP, resolveSymbol } from './src/data/sources.js';
-    import { MockDataGenerator } from './src/data/mock.js';
     import { attachDefaultMAs, calcMA } from './src/data/indicators.js';
-    import { aggregate } from './src/data/dominant.js';
+    import { resolveBars, periodsPerYear, periodLabel, periodSpacingOk } from './src/data/periods.js';
     import { parseCSV, barsToCSV, tradesToCSV, downloadText, SAMPLE_CSV } from './src/data/csvIO.js';
     import { parseSymbol, classifyAShare, MARKETS } from './src/markets/symbolMeta.js';
     import { getFuturesSpec } from './src/markets/contractSpecs.js';
@@ -1374,6 +1395,35 @@
     }
 
     // --- 3. DRAWING & MEASUREMENT MODULE ---
+    /**
+     * 价格轴刻度格式。后复权把早年价格抬到几万、几十万，固定 toFixed(1) 会撑破 65px 的轴宽；
+     * 而对数轴上的刻度是算出来的非整数，直接 String() 又会漏出 4210.000000000001。
+     */
+    function fmtAxisPrice(price) {
+      if (!Number.isFinite(price)) return '--';
+      const a = Math.abs(price);
+      if (a >= 100000) return (price / 10000).toFixed(0) + '万';
+      if (a >= 10000) return (price / 10000).toFixed(1) + '万';
+      if (a >= 1000) return price.toFixed(0);
+      if (a >= 100) return price.toFixed(1);
+      if (a >= 1) return price.toFixed(2);
+      return price.toFixed(4);
+    }
+
+    /**
+     * 角色线胶囊上的百分比 = 这条线对应的浮动盈亏，从持仓视角算，不是从价格涨跌算。
+     * 空头止损挂在建仓价上方，价格"涨"了但亏的是 9%，所以仍显示 -9.0%。
+     * 必须在绘制时按当前线价现算：以前把百分比烤成常量存进 line.tagPct，
+     * 于是把止损线拖到任何位置，胶囊上都还写着下单那一刻的 -9.0%。
+     */
+    function rolePctFromEntry(line) {
+      if (!line.role || line.role === 'entry') return null;
+      const entry = line.basePrice, price = line.p1 && line.p1.price;
+      if (!Number.isFinite(entry) || !Number.isFinite(price) || entry === 0) return null;
+      const signed = (line.short ? entry - price : price - entry) / entry * 100;
+      return signed;
+    }
+
     class DrawingModule {
       constructor(chartModule) {
         this.chart = chartModule;
@@ -1629,6 +1679,14 @@
 
       handleMouseUp() {
         if (this.dragState) {
+          const { line, originP1 } = this.dragState;
+          // 记下"这条角色线被人手拖过、拖到了哪"。只是点中没挪动不算拖动。
+          // syncPositionLevels 拿它来判断：改 止损% 输入框会重建这条线，
+          // 用户手工拖出来的价位会被静默换掉 —— 那件事必须说出来。
+          if (line && line.role && originP1 && Math.abs(line.p1.price - originP1.price) > 1e-9) {
+            line.userDragged = true;
+            this.chart.onRoleLineDragged && this.chart.onRoleLineDragged(line);
+          }
           this.dragState = null;
           this.chart.requestRender();
           return true;
@@ -2110,8 +2168,8 @@
       /** 线起点的小胶囊：角色 + 距开仓的百分比。价格轴那边只留价位，两处不打架。 */
       drawRoleChip(ctx, line, x, y) {
         const name = { entry: '开仓', sl: '止损', tp: '止盈' }[line.role] || '';
-        const pct = Number.isFinite(line.tagPct) ? ` ${line.tagPct > 0 ? '+' : ''}${line.tagPct.toFixed(1)}%` : '';
-        const text = name + pct;
+        const pct = rolePctFromEntry(line);
+        const text = name + (pct === null ? '' : ` ${pct > 0 ? '+' : ''}${pct.toFixed(1)}%`);
         const { chart } = this;
         ctx.save();
         ctx.font = '10px system-ui, -apple-system, "Microsoft YaHei", sans-serif';
@@ -2154,7 +2212,7 @@
         ctx.font = 'bold 10px Consolas, monospace';
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
-        ctx.fillText(price.toFixed(1), x + 6, y);
+        ctx.fillText(fmtAxisPrice(price), x + 6, y);
         ctx.restore();
       }
     }
@@ -2177,6 +2235,7 @@
         this.barSpacing = 4;
         this.scrollOffset = 0;
         this.centerLatest = false;   // true → 最新K线锚定在图表中线
+        this.logScale = true;        // Y 轴默认对数：百分比止损/等率通道只有在对数下才量得准
 
         this.isPanning = false;
         this.lastMousePos = null;
@@ -2406,18 +2465,46 @@
         return (this.visibleDataCount - 1) - (latestBarX - x) / barPitch;
       }
 
+      /**
+       * 价格 → 屏幕 Y。默认对数：趋势交易的止损/止盈是按百分比定的，
+       * 线性轴上"从 3000 涨到 3300"和"从 6000 涨到 6300"画出来一样高，
+       * 但前者是 +10%、后者是 +5% —— 在同一张图上量两根K线的高低，结论必然是错的。
+       * 对数轴下等距的像素对应等率的涨跌，回撤深度、盈亏比、通道宽度才可比。
+       *
+       * 前提是最小价 > 0。前复权会把早年价格扣到负数，那种序列只能退回线性并如实标注。
+       */
       priceToY(price) {
-        const { minPrice, maxPrice } = this.currentPriceRange || { minPrice: 4000, maxPrice: 5000 };
+        const r = this.currentPriceRange || { minPrice: 4000, maxPrice: 5000 };
         const innerHeight = this.klineHeight - 30;
-        if (maxPrice === minPrice) return this.klineHeight / 2;
-        return 15 + (1 - (price - minPrice) / (maxPrice - minPrice)) * innerHeight;
+        if (r.maxPrice === r.minPrice) return this.klineHeight / 2;
+        const t = this.priceToT(price, r);
+        return 15 + (1 - t) * innerHeight;
       }
 
       yToPrice(y) {
-        const { minPrice, maxPrice } = this.currentPriceRange || { minPrice: 4000, maxPrice: 5000 };
+        const r = this.currentPriceRange || { minPrice: 4000, maxPrice: 5000 };
         const innerHeight = this.klineHeight - 30;
-        const normalized = 1 - (y - 15) / innerHeight;
-        return minPrice + normalized * (maxPrice - minPrice);
+        const norm = 1 - (y - 15) / innerHeight;
+        return this.axisPrice(r.minPrice, r.maxPrice, norm);
+      }
+
+      /** 价格在轴上的归一化位置 [0,1]（可以越界），与 axisPrice 互逆。 */
+      priceToT(price, r) {
+        if (!r.log) return (price - r.minPrice) / (r.maxPrice - r.minPrice);
+        // 不许把越界的价格夹到 minPrice：那样一条被拖到可视区下方的止损线会贴死在轴底，
+        // 看着像"止损就在今日最低点"，而它其实在图外。越界就该继续越界画到可视区外。
+        if (!(price > 0)) return -1;   // 非正值在对数上没有位置，同样推到可视区下方之外
+        const lo = Math.log(r.minPrice), hi = Math.log(r.maxPrice);
+        return (Math.log(price) - lo) / (hi - lo);
+      }
+
+      /** 轴上比例 t 处的价格。对数下等距的是对数，不是价格本身。 */
+      axisPrice(minPrice, maxPrice, t) {
+        if (this.currentPriceRange && this.currentPriceRange.log) {
+          const lo = Math.log(minPrice), hi = Math.log(maxPrice);
+          return Math.exp(lo + t * (hi - lo));
+        }
+        return minPrice + t * (maxPrice - minPrice);
       }
 
       render() {
@@ -2450,10 +2537,18 @@
           maxPrice = 4500;
         }
 
-        const pricePadding = (maxPrice - minPrice) * 0.06;
-        minPrice -= pricePadding;
-        maxPrice += pricePadding;
-        this.currentPriceRange = { minPrice, maxPrice };
+        // 对数只在整段可见价格都为正时才成立；含 ≤0 时静默退回线性，但要在轴上写清楚
+        const log = this.logScale && minPrice > 0 && maxPrice > minPrice;
+        if (log) {
+          // 线性轴留 6% 的加法余量，对数轴得换成等价的乘法余量，否则上下沿留白差一个量级
+          const f = Math.pow(maxPrice / minPrice, 0.06);
+          minPrice /= f; maxPrice *= f;
+        } else {
+          const pricePadding = (maxPrice - minPrice) * 0.06;
+          minPrice -= pricePadding;
+          maxPrice += pricePadding;
+        }
+        this.currentPriceRange = { minPrice, maxPrice, log, logFallback: this.logScale && !log };
 
         this.drawGrid(minPrice, maxPrice, start, end, range.barPitch);
         this.drawVolume(start, end, maxVolume);
@@ -2481,7 +2576,7 @@
 
         const steps = 5;
         for (let i = 0; i <= steps; i++) {
-          const price = minPrice + (i / steps) * (maxPrice - minPrice);
+          const price = this.axisPrice(minPrice, maxPrice, i / steps);
           const y = this.priceToY(price);
           ctx.beginPath();
           ctx.moveTo(0, y);
@@ -2701,9 +2796,24 @@
 
         const steps = 5;
         for (let i = 0; i <= steps; i++) {
-          const price = minPrice + (i / steps) * (maxPrice - minPrice);
+          const price = this.axisPrice(minPrice, maxPrice, i / steps);
           const y = this.priceToY(price);
-          ctx.fillText(price.toFixed(1), mainWidth + 6, y);
+          ctx.fillText(fmtAxisPrice(price), mainWidth + 6, y);
+        }
+        // 轴口径必须写在轴上：对数和线性看着都像"一条价格轴"，事后没人记得是哪一种，
+        // 而对数轴上线段斜率的含义完全不同。
+        if (this.currentPriceRange && this.currentPriceRange.log) {
+          ctx.save();
+          ctx.fillStyle = '#5c6370';
+          ctx.font = 'bold 9px monospace';
+          ctx.fillText('LOG', mainWidth + this.priceScaleWidth / 2, 10);
+          ctx.restore();
+        } else if (this.currentPriceRange && this.currentPriceRange.logFallback) {
+          ctx.save();
+          ctx.fillStyle = '#f59e0b';
+          ctx.font = 'bold 9px monospace';
+          ctx.fillText('线性', mainWidth + this.priceScaleWidth / 2, 10);
+          ctx.restore();
         }
 
         ctx.textAlign = 'center';
@@ -2777,8 +2887,12 @@
       updateLegend(bar, idx) {
         // 盲复盘：legend 的日期换成相对根号，价格照给 —— 训练要看的就是价格行为，
         // 但年份一露出来，复盘的人就会开始回忆"这是不是那波疫情行情"。
-        document.getElementById('legendTime').textContent = this.chartModule.blindMode
-          ? `第 ${(idx === undefined ? this.chartModule.visibleDataCount - 1 : idx) + 1} 根（盲复盘）`
+        // 这里原本写的是 this.chartModule.blindMode：本方法就在 ChartModule 里面，
+        // this.chartModule 永远是 undefined，第一句就抛 TypeError，于是整条 OHLC 图例
+        // 从来没填过一次（界面上 时间/开/高/低/收 恒为 --）。drawCrosshair 用的是 this.blindMode，
+        // 两处口径不一致正是这个 bug 能活下来的原因。
+        document.getElementById('legendTime').textContent = this.blindMode
+          ? `第 ${(idx === undefined ? this.visibleDataCount - 1 : idx) + 1} 根（盲复盘）`
           : bar.date;
         document.getElementById('legendOpen').textContent = bar.open;
         document.getElementById('legendHigh').textContent = bar.high;
@@ -2786,9 +2900,10 @@
         document.getElementById('legendClose').textContent = bar.close;
 
         const chg = bar.close - bar.open;
-        const chgPct = ((chg / bar.open) * 100).toFixed(2);
+        // 前复权会把早年价格扣到 ≤0，开盘价为 0 时百分比是 Infinity，图例上会印出 "Infinity%"
+        const chgPct = bar.open > 0 ? ` (${chg >= 0 ? '+' : ''}${((chg / bar.open) * 100).toFixed(2)}%)` : '';
         const chgEl = document.getElementById('legendChange');
-        chgEl.textContent = `${chg >= 0 ? '+' : ''}${chg} (${chg >= 0 ? '+' : ''}${chgPct}%)`;
+        chgEl.textContent = `${chg >= 0 ? '+' : ''}${chg}${chgPct}`;
         chgEl.style.color = chg >= 0 ? 'var(--up-color)' : 'var(--down-color)';
 
         document.getElementById('legendVol').textContent = bar.volume.toLocaleString();
@@ -2831,7 +2946,7 @@
         this.blind = null;         // 盲复盘会话状态
 
         this.autoPlayTimer = null;
-        this.currentSymbol = 'eg9999';
+        this.currentSymbol = 'EG0';
 
         this.init();
       }
@@ -2842,18 +2957,20 @@
         this.syncUI();
       }
 
-      /** 组合回测取数用：先读缓存，没有再走三通道取数并回写缓存。 */
+      /** 组合回测取数用：先读缓存，没有再走三通道取数并回写缓存。周期口径与主图共用 acquireBars。 */
       async loadBarsForSymbol(it) {
         const periodEl = document.getElementById('periodSelect');
         const adjustEl = document.getElementById('adjustSelect');
         const period = periodEl ? periodEl.value : 'daily';
         const isFutures = it.market === MARKETS.FUTURES;
-        const adjust = isFutures ? 'none' : (adjustEl ? adjustEl.value : 'qfq');
+        const adjust = isFutures ? 'none' : (adjustEl ? adjustEl.value : 'hfq');
         const key = barKey(it.market, it.symbol, period, adjust);
         const cached = await BarStore.getCache(key);
         if (cached && Array.isArray(cached.data) && cached.data.length >= 60) return cached.data;
         try {
-          const out = await fetchBars({ market: it.market, symbol: it.symbol, secid: it.secid, period, adjust });
+          const out = await this.acquireBars({ market: it.market, secid: it.secid,
+                                               sinaCode: parseSymbol(it.symbol, '').sinaCode },
+                                             it.symbol, period, adjust, false);
           if (out.ok && out.bars && out.bars.length) {
             await cacheBars(key, out.bars, { market: it.market, symbol: it.symbol, period, adjust, name: out.name, source: out.source });
             return out.bars;
@@ -2988,29 +3105,29 @@
 
         const parsed = parseSymbol(String(rawCode).trim(), '');
         if (!parsed.ok) {
-          // 仿真预置盘（*9999）走这里：不是有效真实代码，但本来就该出拟真行情
-          if (/9999$/.test(String(rawCode))) {
-            const mockBars = attachDefaultMAs(MockDataGenerator.generate(rawCode, 260));
-            this.applyDataToChart(mockBars, rawCode, `已载入 ${rawCode} 拟真行情 (共 ${mockBars.length} 根K线)`);
-            this.refreshCacheListUI();
-            return;
-          }
-          this.showToast(`代码无法解析：${parsed.reason || parsed.error || rawCode}`);
+          // hint:false —— 代码没解析出来不是"取数失败"，图上留着上一个品种的真实K线是对的，
+          // 不该配一句"宁可留白"，那会让人以为当前画面上的东西不可信。
+          this.showDataError(`代码无法解析：${rawCode}`, [],
+            parsed.reason || '不认识的代码格式。期货写 rb2610 / RB0 / 螺纹钢主连，A股写 6 位码如 600519。',
+            { hint: false });
           return;
         }
 
         const isFutures = parsed.market === MARKETS.FUTURES;
         this.currentMarket = parsed.market;
-        const adjust = isFutures ? 'none' : (adjustSel ? adjustSel.value : 'qfq');
+        const adjust = isFutures ? 'none' : (adjustSel ? adjustSel.value : 'hfq');
         const symbol = isFutures ? parsed.contractCode : parsed.code;
         // 换品种必须清掉上一轮的回测标记，否则旧成交点会叠在新K线上
         this.chartModule.backtestMarkers = null;
         this.chartModule.backtestCode = symbol;
-        this.chartModule.periodsPerYear = period === 'daily' ? 252 : (period === 'weekly' ? 52 : (period === 'monthly' ? 12 : 1000));
+        this.chartModule.periodsPerYear = periodsPerYear(period);
+        // 寻优/组合报表读这个字段标头，以前全仓库没人赋值，于是无论选哪个周期都印 "周期 daily"
+        this.chartModule.periodLabel = periodLabel(period);
         const cacheKey = barKey(parsed.market, symbol, period, adjust);
         const label = isFutures
           ? `${parsed.name}${parsed.isDominant ? ' 主连' : ''} (${symbol})`
           : `${parsed.code} (${parsed.board || parsed.kind})`;
+        this.clearDataError();
 
         // 规格表自动带入账户参数（期货才有；用户仍可手改，改完不回写规格表）
         if (isFutures && parsed.spec) this.applyContractSpec(parsed.spec);
@@ -3019,58 +3136,155 @@
           try {
             const cached = await MarketDataCache.getCache(cacheKey);
             if (cached && cached.data && cached.data.length > 5) {
-              this.applyDataToChart(cached.data, label, `已从本地缓存秒开 ${label} (${cached.data.length} 根K线, 缓存时间: ${cached.updateTime})`);
-              this.refreshCacheListUI();
-              return;
+              // 缓存里可能躺着被上游静默降级过的序列（历史上新浪把"取周线"当日线返回并按
+              // weekly 键存了进来）。间隔对不上就当没有，重新向上游要，别把坏数据"秒开"出去。
+              if (!periodSpacingOk(cached.data, period)) {
+                this.showToast(`${label} ${period} 的本地缓存间隔对不上，已丢弃重取…`);
+                await MarketDataCache.deleteCache(cacheKey);
+              } else {
+                // 缓存记录里带着当初的来源，报出来：4小时/周线是本地合成的，
+                // 不说清楚的话，用户会以为这 77 根是上游直接给的 4 小时行情。
+                const csrc = { 'eastmoney': '东财', 'eastmoney-direct': '东财直连', 'sina': '新浪',
+                               'local-aggregate': '本地日线聚合', 'local-aggregate-60m': '本地60分钟合成' }[cached.meta && cached.meta.source] || '';
+                this.applyDataToChart(cached.data, label,
+                  `已从本地缓存秒开 ${label} (${cached.data.length} 根K线${csrc ? `, 源:${csrc}` : ''}, 缓存时间: ${cached.updateTime})`);
+                this.refreshCacheListUI();
+                return;
+              }
             }
           } catch (e) {}
         }
 
         this.showToast(`正在拉取 ${label} ${period} 真实行情…`);
+        let out;
         try {
-          let out = await fetchBars({ market: parsed.market, symbol, secid: parsed.secid, period, adjust });
-
-          // 周/月线兜底：上游 klt 不可用时，用本地日线自己聚合（CSV 导入的数据也只能这样）
-          if ((!out.ok || !out.bars || out.bars.length === 0) && (period === 'weekly' || period === 'monthly')) {
-            const dailyKey = barKey(parsed.market, symbol, 'daily', adjust);
-            let daily = (await MarketDataCache.getCache(dailyKey))?.data;
-            if (!daily) {
-              const d = await fetchBars({ market: parsed.market, symbol, secid: parsed.secid, period: 'daily', adjust });
-              if (d.ok && d.bars?.length) { daily = d.bars; await cacheBars(dailyKey, daily, { market: parsed.market, symbol, period: 'daily', adjust }); }
-            }
-            if (daily && daily.length) {
-              out = { ok: true, source: 'local-aggregate', bars: attachDefaultMAs(aggregate(daily, period)) };
-            }
-          }
-
-          if (out.ok && out.bars && out.bars.length > 0) {
-            await cacheBars(cacheKey, out.bars, { market: parsed.market, symbol, period, adjust, count: out.bars.length, name: out.name || parsed.name });
-            if (parsed.ok) BarStore.putSymbol({ market: parsed.market, symbol, name: out.name || parsed.name, kind: isFutures ? 'futures' : parsed.kind, secid: parsed.secid });
-            const src = { 'eastmoney': '东财', 'eastmoney-direct': '东财直连', 'sina': '新浪', 'local-aggregate': '本地日线聚合' }[out.source] || out.source;
-            // 前复权会把早期价格推到负数（累计扣减分红），不是脏数据而是口径后果，必须说清楚
-            const negCount = out.bars.filter(b => b.close <= 0).length;
-            const negNote = negCount > 0
-              ? `｜⚠ 前复权把最早 ${negCount} 根推到 ≤0（分红累计扣除所致），看长期趋势请切「后复权」，看真实盘面请切「不复权」`
-              : '';
-            this.applyDataToChart(out.bars, label,
-              `🎉 ${label} 同步成功：${out.bars.length} 根K线（源:${src}，末根 ${out.bars[out.bars.length - 1].date}）${negNote}`);
-            this.refreshCacheListUI();
-            return;
-          }
-          throw new Error(out.error || (out.attempted || []).map(a => `${a.channel}:${a.error}`).join('; ') || '无数据');
+          out = await this.acquireBars(parsed, symbol, period, adjust, forceOnline);
         } catch (err) {
-          console.warn('在线同步失败:', err);
-          const cached = await MarketDataCache.getCache(cacheKey);
-          if (cached && cached.data) {
-            this.applyDataToChart(cached.data, label, `已离线加载本地缓存 ${label} (${cached.data.length} 根K线)`);
-            return;
-          }
-          this.showToast(`拉取失败：${err.message} —— 已降级为仿真行情`);
+          out = { ok: false, error: String(err && err.message || err), attempted: err && err.attempted };
         }
 
-        const mockBars = attachDefaultMAs(MockDataGenerator.generate(rawCode, 260));
-        this.applyDataToChart(mockBars, label, `已载入 ${label} 拟真行情 (共 ${mockBars.length} 根K线)`);
-        this.refreshCacheListUI();
+        if (out.ok && out.bars && out.bars.length > 0) {
+          await cacheBars(cacheKey, out.bars, { market: parsed.market, symbol, period, adjust, count: out.bars.length, name: out.name || parsed.name });
+          BarStore.putSymbol({ market: parsed.market, symbol, name: out.name || parsed.name, kind: isFutures ? 'futures' : parsed.kind, secid: parsed.secid });
+          const src = { 'eastmoney': '东财', 'eastmoney-direct': '东财直连', 'sina': '新浪',
+                        'local-aggregate': '本地日线聚合', 'local-aggregate-60m': '本地60分钟合成' }[out.source] || out.source;
+          // 前复权会把早期价格推到负数（累计扣减分红），不是脏数据而是口径后果，必须说清楚。
+          // 含 ≤0 时对数轴不成立，render 会退回线性并在轴上标「线性」—— 这里要说的是实际发生的事。
+          const negCount = out.bars.filter(b => !(b.close > 0)).length;
+          const negNote = negCount > 0
+            ? `｜⚠ 有 ${negCount} 根价格 ≤0，对数轴不成立、本次已退回线性（轴上标了「线性」）；要回对数口径请切「后复权」或「不复权」`
+            : '';
+          this.applyDataToChart(out.bars, label,
+            `🎉 ${label} 同步成功：${out.bars.length} 根K线（源:${src}，末根 ${out.bars[out.bars.length - 1].date}）${negNote}${out.caveat ? `｜⚠ ${out.caveat}` : ''}`);
+          this.warnIfThinHistory(parsed, out.bars, period);
+          this.refreshCacheListUI();
+          return;
+        }
+
+        // 缓存里还有一版真实数据就先顶着，但必须说清楚这不是最新行情
+        const stale = await MarketDataCache.getCache(cacheKey);
+        if (stale && stale.data && stale.data.length) {
+          this.applyDataToChart(stale.data, label, `在线拉取失败，已离线加载本地缓存 ${label} (${stale.data.length} 根K线, 缓存于 ${stale.updateTime})`);
+          this.refreshCacheListUI();
+        } else {
+          // 拉不到真数据就留白 —— 本项目不允许用合成K线填空，画一根假线比画不出来更糟
+          this.chartModule.setData([]);
+          this._loadedBars = [];
+          this.syncUI();
+        }
+        this.showDataError(`${label} · ${period} 真实行情拉取失败`, out.attempted || [], out.error || '');
+      }
+
+      /**
+       * 周期口径的判断全在 src/data/periods.js 的 resolveBars 里 —— 不在这里复制一份，
+       * 因为自选池批量拉取也要走同一条判断，两处规则漂移过一次就已经出过"4h 拿到日线"的事故。
+       */
+      async acquireBars(parsed, symbol, period, adjust, forceOnline) {
+        return resolveBars({ market: parsed.market, symbol, secid: parsed.secid,
+                             sinaSymbol: parsed.sinaCode, period, adjust, forceOnline });
+      }
+
+      /**
+       * 具体月份合约只有上市以来那几根，不是 bug 是市场事实 —— 但拿它跑回测的人
+       * 多半以为自己用的是连续行情。所以数一下根数，短到不够用就明说并给出主连。
+       */
+      warnIfThinHistory(parsed, bars, period) {
+        if (parsed.market !== MARKETS.FUTURES || parsed.isDominant) return;
+        const need = period === 'daily' ? 120 : 400;
+        if (bars.length >= need) return;
+        const dom = `${parsed.variety}0`;
+        this.showDataError(
+          `${parsed.name} ${parsed.contractCode} 是具体月份合约，只有 ${bars.length} 根`,
+          [],
+          `这是该合约上市以来的全部真实行情，不是数据缺失。要跑趋势回测请用主力连续：` +
+          `「${dom} ${parsed.name}主连」（东财已拼好，日线可回溯到 2015 年）。` +
+          `注意主连的换月拼接方式上游不透明，跨换月日的价格水平不是任何人真实成交过的价。`,
+          { swapTo: dom, hint: false });
+      }
+
+      /**
+       * 取数失败横幅。逐条列出哪条通道、报什么错，再给一条能照着做的下一步 ——
+       * 只说"拉取失败"等于没说，用户无法区分"代理没起"和"东财挂了"。
+       */
+      showDataError(title, attempted, extra, actions = {}) {
+        const box = document.getElementById('dataError');
+        if (!box) return;
+        const lines = (attempted || []).filter(a => a && !/已跳过，非故障/.test(a.error || ''));
+        const body = document.getElementById('dataErrorBody');
+        const parts = lines.map(a => `· ${a.channel}：${a.error}`);
+        if (extra && !parts.some(p => p.includes(extra))) parts.push(`· ${extra}`);
+        body.textContent = parts.join('\n');
+
+        // actions.hint：false 表示"这不是取数失败，别补一句取数建议"。
+        // 短历史提示走的就是这条 —— 图上有真实K线，说"宁可留白"是自相矛盾。
+        if (actions.hint !== false) {
+          const hint = document.createElement('span');
+          hint.className = 'de-hint';
+          hint.textContent = typeof actions.hint === 'string' ? actions.hint : this.dataErrorHint(lines);
+          body.appendChild(hint);
+        }
+
+        let swap = document.getElementById('btnSwapToDominant');
+        if (actions.swapTo) {
+          if (!swap) {
+            swap = document.createElement('button');
+            swap.id = 'btnSwapToDominant';
+            swap.className = 'btn btn-sm btn-primary';
+            swap.addEventListener('click', () => {
+              const code = swap.dataset.code;
+              const input = document.getElementById('symbolInput');
+              if (input) input.value = code;
+              this.loadSymbolData(code, true);
+            });
+            document.querySelector('.data-error-head').insertBefore(swap, document.getElementById('btnRetryData'));
+          }
+          swap.dataset.code = actions.swapTo;
+          swap.textContent = `改用主连 ${actions.swapTo}`;
+          swap.hidden = false;
+        } else if (swap) {
+          swap.hidden = true;
+        }
+
+        document.getElementById('dataErrorTitle').textContent = title;
+        box.hidden = false;
+      }
+
+      clearDataError() {
+        const box = document.getElementById('dataError');
+        if (box) box.hidden = true;
+      }
+
+      /** 从失败通道里推断最可能的原因，给一条具体可执行的下一步。 */
+      dataErrorHint(lines) {
+        const all = lines.map(a => `${a.channel} ${a.error}`).join(' | ');
+        if (/本地服务器返回 404/.test(all)) {
+          return '下一步：当前这个端口只是纯静态服务器，没有 /api/kline 代理。停掉它，改用 python start.py（或 python run_local_server.py）重新打开页面。';
+        }
+        if (/eastmoney/.test(all) && /超时|timeout|Failed to fetch|reset|network|连接/i.test(all)) {
+          return '下一步：东财 push2his 此刻整段不可达（已知会 connection reset，A股和期货一起挂）。这不是本项目的 bug，稍后再试或换网络；重试按钮会强制走在线通道。';
+        }
+        if (!lines.length) return '没有真实行情可画。本项目不生成合成K线，所以图上宁可留白。';
+        return '三条通道都没取到真实行情。图上不会画合成K线，可先用「行情与缓存中心」导入 CSV，或换个品种试。';
       }
 
       /** 合约规格 → 账户参数输入框（乘数/保证金率）。用户仍可手改；手续费按品种费率暂不覆盖手填值。 */
@@ -3273,6 +3487,16 @@
           });
         }
 
+        // 失败横幅上的重试走 forceOnline，绕开那份把用户锁在旧数据里的无期限缓存
+        if (document.getElementById('btnRetryData')) {
+          document.getElementById('btnRetryData').addEventListener('click', () => {
+            this.loadSymbolData(this.currentSymbol, true);
+          });
+        }
+        if (document.getElementById('btnDismissDataError')) {
+          document.getElementById('btnDismissDataError').addEventListener('click', () => this.clearDataError());
+        }
+
         if (document.getElementById('btnTriggerFetchOnline')) {
           document.getElementById('btnTriggerFetchOnline').addEventListener('click', () => {
             const sym = document.getElementById('inputCustomSymbol').value.trim() || 'EG0';
@@ -3393,6 +3617,18 @@
           this.chartModule.scrollOffset = 0;
           this.chartModule.requestRender();
         });
+        // Y 轴对数/线性切换。默认对数，留一个开关只为对照，不作为常规口径。
+        const logBtn = document.getElementById('btnToggleLogScale');
+        if (logBtn) {
+          logBtn.addEventListener('click', () => {
+            const on = !this.chartModule.logScale;
+            this.chartModule.logScale = on;
+            logBtn.textContent = on ? '📏 对数轴: 开' : '📏 对数轴: 线性';
+            logBtn.classList.toggle('active', on);
+            logBtn.setAttribute('aria-pressed', String(on));
+            this.chartModule.requestRender();
+          });
+        }
         document.getElementById('btnReplayAutoPlay').addEventListener('click', () => this.toggleAutoPlay());
         document.getElementById('btnShowAllBars').addEventListener('click', () => {
           this.stopAutoPlay();
@@ -3705,6 +3941,13 @@
         const sig = pos ? [pos.direction, pos.entryPrice, pos.entryIndex, slPct, tpPct].join('|') : 'flat';
         if (sig === this._posLevelSig) return;
         this._posLevelSig = sig;
+        // 重建会把手工拖出来的价位换成输入框算出来的价位。这个替换本身是对的
+        // （改 止损% 就是想让新百分比生效），错的是过去它一声不吭。
+        const dragged = dm.lines.filter(l => l.role && l.userDragged);
+        if (dragged.length) {
+          const name = { sl: '止损', tp: '止盈', entry: '开仓' };
+          this.showToast(`⚠ 止损/止盈参数已改，手工拖过的 ${dragged.map(l => `${name[l.role]}线 ${l.p1.price.toFixed(2)}`).join('、')} 被按输入框重算覆盖`);
+        }
         dm.lines = dm.lines.filter(l => !l.role);
         if (pos && pos.entryPrice) {
           const entry = pos.entryPrice;
@@ -3712,15 +3955,15 @@
           const lv = this.levelColors();
           // 从开仓那一根起画，不横贯全屏：它是"这笔交易"的价位，不是全局支撑压力。
           // 叠加层那边已经吃过这个教训 —— 拖到最右边会让早就无效的线看着像当前有效。
-          const mk = (role, price, color, tagPct) => ({
-            id: 'pos_' + role, type: 'hline', role, tagPct,
+          const mk = (role, price, color) => ({
+            id: 'pos_' + role, type: 'hline', role, basePrice: entry, short: !long,
             fromBarIndex: Number.isFinite(pos.entryIndex) ? pos.entryIndex : 0,
             p1: { barIndex: 0, price }, color, width: 1.5, dash: [7, 4]
           });
-          dm.lines.push(mk('entry', entry, lv.entry, null));
+          dm.lines.push(mk('entry', entry, lv.entry));
           // 默认不止盈（0）就不画止盈线：挂一条不生效的线，只会让人以为它在起作用。
-          if (slPct > 0) dm.lines.push(mk('sl', long ? entry * (1 - slPct / 100) : entry * (1 + slPct / 100), lv.sl, -slPct));
-          if (tpPct > 0) dm.lines.push(mk('tp', long ? entry * (1 + tpPct / 100) : entry * (1 - tpPct / 100), lv.tp, tpPct));
+          if (slPct > 0) dm.lines.push(mk('sl', long ? entry * (1 - slPct / 100) : entry * (1 + slPct / 100), lv.sl));
+          if (tpPct > 0) dm.lines.push(mk('tp', long ? entry * (1 + tpPct / 100) : entry * (1 - tpPct / 100), lv.tp));
         }
         this.chartModule.requestRender();
       }
@@ -3916,7 +4159,10 @@
       syncUI() {
         this.syncPositionLevels();
         const bar = this.chartModule.getCurrentBar();
-        const currentPrice = bar ? bar.close : 4200;
+        // 以前没有 bar 时兜底成 4200 —— 那是个凭空的价格，会算出一个假的动态权益显示在
+        // "账户资金概况"里。没行情就按成本价挂（浮动为 0），并在读数上说明是成本价。
+        const pos0 = this.tradingEngine.position;
+        const currentPrice = bar ? bar.close : (pos0 ? pos0.entryPrice : this.tradingEngine.cash);
         this.renderConditionalStatus();
         this.syncOrderCost();
         this.syncBlindUI();
@@ -3924,13 +4170,23 @@
         if (bar) {
           document.getElementById('quotePrice').textContent = bar.close;
           const chg = bar.close - bar.open;
-          const chgPct = ((chg / bar.open) * 100).toFixed(2);
+          // 前复权会把早年价格扣到 ≤0，开盘价为 0 时百分比是 Infinity
+          const chgPct = bar.open > 0 ? ` (${chg >= 0 ? '+' : ''}${((chg / bar.open) * 100).toFixed(2)}%)` : '';
           const qEl = document.getElementById('quoteChange');
-          qEl.textContent = `${chg >= 0 ? '+' : ''}${chg} (${chg >= 0 ? '+' : ''}${chgPct}%)`;
+          qEl.textContent = `${chg >= 0 ? '+' : ''}${chg}${chgPct}`;
           qEl.className = `quote-change ${chg >= 0 ? 'val-up' : 'val-down'}`;
 
           document.getElementById('btnLongPriceLabel').textContent = `@ ${bar.close}`;
           document.getElementById('btnShortPriceLabel').textContent = `@ ${bar.close}`;
+        } else {
+          // 图上没有K线时，顶栏报价必须一起清空。留着上一个品种的 3076，
+          // 会让人以为"拉取失败但行情还在"，而下单按钮上的 @3076 还会被当成可成交价。
+          document.getElementById('quotePrice').textContent = '--';
+          const qEl = document.getElementById('quoteChange');
+          qEl.textContent = '无行情';
+          qEl.className = 'quote-change';
+          document.getElementById('btnLongPriceLabel').textContent = '@ --';
+          document.getElementById('btnShortPriceLabel').textContent = '@ --';
         }
 
         document.getElementById('replayBarIndexBadge').textContent = 
@@ -4156,7 +4412,9 @@
         modal.focus();
 
         const bar = this.chartModule.getCurrentBar();
-        const curPrice = bar ? bar.close : 4200;
+        const pos = this.tradingEngine.position;
+        // 同上：没有最后一根 bar 时不许凭空拿 4200 去算账户统计，按成本价挂（浮动 0）
+        const curPrice = bar ? bar.close : (pos ? pos.entryPrice : this.tradingEngine.cash);
         const stats = this.tradingEngine.getComprehensiveStatistics(curPrice, this.chartModule.data.length);
 
         // 填充头部

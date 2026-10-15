@@ -104,11 +104,23 @@ def fetch_em_kline(secid, period, adjust, beg, end, count):
     }
 
 
+def normalize_sina_date(date):
+    """保留钟点只去掉秒；纯日期（日线）原样返回。与前端 indicators.normalizeSinaDate 同口径。"""
+    s = str(date or "").strip()
+    m = re.match(r"^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2})(?::\d{2})?)?", s)
+    if not m:
+        return s
+    return f"{m.group(1)} {m.group(2)}" if m.group(2) else m.group(1)
+
+
 def fetch_sina_futures(symbol, period):
     """新浪期货（遗留通道）。已知问题：日线数据冻结在 2024-07-17，仅作备用对照。
-    响应是 JSONP 包裹的位置数组 [[date,open,high,low,close,volume], ...]，且 60m 是倒序。"""
-    svc = ("IndexService.getInnerFuturesMiniKLine60m" if period == "60m"
-           else "IndexService.getInnerFuturesDailyKLine")
+    响应是 JSONP 包裹的位置数组 [[date,open,high,low,close,volume], ...]，且 60m 是倒序。
+    只有 daily / 60m 两个服务；别的周期明确拒绝，绝不拿日线顶替成"周线"。"""
+    svc = {"daily": "IndexService.getInnerFuturesDailyKLine",
+           "60m": "IndexService.getInnerFuturesMiniKLine60m"}.get(period)
+    if svc is None:
+        raise ValueError(f"新浪通道没有 {period} 这个周期（只有 daily / 60m），拒绝用日线顶替")
     url = f"{SINA_JSONP}/var%20t=/{svc}?symbol={urllib.parse.quote(symbol.upper())}"
     text = http_get(url, referer="https://finance.sina.com.cn/")
     m = re.search(r"=\s*\((.*)\)\s*\)?;?\s*$", text, re.S)
@@ -122,7 +134,10 @@ def fetch_sina_futures(symbol, period):
         else:
             date, o, h, l, c, v = row[0], row[1], row[2], row[3], row[4], row[5]
         try:
-            bars.append({"date": str(date)[:10], "open": float(o), "high": float(h),
+            # 钟点必须留住：新浪 60m 发的是 "2023-11-07 15:00:00" 且整段倒序，
+            # 截成纯日期会让同一天的 bar 全部同键、排序退化成"保持倒序"，
+            # 前端再拿去做 4 小时合成就是 open/close 整根反掉。
+            bars.append({"date": normalize_sina_date(date), "open": float(o), "high": float(h),
                          "low": float(l), "close": float(c), "volume": float(v or 0)})
         except (TypeError, ValueError):
             continue

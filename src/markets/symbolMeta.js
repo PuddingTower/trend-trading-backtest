@@ -128,6 +128,9 @@ function buildFutures(variety, monthDigits) {
     contractCode: code,
     isDominant: !monthDigits,
     secid: `${marketId}.${code}`,
+    // 新浪只认 <品种>0 这一种主力写法：实测 EG0 给 1361 根、RB0 给 3723 根（回到 2009-03-27），
+    // 而把东财的 egm / rbm 直接丢给它会返回空。具体月份合约新浪一律查无，所以不给这个字段。
+    sinaCode: month ? null : `${spec.emCode.toUpperCase()}0`,
     spec
   };
 }

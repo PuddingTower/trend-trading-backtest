@@ -85,22 +85,32 @@ export function fetchSinaJSONP(symbol, period = 'daily', timeoutMs = 8000) {
   return new Promise((resolve, reject) => {
     const cbName = 'sina_cb_' + Math.random().toString(36).slice(2, 8);
     const cleanSymbol = String(symbol).toUpperCase().trim();
-    const svc = period === '60m'
-      ? 'IndexService.getInnerFuturesMiniKLine60m'
-      : 'IndexService.getInnerFuturesDailyKLine';
+    // 新浪只有这两个服务。以前非 60m 一律落到日线服务，于是"取周线"会拿到**日线**
+    // 还带 ok:true —— 上层据此跳过本地聚合，再把日线按 weekly 键写进 IndexedDB，
+    // 之后每次开周线都"秒开"那份被污染的数据。没有的服务必须明确拒绝，不能拿别的周期顶替。
+    const SINA_SERVICES = { daily: 'IndexService.getInnerFuturesDailyKLine',
+                            '60m': 'IndexService.getInnerFuturesMiniKLine60m' };
+    const svc = SINA_SERVICES[period];
+    if (!svc) {
+      reject(new Error(`新浪通道没有 ${period} 这个周期（只有 daily / 60m），拒绝用日线顶替`));
+      return;
+    }
     const url = `https://stock2.finance.sina.com.cn/futures/api/jsonp.php/var%20${cbName}=/${svc}?symbol=${cleanSymbol}`;
     const script = document.createElement('script');
 
-    function cleanup() {
-      clearTimeout(timer);
+    // 新浪这个接口发的是 `var cb=(数据)` —— 赋值，不是 `cb(数据)` 那种调用。
+    // 原来只把 window[cbName] 挂成函数等它被回调，于是脚本 200 加载完、赋值把函数覆盖掉、
+    // 一次都不会触发，整条通道固定 8 秒超时。实测 RB0 的返回首尾：
+    //   /*<script>location.href='//sina.com';</script>*/\nvar t=([["2009-03-27",...]]);
+    // 两种形态都吃：onload 后先看有没有被当函数调用过，没有就读回那个全局变量。
+    let calledWith = null;
+    window[cbName] = (raw) => { calledWith = raw; };
+
+    function settle() {
+      const rawData = calledWith !== null ? calledWith : window[cbName];
       delete window[cbName];
       if (script.parentNode) script.parentNode.removeChild(script);
-    }
-    const timer = setTimeout(() => { cleanup(); reject(new Error('新浪在线同步超时')); }, timeoutMs);
-
-    // 注意：cleanup 必须在赋值前声明可用（函数声明提升，改成 const arrow 会坏）
-    window[cbName] = function (rawData) {
-      cleanup();
+      clearTimeout(timer);
       if (!Array.isArray(rawData) || rawData.length === 0) {
         reject(new Error(`未获取到 ${cleanSymbol} 行情`));
         return;
@@ -110,8 +120,21 @@ export function fetchSinaJSONP(symbol, period = 'daily', timeoutMs = 8000) {
       resolve({ ok: true, source: 'sina', name: null, secid: `sina.${cleanSymbol}`,
                 period, adjust: 'none', count: bars.length, bars,
                 warning: '新浪期货日线实测已冻结在 2024-07-17，仅作兜底对照' });
+    }
+
+    const timer = setTimeout(() => {
+      if (script.parentNode) script.parentNode.removeChild(script);
+      delete window[cbName];
+      reject(new Error('新浪在线同步超时'));
+    }, timeoutMs);
+
+    script.onload = settle;
+    script.onerror = () => {
+      clearTimeout(timer);
+      delete window[cbName];
+      if (script.parentNode) script.parentNode.removeChild(script);
+      reject(new Error('新浪请求受阻'));
     };
-    script.onerror = () => { cleanup(); reject(new Error('新浪请求受阻')); };
     script.src = url;
     document.body.appendChild(script);
   });
@@ -122,13 +145,17 @@ export function fetchSinaJSONP(symbol, period = 'daily', timeoutMs = 8000) {
  * @returns {ok, source, bars, name, count, attempted:[{channel,error}]}
  */
 export async function fetchBars({ market = 'futures', symbol, secid, period = 'daily',
-                                  adjust = 'none', count = null, provider = 'eastmoney' } = {}) {
+                                  adjust = 'none', count = null, provider = 'eastmoney',
+                                  sinaSymbol = null } = {}) {
   const attempted = [];
   const targetSecid = secid || (market === 'ashare' ? symbol : symbol);
+  // 新浪用的是 <品种>0 那套代码，跟东财的 <品种>m 不是一回事；不给 sinaSymbol 就退回原值，
+  // 让 A股/具体合约的调用点行为不变。
+  const sinaTarget = sinaSymbol || symbol;
 
   if (provider === 'sina') {
     try {
-      const out = await fetchSinaJSONP(symbol, period);
+      const out = await fetchSinaJSONP(sinaTarget, period);
       return { ...out, bars: attachDefaultMAs(out.bars), attempted };
     } catch (e) {
       attempted.push({ channel: 'sina-jsonp', error: String(e.message || e) });
@@ -158,10 +185,11 @@ export async function fetchBars({ market = 'futures', symbol, secid, period = 'd
     attempted.push({ channel: 'eastmoney-direct', error: String(e.message || e) });
   }
 
-  // 3. 期货再兜一层新浪
+  // 3. 期货再兜一层新浪。实测新浪这条对主连的历史比东财还长（RB0 回到 2009，东财 rbm 只到 2015），
+  //    但数据冻结在 2024-07-17 —— 当"更长的过去"用可以，别当最新行情用。
   if (market === 'futures') {
     try {
-      const out = await fetchSinaJSONP(symbol, period);
+      const out = await fetchSinaJSONP(sinaTarget, period);
       return { ...out, bars: attachDefaultMAs(out.bars), attempted,
                note: '已降级到新浪通道（数据可能滞后）' };
     } catch (e) {

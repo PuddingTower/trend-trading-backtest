@@ -13,7 +13,8 @@
 
 import { listGroups, getGroup, makeGroup, saveGroup, deleteGroup, addItem, removeItem, toItem, storageStatus } from '../watchlist/store.js';
 import { runOcr, analyzeLine, analyzeLines, parseTsv, crossCheck, OCR_LANGS } from '../watchlist/imageImport.js';
-import { resolveSymbol, fetchBars } from '../data/sources.js';
+import { resolveSymbol } from '../data/sources.js';
+import { resolveBars } from '../data/periods.js';
 import { cacheBars, barKey } from '../data/barStore.js';
 
 const esc = (s) => String(s === null || s === undefined ? '' : s)
@@ -263,13 +264,17 @@ export class WatchlistPanel {
       const it = items[i];
       this.busy = `拉取中 ${i + 1}/${items.length} · ${it.openCode || it.symbol}`;
       this.updateBusy();
+      const adjust = it.market === 'futures' ? 'none' : (adjustEl ? adjustEl.value : 'hfq');
       try {
-        const out = await fetchBars({
-          market: it.market, symbol: it.symbol, secid: it.secid, period,
-          adjust: it.market === 'futures' ? 'none' : (adjustEl ? adjustEl.value : 'qfq')
+        // 走 resolveBars 而不是 fetchBars：批量拉取以前把 periodSelect 的值原样发给上游，
+        // 选 4小时 时会被 KLTL 的 `|| '101'` 兜成日线，再按 4h 的键写进缓存 ——
+        // 主图和组合回测之后都从那个键取数，于是拿着日线当 4 小时线跑，界面上还写着 4小时。
+        const out = await resolveBars({
+          market: it.market, symbol: it.symbol, secid: it.secid,
+          sinaSymbol: it.sinaCode, period, adjust
         });
         if (out.ok && out.bars && out.bars.length) {
-          await cacheBars(barKey(it.market, it.symbol, period, it.market === 'futures' ? 'none' : (adjustEl ? adjustEl.value : 'qfq')), out.bars, { name: out.name, source: out.source });
+          await cacheBars(barKey(it.market, it.symbol, period, adjust), out.bars, { name: out.name, source: out.source });
           ok++;
         } else fail.push(`${it.openCode || it.symbol}`);
       } catch (e) { fail.push(`${it.openCode || it.symbol}`); }

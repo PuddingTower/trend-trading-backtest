@@ -1634,3 +1634,60 @@ kbd {
     height: 210px;
   }
 }
+
+/* ==========================================================================
+   取数失败横幅
+   本项目不接受虚拟K线：拉不到真实行情时图上必须留白，责任改由这块横幅承担。
+   它挂在 .chart-panel 的 flex 列里，会把画布往下挤 —— 这是有意的，
+   错误提示不该浮在K线上遮住数据。
+   ========================================================================== */
+.data-error {
+  flex: 0 0 auto;
+  margin: var(--md-space-2) var(--md-space-2) 0;
+  padding: var(--md-space-2) var(--md-space-3);
+  border: 1px solid var(--md-sys-color-error);
+  border-left-width: 4px;
+  border-radius: var(--md-shape-sm);
+  background: color-mix(in srgb, var(--md-sys-color-error-container) 45%, var(--md-sys-color-surface-container));
+  box-shadow: var(--md-elev-1);
+}
+.data-error[hidden] { display: none; }
+.data-error-head {
+  display: flex;
+  align-items: center;
+  gap: var(--md-space-2);
+}
+.data-error-title {
+  flex: 1;
+  font-weight: 600;
+  color: var(--md-sys-color-error);
+  font-size: var(--md-type-body-md);
+}
+.data-error-body {
+  margin-top: var(--md-space-1);
+  font-size: var(--md-type-body-sm);
+  line-height: 1.6;
+  color: var(--md-sys-color-on-surface-variant);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 30vh;
+  overflow-y: auto;
+}
+.data-error-body .de-chan {
+  color: var(--md-sys-color-error);
+  font-variant-numeric: tabular-nums;
+}
+.data-error-body .de-hint {
+  display: block;
+  margin-top: var(--md-space-1);
+  color: var(--md-sys-color-on-surface);
+}
+.data-error-close {
+  background: none;
+  border: none;
+  color: var(--md-sys-color-on-surface-variant);
+  cursor: pointer;
+  font-size: var(--md-type-body-sm);
+  padding: 0 var(--md-space-1);
+}
+.data-error-close:hover { color: var(--md-sys-color-on-surface); }

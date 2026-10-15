@@ -127,6 +127,19 @@ export class PortfolioEngine {
         symbols: [], note: ''
       };
     }
+    // 分钟级序列在这里会被静默压成日线：日历按 date 前 10 位去重、日期→下标也是同一个键，
+    // 于是一天里 4~8 根 bar 只剩最后一根参与撮合，跑出来的权益曲线看着像 4 小时、其实是日线。
+    // 这种"数字很安静地错"比报错坏得多，所以直接拒跑，让调用方去改周期而不是替用户猜。
+    const intraday = this.entries.find(e => (e.bars || []).some(b => /\d{2}:\d{2}/.test(String(b.date))));
+    if (intraday) {
+      return {
+        error: `组合回测目前只支持日线及以上周期：${intraday.symbol} 的 bar 带钟点，` +
+               `引擎会把同一天的多根压成一根，等于拿日线结果冒充分钟级结果。请切到日线再跑组合。`,
+        trades: [], equityCurve: [], rejects: [], notices: [],
+        rejected: { ...this.rejected }, finalEquity: this.o.capital, capital: this.o.capital,
+        symbols: this.entries.map(e => e.symbol), note: ''
+      };
+    }
     const o = this.o;
 
     // 每个品种：因果信号序列、ATR 序列、逐根回看的年化波动率、日期→下标

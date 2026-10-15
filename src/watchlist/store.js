@@ -50,6 +50,8 @@ export function toItem(rawCode, nameHint = '') {
       board: parsed.board,
       exchange: parsed.exchange,
       isDominant: parsed.isDominant,
+      // 新浪那条兜底通道只认 <品种>0，跟东财的 <品种>m 不通用，所以入池时就存下来
+      sinaCode: parsed.sinaCode,
       ambiguous: parsed.ambiguous || undefined
     }
   };

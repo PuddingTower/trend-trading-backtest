@@ -156,3 +156,82 @@ export function findRolloverGaps(bars) {
     gapPct: b.rawClose ? ((b.open - b.rawClose) / b.rawClose) * 100 : 0
   }));
 }
+
+/**
+ * 一根日内 bar 属于哪个交易日。
+ *
+ * 中国期货的夜盘是次日日盘的开场：周四夜里 21:00 那根算周五的行情，周五夜里那根算下周一。
+ * 早间 00:00–02:30 是前一日夜盘的续，算当天。日盘各根就算自己那天。
+ *
+ * 刻意不 new Date(ts)：那是按浏览器时区解析的，机器不在东八区就会整体平移小时数，
+ * 于是同一个合约在两台机器上合成出不同的 4 小时线。这里只用字符串切片，跟本机时区无关。
+ */
+export function tradingDayOf(dateStr) {
+  const s = String(dateStr || '');
+  const day = s.slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return s;
+  const hour = Number(s.slice(11, 13));
+  if (!Number.isFinite(hour) || hour < 18) return day;
+  const [y, m, d] = day.split('-').map(Number);
+  const t = new Date(Date.UTC(y, m - 1, d));
+  do { t.setUTCDate(t.getUTCDate() + 1); } while (t.getUTCDay() === 0 || t.getUTCDay() === 6);
+  return t.toISOString().slice(0, 10);
+}
+
+/**
+ * 日内周期合成：每 N 根低周期 bar 并成 1 根，按交易日重置计数。
+ *
+ * 东财没有 klt=240 这个口径，4 小时线只能自己从 60 分钟合。文华/博易的「240分钟」
+ * 也是这个算法：从当日第一根起顺序 4 根一组，凑不满 4 根的尾巴照样出一根（那半截
+ * 是真实成交，只是时长不足），绝不补造 bar —— 组内每一根都必须来自输入序列。
+ *
+ * @param {Array} baseBars 升序的日内 bar，date 形如 '2026-09-09 10:00'
+ * @param {number} n 每组根数，4 小时 = 4（基于 60 分钟）
+ */
+export function aggregateIntraday(baseBars, n = 4) {
+  const size = Math.max(1, Math.round(n));
+  // 显式升序，不信任调用方排过：新浪 60m 是倒序返回的，一旦同一天所有 bar 的 date 又恰好相等
+  // （历史上就发生过，见 indicators.normalizeSinaDate），稳定排序会原样保留倒序，
+  // 于是 chunk[0] 是当天最后一根、末根是当天第一根 —— 合成出来的 K线 open/close 整根反掉。
+  // 症状是"图看着挺正常但每个实体上下颠倒"，最难靠肉眼发现，所以在这里兜住。
+  const bars = (baseBars || []).slice().sort((a, b) =>
+    String(a && a.date).localeCompare(String(b && b.date)));
+  if (!bars.length) return [];
+  if (size === 1) return bars;
+
+  // 先按交易日分桶，桶内保持原顺序 —— 夜盘那几根会被归到它真正的交易日里去。
+  const days = [];
+  const byDay = new Map();
+  for (const b of bars) {
+    const k = tradingDayOf(b.date);
+    let g = byDay.get(k);
+    if (!g) { g = { key: k, bars: [] }; byDay.set(k, g); days.push(g); }
+    g.bars.push(b);
+  }
+
+  const out = [];
+  for (const g of days) {
+    for (let i = 0; i < g.bars.length; i += size) {
+      const chunk = g.bars.slice(i, i + size);
+      const first = chunk[0], last = chunk[chunk.length - 1];
+      const agg = {
+        date: last.date,
+        open: first.open,
+        close: last.close,
+        high: Math.max(...chunk.map(x => x.high)),
+        low: Math.min(...chunk.map(x => x.low)),
+        volume: chunk.reduce((s, x) => s + (x.volume || 0), 0),
+        spanBars: chunk.length
+      };
+      if (chunk.some(x => x.amount !== undefined)) {
+        agg.amount = chunk.reduce((s, x) => s + (x.amount || 0), 0);
+      }
+      out.push(agg);
+    }
+  }
+  return out;
+}
+
+/** 周期 → 需要多少根 60 分钟 bar 合成（0/1 表示直接用上游，不合成）。 */
+export const INTRADAY_GROUP = { '4h': 4 };
+
