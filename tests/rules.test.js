@@ -25,10 +25,15 @@ test('A股：涨停封板时买不进，但平仓（卖出）可成', () => {
   assert.eq(r.canFillAt('buy', 105, prevClose, {}).ok, true, '未封板正常成交');
 });
 
-test('A股：跌停封板时卖不出（开空方向），平仓方向按口径放行', () => {
+test('A股：封死的跌停板上，平仓卖出同样成交不了（旧口径给平仓开的后门已取消）', () => {
   const r = new AShareRules(ASPEC);
-  assert.eq(r.canFillAt('sell', 90, 100, { closing: false }).ok, false);
-  assert.eq(r.canFillAt('buy', 90, 100, { closing: true }).ok, true);
+  assert.eq(r.canFillAt('sell', 90, 100, { closing: false }).ok, false, '开空方向卖不掉');
+  assert.eq(r.canFillAt('sell', 90, 100, { closing: true }).ok, false, '平多方向一样卖不掉：排在你前面的人比你还急');
+  assert.eq(r.canFillAt('buy', 90, 100, { closing: true }).ok, true, '跌停板上买单是稀缺方，空头买回立刻成交');
+  assert.eq(r.canFillAt('sell', 110, 100, { closing: true }).ok, true, '涨停板上多头卖出有人接，照常放行');
+  // 盘中破板（锚定价回到板幅之内）就不再算封死，否则任何擦到跌停的止损都会被无脑拒掉
+  assert.eq(r.canFillAt('sell', 90, 100, { closing: true, sealRef: 90 }).ok, false, '锚定价钉在跌停 = 封死');
+  assert.eq(r.canFillAt('sell', 95, 100, { closing: true, sealRef: 90 }).ok, true, '止损价 95 在跌停上方，是下行途中成交的，不该算板锁');
 });
 
 test('A股：创业板 20% 板幅比主板宽', () => {

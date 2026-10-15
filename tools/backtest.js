@@ -12,19 +12,25 @@ import { BacktestEngine } from '../src/core/backtestEngine.js';
 import { STRATEGIES, getStrategy } from '../src/strategy/library.js';
 import { computeMetrics, benchmarkCompare, maxDrawdown } from '../src/report/metrics.js';
 import { FUTURES_SPECS } from '../src/markets/contractSpecs.js';
+import { rulesFor } from '../src/markets/marketRules.js';
+import { resolveTradeSpec } from '../src/markets/instrumentSpec.js';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const FIX = path.join(DIR, '..', 'fixtures');
 const CAPITAL = 200000;
 
-/** 主连代码 → 品种规格。 */
-function specFor(symbol) {
-  const v = String(symbol).toLowerCase().replace(/m$/, '').toUpperCase();
-  const s = FUTURES_SPECS[v];
-  if (s) return { ...s, marginRate: s.marginRate ?? 0.1 };
-  // A股/ETF：1 手=100 股，无保证金，佣金万2.5 最低 5 元 + 卖出印花税
+/** 主连代码 / 证券代码 → 品种规格。
+ *
+ *  这里以前自己拼 spec：既不写 market，也不写 limitPct，于是 rulesFor() 退回通用规则，
+ *  A股的 T+1 与涨跌停板锁在跑批里整段被绕过 —— 同一个策略在界面上和跑批里给出两个答案，
+ *  README 里那批"诚实结论"也是在无规则口径上算出来的。现在与界面共用 resolveTradeSpec。
+ */
+function specFor(symbol, meta = {}) {
+  const resolved = resolveTradeSpec(String(symbol));
+  if (resolved.ok) return resolved.spec;
   return {
-    multiplier: 100, tick: 0.01, marginRate: 1.0,
+    market: meta.market || 'ashare', name: String(symbol), multiplier: 100, tick: 0.01,
+    marginRate: 1.0, limitPct: 0.10,
     fee: { mode: 'rate', value: 0.00025 }, closeTodayFee: { mode: 'rate', value: 0.00025 }
   };
 }
@@ -45,11 +51,17 @@ function runOne(bars, spec, strat, params, opts = {}) {
     capital: CAPITAL, lots: opts.lots ?? 1,
     slippageTicks: opts.slippageTicks ?? 1,
     allowShort: opts.allowShort ?? true,
+    // 与界面共用同一条规则路径。缺了它，A股 T+1 与涨跌停板锁在跑批里等于不存在。
+    rules: rulesFor(spec),
     sizing: opts.sizing ?? 'notional', notionalPct: opts.notionalPct ?? 0.25
   });
   const out = eng.run(signals);
   const m = computeMetrics({ equityCurve: out.equityCurve, trades: out.trades, capital: CAPITAL, periodsPerYear: 252, bars });
   m.rejectedMargin = out.rejected.margin;
+  // 板锁拦截必须进表：不然"改天再出"的真实成本只藏在权益曲线里，没人知道差在哪
+  m.rejectedBoardLock = out.rejected.boardLock || 0;
+  m.rejectedBoardLockClose = out.rejected.boardLockClose || 0;
+  m.rejectedSuspendedClose = out.rejected.suspendedClose || 0;
   return { ...out, metrics: m };
 }
 
@@ -93,7 +105,7 @@ if (flags.has('grid')) {
     const rows = [];
     for (const p of GRID[st.id] || []) {
       for (const fx of fixtures.filter(f => ['rbm', 'egm', 'mm', '600519'].some(s => f.fn.includes('_' + s + '_')))) {
-        const r = runOne(fx.bars, specFor(fx.meta.symbol), st, p);
+        const r = runOne(fx.bars, specFor(fx.meta.symbol, fx.meta), st, p);
         rows.push([JSON.stringify(p), fx.meta.name, pct(r.metrics.totalReturn), pct(r.metrics.annualReturn),
           pct(r.metrics.maxDDPct), num(r.metrics.sharpe), r.metrics.trades, pct(r.metrics.winRate)]);
       }
@@ -107,7 +119,7 @@ const summaryRows = [];
 const detail = [];
 for (const st of strategies) {
   for (const fx of fixtures) {
-    const spec = specFor(fx.meta.symbol);
+    const spec = specFor(fx.meta.symbol, fx.meta);
     let r;
     try { r = runOne(fx.bars, spec, st, {}); }
     catch (e) { detail.push({ strat: st.name, sym: fx.meta.name, error: e.message }); continue; }
@@ -117,15 +129,17 @@ for (const st of strategies) {
     summaryRows.push([
       st.name, fx.meta.name, pct(m.totalReturn), pct(bhReturn), pct(m.totalReturn - bhReturn),
       pct(m.annualReturn), pct(m.maxDDPct), num(m.sharpe), num(m.calmar),
-      m.trades, pct(m.winRate), num(m.profitFactor, 1), pct(m.exposure, 0), m.rejectedMargin
+      m.trades, pct(m.winRate), num(m.profitFactor, 1), pct(m.exposure, 0),
+      m.rejectedMargin, m.rejectedBoardLock, m.rejectedBoardLockClose
     ]);
     detail.push({ strat: st.id, stratName: st.name, sym: fx.meta.symbol, name: fx.meta.name, metrics: m, trades: r.trades.slice(0, 3) });
   }
 }
 
 table(summaryRows,
-  [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
-  ['策略', '品种', '总收益', '持有涨幅', '超额', '年化', '最大回撤', 'Sharpe', 'Calmar', '笔数', '胜率', '盈亏比', '持仓占比', '资金不足拒单']);
+  [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+  ['策略', '品种', '总收益', '持有涨幅', '超额', '年化', '最大回撤', 'Sharpe', 'Calmar', '笔数', '胜率',
+   '盈亏比', '持仓占比', '资金不足拒单', '板锁拒开', '板锁拒平']);
 
 if (flags.has('json')) {
   fs.writeFileSync(path.join(DIR, 'backtest_result.json'), JSON.stringify(detail, null, 1));

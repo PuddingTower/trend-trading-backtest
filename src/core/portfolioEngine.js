@@ -39,12 +39,33 @@ export class PortfolioEngine {
     };
     this.trades = [];
     this.equityCurve = [];
-    this.rejected = { boardLock: 0, suspended: 0, cash: 0, sizingZero: 0, marginCalls: 0, reentryBlocked: 0 };
+    this.rejected = { boardLock: 0, boardLockClose: 0, suspended: 0, suspendedClose: 0,
+                      cash: 0, sizingZero: 0, marginCalls: 0, reentryBlocked: 0 };
     this.rejects = [];
     this.notices = [];
   }
 
   get ready() { return this.entries.length > 0; }
+
+  /**
+   * 平仓侧的板锁/停牌闸门 —— 与单品种引擎同一条口径。
+   * 两个引擎对"封死的板上能不能平仓"给出不同答案，组合回测和单品种回测就永远对不上账。
+   */
+  _closingAllowed(entry, px, i, dir, sealRef) {
+    const bar = entry.bars[i];
+    if (!bar) return { ok: false, bucket: 'suspendedClose', reason: '当天没有这根 bar（停牌或未上市），出不了' };
+    if (bar.suspended) return { ok: false, bucket: 'suspendedClose', reason: '停牌日不可成交' };
+    if (!entry.rules || bar.stalePrevClose) return { ok: true };
+    const side = dir === DIR.LONG ? 'sell' : 'buy';
+    const ref = Number.isFinite(sealRef) ? sealRef : (side === 'sell' ? bar.low : bar.high);
+    const gate = entry.rules.canFillAt(side, px, entry.bars[i - 1]?.close, { closing: true, sealRef: ref });
+    return gate.ok ? { ok: true } : { ok: false, bucket: 'boardLockClose', reason: gate.reason };
+  }
+
+  _noteReject(date, symbol, gate, label) {
+    this.rejected[gate.bucket] = (this.rejected[gate.bucket] || 0) + 1;
+    this.rejects.push({ date, symbol, kind: gate.bucket, reason: `${label}：${gate.reason}` });
+  }
 
   _slip(price, side, tick) {
     const t = tick || 1;
@@ -160,7 +181,10 @@ export class PortfolioEngine {
             const { hits, anyHit } = evalExitOrders(s.pos.orders, bar, s.pos.dir);
             if (anyHit) {
               const px = this._slip(hits[0].price, s.pos.dir === DIR.LONG ? 'sell' : 'buy', tick);
-              cash = this._close(s, px, i, hits[0].gap ? `gap_${hits[0].kind}` : hits[0].kind, cash, date);
+              const sealRef = hits[0].gap ? bar.open : (s.pos.dir === DIR.LONG ? bar.low : bar.high);
+              const gate = this._closingAllowed(s, px, i, s.pos.dir, sealRef);
+              if (gate.ok) cash = this._close(s, px, i, hits[0].gap ? `gap_${hits[0].kind}` : hits[0].kind, cash, date);
+              else this._noteReject(date, s.symbol, gate, hits[0].kind);   // 委托不下岗，下一根继续判
             }
           }
         }
@@ -175,7 +199,13 @@ export class PortfolioEngine {
           const want = sig.dir ?? 0;
           if (s.pos && want !== s.pos.dir) {
             const px = this._slip(bar.open, s.pos.dir === DIR.LONG ? 'sell' : 'buy', tick);
-            cash = this._close(s, px, i, want === 0 ? 'signal_close' : 'signal_reverse', cash, date);
+            const gate = this._closingAllowed(s, px, i, s.pos.dir, bar.open);
+            if (gate.ok) {
+              cash = this._close(s, px, i, want === 0 ? 'signal_close' : 'signal_reverse', cash, date);
+            } else {
+              // 平不掉就不反手：下面开仓分支要求 !s.pos，仓位还在自然跳过
+              this._noteReject(date, s.symbol, gate, want === 0 ? '信号平仓' : '信号反手');
+            }
           }
           if (want !== 0 && !s.pos) {
             const allowShort = s.allowShort ?? (spec.market === 'futures');
@@ -194,7 +224,7 @@ export class PortfolioEngine {
                 const prevClose = prevBar ? prevBar.close : null;
                 // 前收盘失效（停牌太久）时不套用板锁：拿三周前的价算今天的涨跌停价是错的
                 const stale = bar.stalePrevClose || bar.gapNaturalDays > 8;
-                const lock = (rules && !stale) ? rules.canFillAt(side, px, prevClose, { closing: false }) : { ok: true };
+                const lock = (rules && !stale) ? rules.canFillAt(side, px, prevClose, { closing: false, sealRef: bar.open }) : { ok: true };
                 if (bar.suspended) { this.rejected.suspended++; this.rejects.push({ date, symbol: s.symbol, kind: 'suspended', reason: '停牌日不可成交' }); }
                 else if (!lock.ok) { this.rejected.boardLock++; this.rejects.push({ date, symbol: s.symbol, kind: 'boardLock', reason: lock.reason }); }
                 else {
@@ -259,19 +289,32 @@ export class PortfolioEngine {
         while (needDeleverage && this._usedMargin(positions) > 0) {
           const sorted = [...positions.values()].filter(s => s.pos)
             .sort((a, b) => this._lossSinceEntry(a) - this._lossSinceEntry(b));   // 亏得最狠的排前面
-          const victim = sorted[0];
-          if (!victim) break;
-          const di = victim.idxOf.get(date);
-          const bar = di !== undefined ? victim.bars[di] : null;
-          const px = this._slip(bar ? bar.close : victim._lastClose, victim.pos.dir === DIR.LONG ? 'sell' : 'buy', victim.spec.tick || 1);
-          cash = this._close(victim, px, di ?? 0, 'margin_call', cash, date);
-          // 强平当天不许立刻按同一信号原样重开：交易所对被强平的会员有限制开仓期，
-          // 没有这道闸的话「平仓—重开—再平仓」会主导整段组合曲线，结果只反映撮合顺序而非策略。
-          victim.blockedUntilDay = d + (o.reentryCooldownBars ?? 3);
-          this.rejected.marginCalls++;
+          if (!sorted.length) break;
+          let didClose = false, closedSymbol = null;
+          for (const victim of sorted) {
+            const di = victim.idxOf.get(date);
+            const bar = di !== undefined ? victim.bars[di] : null;
+            const px = this._slip(bar ? bar.close : victim._lastClose, victim.pos.dir === DIR.LONG ? 'sell' : 'buy', victim.spec.tick || 1);
+            const gate = this._closingAllowed(victim, px, di, victim.pos.dir, bar && bar.close);
+            if (!gate.ok) { this._noteReject(date, victim.symbol, gate, '维持线强平'); continue; }
+            cash = this._close(victim, px, di, 'margin_call', cash, date);
+            // 强平当天不许立刻按同一信号原样重开：交易所对被强平的会员有限制开仓期，
+            // 没有这道闸的话「平仓—重开—再平仓」会主导整段组合曲线，结果只反映撮合顺序而非策略。
+            victim.blockedUntilDay = d + (o.reentryCooldownBars ?? 3);
+            this.rejected.marginCalls++;
+            didClose = true; closedSymbol = victim.symbol;
+            break;                                             // 一次一根，平完重新评估敞口
+          }
+          if (!didClose) {
+            // 所有持仓都被板锁/停牌闷住：这天就是降不下来，只能带着超限敞口过夜。
+            // 报账户级通知并跳出 —— 继续循环会变成死循环，而真实处境就是连续跌停。
+            this.notices.push({ date, kind: 'liquidation_blocked', equity: round2(this._equity(cash, positions, priceOf)),
+                                used: round2(this._usedMargin(positions)), symbols: sorted.map(s => s.symbol) });
+            break;
+          }
           eq = this._equity(cash, positions, priceOf);
           u = this._usedMargin(positions);
-          this.notices.push({ date, kind: 'forced_liquidation', symbol: victim.symbol, equity: round2(eq), used: round2(u) });
+          this.notices.push({ date, kind: 'forced_liquidation', symbol: closedSymbol, equity: round2(eq), used: round2(u) });
           needDeleverage = eq < u * o.maintenanceRatio;
         }
       } else if (cash < 0) {

@@ -242,6 +242,9 @@ export class BacktestPanel {
         capital: s.capital, sizing: s.sizing, notionalPct: s.notionalPct,
         lots: s.lots, slippageTicks: s.slippageTicks, allowShort: s.allowShort,
         settlement: { enabled: s.settlement, maintenanceRatio: s.maintenanceRatio },
+        // 关掉逐日盯市时也要吃到界面上那个比例；以前只有结算路径读它，
+        // 非结算的维持线判定就用了一个从没被赋值的字段（?? 0.5 悄悄生效）
+        maintenanceRatio: s.maintenanceRatio,
         breakeven: s.breakevenR > 0 ? { afterR: s.breakevenR, extraPct: 0 } : null,
         timeStop: s.timeStopBars > 0 ? { bars: s.timeStopBars, requireLoss: true } : null,
         rules

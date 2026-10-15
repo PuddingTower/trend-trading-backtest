@@ -197,7 +197,12 @@ export function parameterHeatmap(rows, { xDim, yDim, scoreKey = 'score' } = {}) 
   // 孤峰 = 邻格大面积塌掉，这种"第一名"是拟合噪声。
   let plateau = null;
   if (best) {
-    const thr = best.score * 0.6;
+    // 阈值不能跟分数的正负号耦合：老口径 best*0.6 在最优值为负时方向整个反过来
+    // （-2 的 60% 是 -1.2，比最优还好的 -1.5 反倒被判成"塌掉"）。
+    // 改用整张图的跨度做尺子：邻格要落在最优值 40% 跨度以内才算活着。
+    const pool = cells.flat().map(c => c.score).filter(Number.isFinite);
+    const span = pool.length ? Math.max(...pool) - Math.min(...pool) : 0;
+    const thr = span > 0 ? best.score - 0.4 * span : best.score;
     let alive = 0, total = 0;
     for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
       if (!di && !dj) continue;
@@ -207,7 +212,8 @@ export function parameterHeatmap(rows, { xDim, yDim, scoreKey = 'score' } = {}) 
       const s = cells[jj][ii].score;
       if (Number.isFinite(s) && s >= thr) alive++;
     }
-    plateau = total ? { alive, total, ratio: alive / total, verdict: alive / total < 0.5 ? '孤峰嫌疑：邻格大面积塌掉' : '邻格基本存活，参数落在高原上' } : null;
+    plateau = total ? { alive, total, ratio: alive / total, thr, span,
+                        verdict: alive / total < 0.5 ? '孤峰嫌疑：邻格大面积塌掉' : '邻格基本存活，参数落在高原上' } : null;
   }
   const covered = cells.flat().filter(c => c.n).length;
   const holes = xVals.length * yVals.length - covered;

@@ -16,6 +16,7 @@
  */
 
 import { ORDER_KIND, ratchetStop, evalExitOrders, evalAddOrders, makeBracket, pyramidScales } from './orders.js';
+import { atr } from '../analysis/common.js';
 
 export const DIR = { FLAT: 0, LONG: 1, SHORT: -1 };
 
@@ -79,12 +80,20 @@ export class BacktestEngine {
     this.settlement = opts.settlement && opts.settlement.enabled
       ? { maintenanceRatio: 0.75, warningRatio: 1.0, ...opts.settlement }
       : null;
+    /**
+     * 维持保证金比例只留一个来源：opts.maintenanceRatio > 结算配置 > 0.75（交易所常见口径）。
+     * 以前非结算那条路径读 this.maintenanceRatio —— 这字段从没被赋值，?? 0.5 悄悄生效，
+     * 界面上那个「维持保证金 75%」输入框在关掉逐日盯市时其实是个摆设，两套口径还会给出不同的强平时点。
+     */
+    this.maintenanceRatio = opts.maintenanceRatio ?? this.settlement?.maintenanceRatio ?? 0.75;
+    /** ATR 移动止损的周期：策略给的 trailAtr 是倍数，倍数要乘在当日 ATR 上才是止损位。 */
+    this.atrLen = opts.atrLen ?? 14;
     this.marginNotices = [];
     this._pendingLiquidation = -1;
     this.trades = [];
     this.rejects = [];
     this.equityCurve = [];
-    this.rejected = { margin: 0, noLiquidity: 0, shortDisabled: 0 };
+    this.rejected = { margin: 0, noLiquidity: 0, shortDisabled: 0, boardLockClose: 0, suspendedClose: 0 };
   }
 
   _fee(price, lots, { closeToday = false, side = 'buy', sell = false } = {}) {
@@ -112,6 +121,15 @@ export class BacktestEngine {
     const { bars } = this;
     if (!signals || signals.length !== bars.length) throw new Error('signals 必须与 bars 等长');
 
+    /**
+     * 只在真的有 ATR 移动止损时才算这条序列。
+     * 以前 _applyTrails 声明了第 4 个参数 atrValue，调用点只给 3 个 —— 于是
+     * trailCfg.atr 那条分支永远进不去，六个策略暴露的 trailAtr 参数全是摆设。
+     * 取值一律用 i-1：本根的 ATR 含本根高低，用它给本根的止损定价就是偷看本根行情。
+     */
+    const needsAtrTrail = signals.some(s => s && Number(s.trailAtr) > 0);
+    const atrSeries = needsAtrTrail ? atr(bars, this.atrLen) : null;
+
     let cash = this.capital0;
     let pos = null;       // {dir, lots, entryPrice, entryIdx, entryDate, margin, feePaid, stop, target, trail, reason, orders}
     let peak = -Infinity, trough = Infinity;
@@ -126,22 +144,32 @@ export class BacktestEngine {
       if (pos && i > pos.entryIdx) {
         const settledCall = this.settlement && this._pendingLiquidation === i - 1;
         const prevEq = this.equityCurve.length ? this.equityCurve[this.equityCurve.length - 1].equity : this.capital0;
-        const legacyCall = !this.settlement && prevEq <= pos.margin * (this.maintenanceRatio ?? 0.5);
+        const legacyCall = !this.settlement && prevEq <= pos.margin * this.maintenanceRatio;
         if (settledCall || legacyCall) {
           const px = this._slip(bar.open, pos.dir === DIR.LONG ? 'sell' : 'buy');
-          cash = this._closePosition(pos, px, i, 'margin_call', cash);
-          pos = null;
-          if (this._pendingLiquidation === i - 1) this._pendingLiquidation = -1;
-          this.rejected.marginCalls = (this.rejected.marginCalls || 0) + 1;
+          const gate = this._closingAllowed(px, i, pos.dir, bar.open);
+          if (!gate.ok) {
+            // 强平单也会被板锁卡住：仓位留着，结算层每天重新判定，下一根继续试。
+            // 真实账户就是这样闷在跌停板里，而不是理论上一按就出。
+            this._noteReject(i, gate, '维持保证金强平');
+          } else {
+            cash = this._closePosition(pos, px, i, 'margin_call', cash);
+            pos = null;
+            if (this._pendingLiquidation === i - 1) this._pendingLiquidation = -1;
+            this.rejected.marginCalls = (this.rejected.marginCalls || 0) + 1;
+          }
         }
       }
 
       // ---- 0.5 时间止损：上一根收盘决定"这笔不动了"，本根开盘执行 ----
       if (pos && this._pendingTimeStop === i - 1) {
         const px = this._slip(bar.open, pos.dir === DIR.LONG ? 'sell' : 'buy');
-        cash = this._closePosition(pos, px, i, 'time_stop', cash);
-        pos = null;
-        this._pendingTimeStop = -1;
+        const gate = this._closingAllowed(px, i, pos.dir, bar.open);
+        if (gate.ok) {
+          cash = this._closePosition(pos, px, i, 'time_stop', cash);
+          pos = null;
+        } else this._noteReject(i, gate, '时间止损');
+        this._pendingTimeStop = -1;      // 判定只生效一次；被拒也不在同一根重试
       }
 
       // ---- 1. 出场与加仓（用当前 bar 的 high/low 判定，成交价保守取） ----
@@ -149,7 +177,7 @@ export class BacktestEngine {
       // 原实现只在开仓时取一次 sig.trail，之后再也不更新 —— 吊灯止损实际上根本不动，
       // 回测里那条「移动止损」是个装饰品。
       if (pos) {
-        this._applyTrails(pos, peak, trough);
+        this._applyTrails(pos, peak, trough, atrSeries ? atrSeries[i - 1] : null);
         // 保本止损：浮盈够了就把止损抬到成本。peak/trough 此刻只含到上一根为止的极值，
         // 所以这条判定用的是"已经走完的行情"，不偷看本根。
         if (this.breakeven && !pos.beDone && Number.isFinite(pos.riskPerUnit) && pos.riskPerUnit > 0) {
@@ -193,8 +221,14 @@ export class BacktestEngine {
           // 反手/平仓：在下一根开盘平掉
           const fb = bars[fillIdx];
           const px = this._slip(fb.open, pos.dir === DIR.LONG ? 'sell' : 'buy');
-          cash = this._closePosition(pos, px, fillIdx, wantDir === DIR.FLAT ? 'signal_close' : 'signal_reverse', cash);
-          pos = null;
+          const gate = this._closingAllowed(px, fillIdx, pos.dir, fb.open);
+          if (gate.ok) {
+            cash = this._closePosition(pos, px, fillIdx, wantDir === DIR.FLAT ? 'signal_close' : 'signal_reverse', cash);
+            pos = null;
+          } else {
+            // 平不掉就不反手：下面的开仓分支要求 !pos，仓位还在就自然跳过
+            this._noteReject(fillIdx, gate, wantDir === DIR.FLAT ? '信号平仓' : '信号反手');
+          }
         }
 
         if (wantDir !== DIR.FLAT && !pos) {
@@ -215,9 +249,10 @@ export class BacktestEngine {
             // 规则闸门二：涨跌停板锁（封板时开单价排队成交不了）
             // 两个例外：停牌复牌首日前收可能是几周前的价，拿它算板幅是错的；
             // 以及该品种当天本身停牌（合成出来的空 bar）时根本不该成交。
+            // sealRef 用开盘价：开仓单在第 i+1 根的开盘排队，那根后来破没破板是之后的事。
             const boardJudgable = !fb.stalePrevClose && !fb.suspended;
             const fillGate = openGate.ok && this.rules && boardJudgable
-              ? this.rules.canFillAt(side, px, prevClose, { closing: false }) : { ok: true };
+              ? this.rules.canFillAt(side, px, prevClose, { closing: false, sealRef: fb.open }) : { ok: true };
             if (openGate.ok && fb.suspended) {
               this.rejected.suspended = (this.rejected.suspended || 0) + 1;
               this.rejects.push({ idx: fillIdx, kind: 'suspended', reason: '停牌日不可成交' });
@@ -312,10 +347,42 @@ export class BacktestEngine {
    * 剩下的继续持仓跑止损 —— 「到目标就走人」和「到目标减一半、留一半吃趋势」是两种策略，
    * 只有部分平仓能把后者表达出来。
    */
+  /**
+   * 平仓侧的板锁与停牌闸门 —— 补上「平仓方向永远放行」那条后门。
+   *
+   * 封死的跌停板上排的是卖队，你想卖就是卖不掉，这跟你是在开空还是在平多没有关系。
+   * 趋势策略的止损恰好大量打在跌停附近，后门一开，回测就在最该痛的地方装作不痛。
+   * 被拒不等于没事：委托保留，下一根继续判 —— 真实账户就是这样被闷在板里一天又一天。
+   */
+  _closingAllowed(px, idx, dir, sealRef) {
+    const bar = this.bars[idx];
+    if (!bar) return { ok: true };
+    if (bar.suspended) return { ok: false, bucket: 'suspendedClose', reason: '停牌日不可成交' };
+    if (!this.rules || bar.stalePrevClose) return { ok: true };
+    const side = dir === DIR.LONG ? 'sell' : 'buy';
+    const ref = Number.isFinite(sealRef) ? sealRef : (side === 'sell' ? bar.low : bar.high);
+    const gate = this.rules.canFillAt(side, px, this.bars[idx - 1]?.close, { closing: true, sealRef: ref });
+    return gate.ok ? { ok: true } : { ok: false, bucket: 'boardLockClose', reason: gate.reason };
+  }
+
+  _noteReject(idx, gate, label) {
+    this.rejected[gate.bucket] = (this.rejected[gate.bucket] || 0) + 1;
+    this.rejects.push({ idx, kind: gate.bucket, reason: `${label}：${gate.reason}` });
+  }
+
   _settleExit(pos, exit, cash) {
+    const bar = this.bars[exit.idx];
     for (const h of exit.hits) {
       if (!pos.lots) break;
       const px = this._slip(h.price, pos.dir === DIR.LONG ? 'sell' : 'buy');
+      // 跳空穿透按开盘成交 → 锚定价用开盘价；盘中触碰 → 用不利那一侧的极值。
+      // 用收盘价倒推"这根到底封没封死"，等于知道结局再决定开局能不能成交。
+      const sealRef = h.gap ? bar?.open : (pos.dir === DIR.LONG ? bar?.low : bar?.high);
+      const gate = this._closingAllowed(px, exit.idx, pos.dir, sealRef);
+      if (!gate.ok) {
+        this._noteReject(exit.idx, gate, h.kind);     // 委托不下岗，下一根继续判
+        continue;
+      }
       const lotsToClose = Math.min(pos.lots, h.order.qtyLots ?? pos.lots);
       cash = this._closePosition(pos, px, exit.idx, h.gap ? `gap_${h.kind}` : h.kind, cash, lotsToClose);
       h.order.qtyLots = 0;                       // 一次性委托：成交过就作废，下一根不再重复触发
@@ -354,7 +421,7 @@ export class BacktestEngine {
     pos.lastSettle = settle;
     pos.settledIdx = i;
 
-    const maintenance = pos.margin * (this.settlement.maintenanceRatio ?? 0.75);
+    const maintenance = pos.margin * this.maintenanceRatio;
     const notice = nextCash < 0 ? 'margin_call' : null;                 // 可用资金为负 → 追保通知
     const liquidate = equity < maintenance;                             // 权益跌破维持线 → 强平
     return { cash: nextCash, equity, segPnl, notice, liquidate };

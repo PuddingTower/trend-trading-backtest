@@ -130,7 +130,10 @@ export function neighborhoodScore({ bars, spec, strategy, best, grids, engineOpt
     }
   }
   const finite = variants.map(v => v.score).filter(Number.isFinite);
-  const bestScore = obj.get(best._metrics || { sharpe: null });
+  // 基准值必须自己跑一遍：以前读 best._metrics，而调用方给的是纯参数对象，
+  // 那个字段全仓库从没被赋值过 —— 于是 retain 永远是 null，界面上的"邻格保留率"是个空壳。
+  const bestRun = runOne({ bars, spec, strategy, params: { ...best }, engineOpts, periodsPerYear });
+  const bestScore = obj.get(bestRun.metrics);
   const worst = finite.length ? Math.min(...finite) : null;
   return {
     variants,
