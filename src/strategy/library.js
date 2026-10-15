@@ -135,12 +135,20 @@ export const hhLlStructure = {
     const q = { ...this.params, ...p };
     const a = atr(bars, q.atrLen);
     const sw = swingPoints(bars, { pct: q.swingPct });
-    const byIdx = new Map(sw.map(s => [s.idx, s]));
+    // 信号挂在**枢轴确认那根**（confirmedAt），不是极值那根（idx）：
+    // 极值要等之后某根回撤过阈值才成立，挂在 idx 上等于拿未来几根的数据给过去下指令。
+    // sw 本身就是按确认先后 push 的，所以 sw.slice(0,k) 恰是第 k 个枢轴确认时已看得见的全部历史。
+    const byConf = new Map();
+    sw.forEach((s, k) => {
+      const at = Number.isFinite(s.confirmedAt) ? s.confirmedAt : s.idx;
+      const list = byConf.get(at);
+      if (list) list.push(k); else byConf.set(at, [k]);
+    });
     let state = DIR.FLAT;
     return bars.map((b, i) => {
-      const pt = byIdx.get(i);
-      if (pt) {
-        const prior = sw.filter(s => s.type === pt.type && s.idx < i).slice(-q.lookback);
+      for (const k of byConf.get(i) || []) {
+        const pt = sw[k];
+        const prior = sw.slice(0, k).filter(s => s.type === pt.type).slice(-q.lookback);
         if (prior.length === q.lookback) {
           if (pt.type === 'high' && prior.every(s => s.price < pt.price)) state = DIR.LONG;    // 高点抬高 = HH
           else if (pt.type === 'low' && prior.every(s => s.price > pt.price)) state = DIR.SHORT; // 低点降低 = LL
@@ -208,9 +216,12 @@ function templateSeries(bars, q) {
     const rb = q.rsBars;
     if (!Array.isArray(rb) || rb.length < q.riseLook + 2) return null;
     const own = roc(closes, q.riseLook);
-    const bench = roc(rb.map(b => b.close), q.riseLook);
+    const benchRoc = roc(rb.map(b => b.close), q.riseLook);
+    // 基准按**日期**对齐而不是按下标：基准起步晚于品种时，bench[i] 取到的是未来的某一天，
+    // RS 判据会凭空变强。日期对不上就返回 null（该判据不参与判定），而不是硬凑一个值。
+    const benchByDate = new Map(rb.map((b, k) => [String(b.date).slice(0, 10), benchRoc[k]]));
     return closes.map((_, i) => {
-      const o = own[i], b2 = bench[Math.min(bench.length - 1, i)];
+      const o = own[i], b2 = benchByDate.get(String(bars[i].date).slice(0, 10));
       return (o === null || o === undefined || !Number.isFinite(b2)) ? null : o > b2;
     });
   })();

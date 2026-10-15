@@ -147,7 +147,7 @@ export function neighborhoodScore({ bars, spec, strategy, best, grids, engineOpt
  */
 export function walkForward({ bars, spec, strategy, baseParams, grids, objective = 'sharpe',
                               isLen = 500, oosLen = 120, stepLen = 120, engineOpts = {},
-                              periodsPerYear = 252, onWindow = null }) {
+                              periodsPerYear = 252, embargoBars = 'auto', onWindow = null }) {
   const n = (bars || []).length;
   if (n < isLen + oosLen) return { windows: [], error: `数据 ${n} 根，不够一个 IS(${isLen})+OOS(${oosLen}) 窗口` };
   const obj = OBJECTIVES[objective] || OBJECTIVES.sharpe;
@@ -155,23 +155,35 @@ export function walkForward({ bars, spec, strategy, baseParams, grids, objective
   let cursor = 0;
   while (cursor + isLen + oosLen <= n) {
     const isBars = bars.slice(cursor, cursor + isLen);
-    const oosBars = bars.slice(cursor + isLen, cursor + isLen + oosLen);
     const plans = gridPlans(baseParams, grids);
     let best = null;
     for (const p of plans) {
       const r = runOne({ bars: isBars, spec, strategy, params: p, engineOpts, periodsPerYear });
       const s = obj.get(r.metrics);
-      if (!best || s > best.score) best = { params: p, score: s, metrics: r.metrics };
+      if (!best || s > best.score) best = { params: p, score: s, metrics: r.metrics, trades: r.trades };
     }
     if (!best || !Number.isFinite(best.score)) {
       cursor += stepLen;
       continue;
     }
+    // 净化间隔：样本内压轴那笔可能横跨到样本外头上 —— 参数是在 IS 上挑的，横跨部分
+    // 等于把「选择的结果」偷渡进考卷。取 IS 里最长持仓身长当缝宽，保证没有任何一笔跨得过。
+    // embargoBars 传数字可手工覆盖，传 0 即退回旧的「零间隙」口径。
+    let gap = embargoBars;
+    if (gap === 'auto') {
+      const maxHold = (best.trades || []).reduce((m, t) => Math.max(m, t.holdingBars || 0), 0);
+      gap = Math.min(Math.max(maxHold, 1), Math.max(1, isLen >> 2));
+    }
+    gap = Math.max(0, Math.round(Number(gap) || 0));
+    const oosStartIdx = cursor + isLen + gap;
+    if (oosStartIdx + oosLen > n) break;          // 留不出间隔就没有下一个完整窗口了
+    const oosBars = bars.slice(oosStartIdx, oosStartIdx + oosLen);
     // 样本外用样本内挑出的参数，且**不许重新拟合**
     const oos = runOne({ bars: oosBars, spec, strategy, params: best.params, engineOpts, periodsPerYear });
     const window = {
       isStartIdx: cursor, isEndIdx: cursor + isLen - 1,
-      oosStartIdx: cursor + isLen, oosEndIdx: cursor + isLen + oosLen - 1,
+      embargoBars: gap,
+      oosStartIdx, oosEndIdx: oosStartIdx + oosLen - 1,
       isDateFrom: isBars[0].date, isDateTo: isBars[isBars.length - 1].date,
       oosDateFrom: oosBars[0].date, oosDateTo: oosBars[oosBars.length - 1].date,
       best: best.params, isScore: best.score, isMetrics: best.metrics,
@@ -229,6 +241,9 @@ export function walkForward({ bars, spec, strategy, baseParams, grids, objective
       efficiency: mean(isScores) > 0 ? mean(oosScores) / mean(isScores) : null,
       isOosGap: mean(isScores) - mean(oosScores),
       positiveOosSegments: oosScores.filter(s => s > 0).length,
+      // 缝宽用了几根，必须报出来：0 意味着 IS 与 OOS 贴着，跨缝持仓会偷渡进考卷。
+      minEmbargoBars: windows.length ? Math.min(...windows.map(w => w.embargoBars)) : 0,
+      maxEmbargoBars: windows.length ? Math.max(...windows.map(w => w.embargoBars)) : 0,
       totalReturn: startEquity > 0 ? level / startEquity - 1 : 0,
       maxDDPct: stitchedMaxDDPct
     }

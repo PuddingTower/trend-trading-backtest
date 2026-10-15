@@ -91,12 +91,14 @@ export function annotateGaps(bars, { refBars = null, minSuspensionDays = 4 } = {
 export function checkAdjustmentContinuity(bars, { limitPct = 0.10, tol = 0.02 } = {}) {
   const list = (bars || []).slice();
   const issues = [];
-  if (!(limitPct > 0)) return { issues, usable: true, note: '该品种无涨跌幅限制（指数等），跳过连续性校验' };
+  let skipped = 0;
+  if (!(limitPct > 0)) return { issues, usable: true, skipped, note: '该品种无涨跌幅限制（指数等），跳过连续性校验' };
   const ceiling = limitPct + tol;
   for (let i = 1; i < list.length; i++) {
     const prev = list[i - 1], cur = list[i];
     const prevClose = prev.close, open = cur.open;
-    if (!(prevClose > 0) || !(open > 0)) continue;
+    // 非正价格没法算比值，但**必须计数**：静默 continue 会让「整段都是负价」看起来像「校验通过」
+    if (!(prevClose > 0) || !(open > 0)) { skipped++; continue; }
     const jump = open / prevClose - 1;
     if (Math.abs(jump) > ceiling) {
       issues.push({
@@ -111,11 +113,42 @@ export function checkAdjustmentContinuity(bars, { limitPct = 0.10, tol = 0.02 } 
   return {
     issues,
     usable: issues.length === 0,
+    skipped,
     note: issues.length
       ? `发现 ${issues.length} 处超过涨跌停幅度的隔夜跳空（最大 ${(Math.max(...issues.map(x => Math.abs(x.jump))) * 100).toFixed(1)}%）。`
         + '这种价格变化在市场上不可能发生，几乎可以断定是**送转/分红未复权**。'
         + '请把复权切到"前复权"再回测，否则这些断崖会被当成真跌破/真突破。'
-      : '未发现超出板幅的隔夜跳空，复权口径看起来是连续的。'
+      : (skipped
+        ? `连续性比对跳过了 ${skipped} 对（前收或开盘不是正数，没法算比值）—— 详见价格有效性检查。`
+        : '未发现超出板幅的隔夜跳空，复权口径看起来是连续的。')
+  };
+}
+
+/**
+ * 价格有效性：OHLC 必须是正有限数。
+ *
+ * 前复权拉长历史时，早年的累计除权因子会把价格压到 0 甚至负数 —— 那不是行情，
+ * 是"用未来的公司行为改写过去的价位"算出来的伪数。负价进引擎会把保证金占用算成负数
+ * （sizing 里 perLot = 价×乘数×保证金率，没有 price>0 的护栏），板幅基准也会翻向，
+ * 而连续性校验原先对这种 bar 直接跳过，等于静默放行。所以单独问一遍，如实报数。
+ */
+export function checkPriceValidity(bars) {
+  const bad = [];
+  (bars || []).forEach((b, i) => {
+    const fields = ['open', 'high', 'low', 'close'].filter(k => !(Number.isFinite(b[k]) && b[k] > 0));
+    if (fields.length) bad.push({ idx: i, date: dayKey(b.date), fields, values: fields.map(k => b[k]) });
+  });
+  const withNonPositive = bad.filter(x => x.values.some(v => Number.isFinite(v) && v <= 0)).length;
+  return {
+    bad,
+    count: bad.length,
+    usable: bad.length === 0,
+    note: bad.length
+      ? `${bad.length} 根 bar 的 OHLC 不是正有限数（首例 ${bad[0].date}，字段 ${bad[0].fields.join('/')} = `
+        + `${bad[0].values.join(', ')}），其中 ${withNonPositive} 根含零或负价。`
+        + '前复权拉长历史常把早年价格压成这样，是复权口径问题不是行情 —— '
+        + '请缩短起始区间或改用后复权/不复权；这种序列进撮合会把保证金占用算成负数。'
+      : 'OHLC 全为正有限数，可作为撮合输入。'
   };
 }
 

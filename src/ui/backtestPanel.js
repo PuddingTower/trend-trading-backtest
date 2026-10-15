@@ -10,7 +10,7 @@ import { BacktestEngine } from '../core/backtestEngine.js';
 import { computeMetrics, benchmarkCompare } from '../report/metrics.js';
 import { resolveTradeSpec } from '../markets/instrumentSpec.js';
 import { rulesFor } from '../markets/marketRules.js';
-import { annotateGaps, checkAdjustmentContinuity, checkRolloverGaps } from '../markets/dataQuality.js';
+import { annotateGaps, checkAdjustmentContinuity, checkRolloverGaps, checkPriceValidity } from '../markets/dataQuality.js';
 
 const pct = (v, d = 1) => (v === null || v === undefined || !Number.isFinite(v)) ? '—' : (v * 100).toFixed(d) + '%';
 const num = (v, d = 2) => (v === null || v === undefined || !Number.isFinite(v)) ? '—' : Number(v).toFixed(d);
@@ -160,6 +160,7 @@ export class BacktestPanel {
       ? { issues: checkRolloverGaps(bars, { limitPct: limitPct > 0 ? limitPct : 0.08 }),
           label: '换月跳空', tail: '连续合约在换月当天的价差不是行情。若拼接模式用的是「原始价位」，这些缺口会被当成真突破/真跌破。' }
       : { ...checkAdjustmentContinuity(bars, { limitPct: limitPct > 0 ? limitPct : 0.10 }), label: '复权断崖' };
+    const pv = checkPriceValidity(bars);
     const gaps = ann.longGaps;
     const worst = gaps.length ? gaps.reduce((a, b) => (b.naturalDays > a.naturalDays ? b : a)) : null;
     const staleCount = ann.bars.filter(b => b.stalePrevClose).length;
@@ -176,10 +177,19 @@ export class BacktestPanel {
     } else {
       parts.push(esc(cont.note || cont.tail || '未发现异常跳空'));
     }
+    if (pv.count) {
+      const neg = pv.bad.filter(x => x.values.some(v => Number.isFinite(v) && v <= 0)).length;
+      parts.push('<span style="color:var(--up-color);">价格有效性 <b>' + pv.count + '</b> 根不合格（其中 '
+        + neg + ' 根含零或负价）：'
+        + pv.bad.slice(0, 3).map(x => `${esc(x.date)} ${x.fields.join('/')}=${x.values.join(',')}`).join('、')
+        + (pv.count > 3 ? '…' : '')
+        + '。这种序列进撮合会把保证金占用算成负数，请先缩短起始区间或换复权口径</span>');
+    }
     if (!keepsOrder) parts.push('<span style="color:var(--up-color);">K 线日期不是升序，缺口标注已跳过（否则图上标记会错位）</span>');
     if (staleCount) parts.push(`前收盘失效（缺口过长）<b>${staleCount}</b> 根：这些 bar 的涨跌停判定已跳过`);
     if (host) host.innerHTML = `🩺 数据体检 · ${parts.join(' · ')}`;
-    return { bars: keepsOrder ? ann.bars : bars, usable: keepsOrder, gaps, suspensions: ann.suspensions, continuity: cont };
+    return { bars: keepsOrder ? ann.bars : bars, usable: keepsOrder && pv.usable,
+             gaps, suspensions: ann.suspensions, continuity: cont, priceValidity: pv };
   }
 
   sliceBars(range) {
@@ -215,6 +225,13 @@ export class BacktestPanel {
     // 这些都靠 annotateGaps 写进 bar 的字段，撮合层只认字段不认提示。
     const qc = this.qualityCheck(bars, code);
     const useBars = qc.bars && qc.bars.length ? qc.bars : bars;
+
+    // 零或负价直接拒跑：占用 = 价×乘数×保证金率，负价会把占用算成负数，
+    // 板幅基准也会翻向 —— 这不是"结果差一点"，是整条权益曲线没有意义。
+    if (qc.priceValidity && qc.priceValidity.count) {
+      out.innerHTML = `<span style="color:var(--up-color);">已拒绝回测：${esc(qc.priceValidity.note)}</span>`;
+      return;
+    }
 
     let res;
     try {

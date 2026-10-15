@@ -33,7 +33,11 @@ export function atr(bars, period = 14) {
 /**
  * ZigZag 摆动点。阈值用「相对幅度」而不是固定像素：
  * 同一套参数在 3000 点的螺纹和 1800 点的茅台上必须给出同一种“拐点”定义。
- * @returns [{idx, price, type:'high'|'low'}] 交替出现
+ * @returns [{idx, price, type:'high'|'low', confirmedAt}] 交替出现
+ *   idx  = 极值所在 bar（价格意义上的拐点）
+ *   confirmedAt = 拐点**成立**的那根 bar —— 回撤/反弹首次越过阈值的位置。
+ *   两者相差若干根是定义本身决定的，不是实现瑕疵。任何要据此下指令的地方
+ *   必须挂在 confirmedAt 上；挂在 idx 上等于拿未来数据给过去下指令。
  */
 export function swingPoints(bars, { pct = 0.03, lookback = 2 } = {}) {
   if (bars.length < 3) return [];
@@ -50,14 +54,14 @@ export function swingPoints(bars, { pct = 0.03, lookback = 2 } = {}) {
     if (dir >= 0) {
       // 上升腿中：只要没从高点回撤超过阈值就继续抬高高点
       if (lastHigh > 0 && (lastHigh - l) / lastHigh >= pct) {
-        pts.push({ idx: lastHighIdx, price: lastHigh, type: 'high' });
+        pts.push({ idx: lastHighIdx, price: lastHigh, type: 'high', confirmedAt: i });
         dir = -1;
         lastLow = l; lastLowIdx = i;
       }
     }
     if (dir <= 0) {
       if (lastLow > 0 && (h - lastLow) / lastLow >= pct) {
-        pts.push({ idx: lastLowIdx, price: lastLow, type: 'low' });
+        pts.push({ idx: lastLowIdx, price: lastLow, type: 'low', confirmedAt: i });
         dir = 1;
         lastHigh = h; lastHighIdx = i;
       }

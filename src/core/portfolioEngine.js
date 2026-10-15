@@ -108,14 +108,17 @@ export class PortfolioEngine {
     }
     const o = this.o;
 
-    // 每个品种：因果信号序列、ATR 序列、日期→下标
+    // 每个品种：因果信号序列、ATR 序列、逐根回看的年化波动率、日期→下标
     const S = this.entries.map(e => {
       const signals = e.strategy.signals(e.bars, e.params) || [];
       const a = atr(e.bars, o.atrLen);
       const closes = e.bars.map(b => b.close);
+      const py = e.periodsPerYear || 252;
+      // 波动率序列必须逐根只回看：以前这里是「拿全序列末尾 120 根算一次」再复用给每一天，
+      // 等于 2010 年的仓位按 2025 年的波动率来定 —— 那是未来函数，不是近似。
+      const volSeries = closes.map((_, k) => annualizedVol(closes.slice(Math.max(0, k - 119), k + 1), py));
       return {
-        ...e, signals, atrSeries: a,
-        vol: annualizedVol(closes.slice(-120), e.periodsPerYear || 252),
+        ...e, signals, atrSeries: a, volSeries,
         idxOf: new Map(e.bars.map((b, i) => [String(b.date).slice(0, 10), i])),
         pos: null
       };
@@ -197,7 +200,9 @@ export class PortfolioEngine {
                 else {
                   const equity = this._equity(cash, positions, priceOf);
                   const atrValue = s.atrSeries[i - 1] ?? null;
-                  let lots = this._desiredLots(s, equity, px, atrValue, s.vol);
+                  // 与 atrValue 同一口径：成交发生在本根开盘，能看见的只有上一根收盘为止的信息
+                  const volValue = s.volSeries[i - 1] ?? null;
+                  let lots = this._desiredLots(s, equity, px, atrValue, volValue);
                   const marginRate = spec.marginRate ?? 0.1;
                   // 每手的占用与手续费：占用 = 价×乘数×保证金率（与手数线性），
                   // 写成 px*mult*rate*lots 再乘一次 lots 就是二次方，仓位会被莫名压到几手。

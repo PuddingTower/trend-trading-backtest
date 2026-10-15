@@ -89,13 +89,14 @@ test('walkForward：样本外用样本内选出的参数，段数与拼接曲线
   const bars = upSeries(300);
   const r = walkForward({
     bars, spec: SPEC, strategy: fakeStrategy, baseParams: {},
-    grids: { warm: [3, 30, 60] }, objective: 'net', isLen: 100, oosLen: 50, stepLen: 50
+    grids: { warm: [3, 30, 60] }, objective: 'net', isLen: 100, oosLen: 50, stepLen: 50,
+    embargoBars: 0                    // 这一条测的是滚动结构，缝宽另测；0 = 显式退回旧口径
   });
   assert.ok(!r.error, r.error || '');
   // cursor 0,50,100,150,200 → 200+100+50=350 > 300，所以到 150 为止共 4 段
   assert.eq(r.windows.length, 4, `滚动窗口数应为 4，实际 ${r.windows.length}`);
   for (const w of r.windows) {
-    assert.eq(w.oosStartIdx, w.isEndIdx + 1, '样本外必须紧接样本内之后，不许重叠');
+    assert.eq(w.oosStartIdx, w.isEndIdx + 1, '显式 0 缝宽时才允许紧接样本内之后，且不许重叠');
     assert.ok(w.best.warm !== undefined, '每段都要有选出的参数');
     assert.eq(Object.keys(w.best).length, 1);
   }
@@ -108,6 +109,26 @@ test('walkForward：样本外用样本内选出的参数，段数与拼接曲线
   assert.ok(r.summary.efficiency === null || Number.isFinite(r.summary.efficiency));
   // 参数漂移：上涨行情里 warm 越小入场越早、赚得越多，所以各段应稳定选最小值 → 漂移 0 次
   assert.eq(r.drift.warm.changes, 0, `上涨段里参数不该乱跳，实际换了 ${r.drift.warm.changes} 次`);
+});
+
+test('walkForward：auto 净化间隔把样本外推离样本内尾端', () => {
+  const bars = upSeries(300);
+  const args = { bars, spec: SPEC, strategy: fakeStrategy, baseParams: {},
+                 grids: { warm: [3, 30, 60] }, objective: 'net', isLen: 100, oosLen: 50, stepLen: 50 };
+  const r = walkForward(args);                       // 默认 embargoBars:'auto'
+  assert.ok(!r.error, r.error || '');
+  assert.ok(r.windows.length > 0, '留得出间隔就还有窗口');
+  for (const w of r.windows) {
+    assert.ok(w.embargoBars >= 1, `auto 口径下缝宽至少 1 根，实际 ${w.embargoBars}`);
+    assert.eq(w.oosStartIdx, w.isEndIdx + 1 + w.embargoBars, '样本外起点 = 样本内末根 + 1 + 缝宽');
+    assert.ok(w.oosStartIdx > w.isEndIdx + 1, '不许再贴着样本内起步：跨缝持仓会偷渡进考卷');
+    assert.ok(w.embargoBars <= (args.isLen >> 2), `缝宽不该吃掉样本内的一半以上，实际 ${w.embargoBars}`);
+  }
+  assert.ok(r.summary.minEmbargoBars >= 1, '缝宽要进报表，不能是个隐形设置');
+  const zero = walkForward({ ...args, embargoBars: 0 });
+  assert.ok(zero.windows.length > r.windows.length,
+    `零间隙能塞下更多窗口：${zero.windows.length} vs ${r.windows.length}`);
+  assert.eq(zero.windows[0].oosStartIdx, zero.windows[0].isEndIdx + 1);
 });
 
 test('walkForward：样本外权益按因子连乘，不是把各段金额相加', () => {
