@@ -89,8 +89,16 @@ export function getGroup(groups, groupId) {
   return groups.find(g => g.groupId === groupId) || groups[0] || makeGroup('默认分组', DEFAULT_GROUP_ID);
 }
 
+/** 保存分组：把「存到哪了」如实带回给界面，成功提示不许无条件弹。 */
 export async function saveGroup(group) {
-  return BarStore.putWatchlist({ ...group, updatedAt: nowISO() });
+  const r = await BarStore.putWatchlist({ ...group, updatedAt: nowISO() });
+  return r && typeof r === 'object' ? r : { ok: !!r, where: r ? 'indexeddb' : 'none' };
+}
+
+/** 存储现状（IndexedDB / localStorage 兜底 / 失败原因）。 */
+export function storageStatus() {
+  return typeof BarStore.storageStatus === 'function'
+    ? BarStore.storageStatus() : { idb: null, ls: null, note: '存储层未提供状态' };
 }
 
 export async function deleteGroup(groupId) {

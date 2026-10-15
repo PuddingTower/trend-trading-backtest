@@ -11,7 +11,7 @@
  * 线上版与本地版在这里是同一套代码，唯一差别只有 OCR 走哪条通道。
  */
 
-import { listGroups, getGroup, makeGroup, saveGroup, deleteGroup, addItem, removeItem, toItem } from '../watchlist/store.js';
+import { listGroups, getGroup, makeGroup, saveGroup, deleteGroup, addItem, removeItem, toItem, storageStatus } from '../watchlist/store.js';
 import { runOcr, analyzeLine, analyzeLines, parseTsv, crossCheck, OCR_LANGS } from '../watchlist/imageImport.js';
 import { resolveSymbol, fetchBars } from '../data/sources.js';
 import { cacheBars, barKey } from '../data/barStore.js';
@@ -50,6 +50,33 @@ export class WatchlistPanel {
     this.groups = await listGroups();
     if (!this.groups.some(g => g.groupId === this.groupId)) this.groupId = this.groups[0].groupId;
     this.render();
+    this.warnStorage();
+  }
+
+  /**
+   * 存储坏了要在进面板那一刻就说，而不是等用户刷新之后发现自选股没了。
+   * 以前 IDB 打不开、或被别的标签页攥住时所有失败都被咽掉，成功提示照样弹。
+   */
+  warnStorage() {
+    if (this._storageWarned) return;
+    const st = storageStatus();
+    if (st.idb === false || st.ls === false) {
+      this._storageWarned = true;
+      this.api.toast && this.api.toast(`⚠️ 本地存储受限：${st.note || 'IndexedDB 不可用'}。`
+        + (st.ls === true ? '自选池改用 localStorage 保存，换浏览器需重新导入。'
+                          : '本次改动不会保留 —— 请关掉旧版标签页或退出隐私模式后刷新。'));
+    }
+  }
+
+  /** 保存并把结果讲清楚：真的写进去了吗、写到哪了。 */
+  async save(group, okMsg) {
+    const r = await saveGroup(group);
+    if (this.api.toast) {
+      this.api.toast(r && r.ok
+        ? (r.where === 'indexeddb' ? okMsg : `${okMsg}（已降级存进 localStorage）`)
+        : '⚠️ 没能保存：浏览器拒绝写入本地存储（隐私模式或配额已满），本次改动只在这一页有效');
+    }
+    return r;
   }
 
   bind() {
@@ -158,7 +185,7 @@ export class WatchlistPanel {
     const name = window.prompt('新分组名称', '新分组');
     if (!name) return;
     const g = makeGroup(name);
-    await saveGroup(g);
+    await this.save(g, `已新建分组「${g.name}」`);
     this.groupId = g.groupId;
     await this.reload();
   }
@@ -168,7 +195,7 @@ export class WatchlistPanel {
     const name = window.prompt('分组名称', g.name);
     if (!name) return;
     g.name = String(name).slice(0, 24);
-    await saveGroup(g);
+    await this.save(g, '分组名已更新');
     this.render();
   }
 
@@ -186,10 +213,9 @@ export class WatchlistPanel {
     if (!raw) { this.api.toast && this.api.toast('请先输入代码，例如 600519 / sh000001 / rb2610'); return; }
     const r = addItem(this.group, raw, '');
     if (!r.ok) { this.api.toast && this.api.toast(`没能加入：${r.reason}`); return; }
-    await saveGroup(this.group);
+    await this.save(this.group, `已加入 ${r.item.name || r.item.symbol}`);
     if (el) el.value = '';
     this.render();
-    this.api.toast && this.api.toast(`已加入 ${r.item.name || r.item.symbol}`);
     this.fillNames([r.item]);
   }
 
@@ -420,8 +446,12 @@ export class WatchlistPanel {
       if (res.ok) done.push(res.item.symbol);
       else skipped.push(`${r.code}（${res.reason}）`);
     }
-    if (done.length) await saveGroup(g);
-    this.api.toast && this.api.toast(`入池 ${done.length} 条${skipped.length ? `；跳过 ${skipped.length} 条：${skipped.slice(0, 3).join('、')}` : ''}`);
+    let savedOk = true, savedWhere = 'indexeddb';
+    if (done.length) { const sr = await saveGroup(g); savedOk = !!(sr && sr.ok); savedWhere = (sr && sr.where) || 'none'; }
+    const tail = !done.length ? ''
+      : savedOk ? (savedWhere === 'indexeddb' ? '' : '（已降级存进 localStorage）')
+                : '；⚠️ 没存上：浏览器拒绝写入本地存储，刷新后会丢';
+    this.api.toast && this.api.toast(`入池 ${done.length} 条${skipped.length ? `；跳过 ${skipped.length} 条：${skipped.slice(0, 3).join('、')}` : ''}${tail}`);
     this.rows = [];
     this.view = 'list';
     await this.reload();

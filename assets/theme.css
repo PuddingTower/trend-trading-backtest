@@ -843,6 +843,22 @@ canvas#chartCanvas {
   gap: var(--md-space-3);
   margin-bottom: var(--md-space-3);
 }
+/* 下单成本/杠杆读数与反推手数（M9）：读数要跟输入框同一视觉层级，别做成弹窗 */
+.order-cost {
+  font-size: 11px;
+  line-height: 1.75;
+  color: var(--md-sys-color-on-surface-variant);
+  background: var(--md-sys-color-surface-container-low);
+  border: 1px solid var(--md-sys-color-outline);
+  border-radius: var(--md-shape-xs);
+  padding: 8px 10px;
+  margin-bottom: var(--md-space-3);
+}
+.order-cost b { color: var(--md-sys-color-on-surface); font-variant-numeric: tabular-nums; }
+.order-cost .oc-warn { color: var(--data-up-text); }
+.order-cost .oc-ok { color: var(--data-down); }
+.sizer { display: flex; gap: 6px; align-items: center; }
+.sizer .form-input { flex: 1 1 auto; min-width: 0; }
 .form-group {
   display: flex;
   flex-direction: column;

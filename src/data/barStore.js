@@ -51,7 +51,7 @@ function openDB() {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve) => {
     try {
-      if (!window.indexedDB) { dbPromise = null; resolve(null); return; }
+      if (!window.indexedDB) { dbPromise = null; storageHealth.idb = false; storageHealth.note = '浏览器未提供 IndexedDB'; resolve(null); return; }
       const req = indexedDB.open(DB_NAME, DB_VERSION);
       req.onupgradeneeded = (e) => {
         const db = e.target.result;
@@ -85,11 +85,31 @@ function openDB() {
           };
         }
       };
-      req.onsuccess = (e) => { dbHandle = e.target.result; dbPromise = null; resolve(dbHandle); };
-      req.onerror = () => { dbPromise = null; resolve(null); };
+      req.onsuccess = (e) => { dbHandle = e.target.result; dbPromise = null; storageHealth.idb = true; resolve(dbHandle); };
+      req.onerror = () => {
+        dbPromise = null; storageHealth.idb = false;
+        storageHealth.note = 'IndexedDB 打不开（' + ((req.error && req.error.name) || '未知') + '）';
+        resolve(null);
+      };
+      /**
+       * 另一个标签页攥着旧版本（尤其是拆模块之前的那份单文件版，它开的是 v1）时，
+       * open 会一直挂着 —— 没有 onblocked 的话界面只表现为"空"，谁都不知道为什么，
+       * 用户看到的就是"自选股保存不了"。
+       */
+      req.onblocked = () => {
+        storageHealth.idb = false;
+        storageHealth.note = 'IndexedDB 被其他页面占用（onblocked）';
+        console.warn('[barStore] IndexedDB 打开被阻塞：请关掉旧版标签页（尤其 file:// 打开的那份单文件版）后刷新');
+      };
+      // 版本被别处升级时主动让位，否则新标签页永远打不开
+      req.onversionchange = (e) => { try { if (e.target && e.target.result) e.target.result.close(); } catch (_) {} dbHandle = null; };
       dbHandle && dbHandle.version;
     } catch (err) {
       dbPromise = null;
+      // 走到这里通常是 file:// 或隐私模式：window/IndexedDB 根本不存在。
+      // 必须把原因记下来，否则界面只能显示"空的"，用户以为保存成功了。
+      storageHealth.idb = false;
+      storageHealth.note = 'IndexedDB 不可用：' + ((err && err.name) || '') + ' ' + ((err && err.message) || err);
       resolve(null);
     }
   });
@@ -112,6 +132,44 @@ function migrateLegacyRecord(item) {
 }
 
 const lsKey = (key) => 'kline_' + key;
+
+/**
+ * 存储健康状态：界面上必须能看见"这次到底存到哪了"。
+ * 以前所有失败都被 resolve(null) / return false 咽掉，成功提示照样弹 ——
+ * 用户只在刷新之后才发现自选股没了，而那时已经查不到是哪个环节掉的。
+ */
+export const storageHealth = { idb: null, ls: null, note: '' };
+
+const WL_LS_KEY = 'frt.watchlist.v1';
+
+/** localStorage 镜像：只给自选池用（品种代码很小），作为 IndexedDB 不可用时的兜底。 */
+function lsReadMap() {
+  try {
+    if (typeof localStorage === 'undefined') { storageHealth.ls = false; return {}; }
+    const raw = localStorage.getItem(WL_LS_KEY);
+    storageHealth.ls = true;
+    const parsed = raw ? JSON.parse(raw) : null;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (e) {
+    storageHealth.ls = false;
+    storageHealth.note = 'localStorage 不可用或已写满：' + (e && e.name || e);
+    return {};
+  }
+}
+
+function lsWriteMap(map) {
+  try {
+    if (typeof localStorage === 'undefined') return false;
+    localStorage.setItem(WL_LS_KEY, JSON.stringify(map));
+    storageHealth.ls = true;
+    return true;
+  } catch (e) {
+    // 隐私模式 / 超配额都会走到这里；状态记下来，界面要说人话而不是假装成功
+    storageHealth.ls = false;
+    storageHealth.note = 'localStorage 写入失败（隐私模式或配额已满）：' + (e && e.name || e);
+    return false;
+  }
+}
 
 export const BarStore = {
   async setCache(key, data, meta = {}) {
@@ -240,45 +298,74 @@ export const BarStore = {
     } catch (e) { return []; }
   },
 
+  /**
+   * 保存自选分组，返回 {ok, where}：where = 'indexeddb' | 'localstorage' | 'none'。
+   * 只要有一处落地就算 ok，但界面必须知道落在哪 —— IDB 被别的标签页攥住的时候，
+   * 数据其实进了 localStorage 镜像；两处都失败才是真没存上，那时不能再弹"已保存"。
+   */
+  /** 存储现状：idb / ls 各为 true|false|null（null = 还没试过），note 是失败原因。 */
+  storageStatus() { return { ...storageHealth }; },
+
   async putWatchlist(group) {
     const record = { ...group, updatedAt: new Date().toISOString() };
+    let idbOk = false;
     try {
       const db = await openDB();
-      if (!db) return false;
-      return await new Promise((resolve) => {
-        const tx = db.transaction(STORE_WATCHLIST, 'readwrite');
-        tx.objectStore(STORE_WATCHLIST).put(record);
-        tx.oncomplete = () => resolve(true);
-        tx.onerror = () => resolve(false);
-      });
-    } catch (e) { return false; }
+      if (db) {
+        idbOk = await new Promise((resolve) => {
+          const tx = db.transaction(STORE_WATCHLIST, 'readwrite');
+          tx.objectStore(STORE_WATCHLIST).put(record);
+          tx.oncomplete = () => resolve(true);
+          tx.onerror = () => resolve(false);
+          tx.onabort = () => resolve(false);
+        });
+      }
+    } catch (e) { idbOk = false; }
+    const map = lsReadMap();
+    const lsOk = lsWriteMap({ ...map, [record.groupId]: record });   // 镜像永远写一份
+    return { ok: idbOk || lsOk, where: idbOk ? 'indexeddb' : (lsOk ? 'localstorage' : 'none') };
   },
 
   async listWatchlist() {
+    let fromIdb = [];
     try {
       const db = await openDB();
-      if (!db) return [];
-      return await new Promise((resolve) => {
-        const tx = db.transaction(STORE_WATCHLIST, 'readonly');
-        const req = tx.objectStore(STORE_WATCHLIST).getAll();
-        req.onsuccess = () => resolve(req.result || []);
-        req.onerror = () => resolve([]);
-      });
-    } catch (e) { return []; }
+      if (db) {
+        fromIdb = await new Promise((resolve) => {
+          const tx = db.transaction(STORE_WATCHLIST, 'readonly');
+          const req = tx.objectStore(STORE_WATCHLIST).getAll();
+          req.onsuccess = () => resolve(req.result || []);
+          req.onerror = () => resolve([]);
+        });
+      }
+    } catch (e) { fromIdb = []; }
+    const mirror = Object.values(lsReadMap());
+    if (!mirror.length) return fromIdb;
+    const seen = new Set(fromIdb.map(g => g && g.groupId));
+    // 镜像里可能有 IDB 从没收到过的分组（第一次打开就被旧标签页阻塞的那阵子写的）。
+    // 同一个 groupId 以 IndexedDB 为准 —— 那边是主存，镜像只是兜底。
+    return fromIdb.concat(mirror.filter(g => g && !seen.has(g.groupId)));
   },
 
   /** 删除分组：自选池要能删，只给 put/list 等于给了个只能越堆越多的列表。 */
   async deleteWatchlist(groupId) {
+    let idbOk = false;
     try {
       const db = await openDB();
-      if (!db) return false;
-      return await new Promise((resolve) => {
-        const tx = db.transaction(STORE_WATCHLIST, 'readwrite');
-        tx.objectStore(STORE_WATCHLIST).delete(groupId);
-        tx.oncomplete = () => resolve(true);
-        tx.onerror = () => resolve(false);
-      });
-    } catch (e) { return false; }
+      if (db) {
+        idbOk = await new Promise((resolve) => {
+          const tx = db.transaction(STORE_WATCHLIST, 'readwrite');
+          tx.objectStore(STORE_WATCHLIST).delete(groupId);
+          tx.oncomplete = () => resolve(true);
+          tx.onerror = () => resolve(false);
+          tx.onabort = () => resolve(false);
+        });
+      }
+    } catch (e) { idbOk = false; }
+    // 镜像里要一起删：留着的话下次 list 会把已经删掉的分组又捞回来，像闹鬼
+    const map = lsReadMap();
+    if (map[groupId]) { delete map[groupId]; lsWriteMap(map); }
+    return { ok: idbOk, where: idbOk ? 'indexeddb' : 'localstorage' };
   },
 
   async putJournal(entry) {

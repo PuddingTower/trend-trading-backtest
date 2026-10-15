@@ -240,6 +240,27 @@
           </div>
         </div>
 
+        <!-- 下单前的成本与杠杆读数。期货的风险不在"买不买得到"，在杠杆那一层：
+             这些数字以前只在下单失败的报错里出现，等于让用户靠试错去理解自己开了多大仓。 -->
+        <div id="orderCost" class="order-cost" aria-live="polite"></div>
+
+        <div class="form-grid">
+          <div class="form-group">
+            <span class="form-label">按权益占比反推手数</span>
+            <div class="sizer">
+              <input type="number" id="sizeEquityPct" class="form-input" value="20" min="0" step="5" aria-label="占权益百分比" />
+              <button type="button" class="btn btn-sm" id="btnSizeEquity" title="手数 = 权益 × 占比 ÷ 每手占用保证金，算完回填到上面的手数框">占权益%</button>
+            </div>
+          </div>
+          <div class="form-group">
+            <span class="form-label">按止损风险额反推手数</span>
+            <div class="sizer">
+              <input type="number" id="sizeRiskAmt" class="form-input" value="2000" min="0" step="100" aria-label="单笔最大亏损金额" />
+              <button type="button" class="btn btn-sm" id="btnSizeRisk" title="手数 = 风险额 ÷（每手名义 × 止损%）。这是趋势交易真正该问的问题：这笔最多亏多少">风险额元</button>
+            </div>
+          </div>
+        </div>
+
         <div class="form-grid">
           <div class="form-group">
             <span class="form-label">止损 %（0=关闭）</span>
@@ -1683,14 +1704,24 @@
 
           if (line.type === 'hline') {
             const y = chart.priceToY(line.p1.price);
+            const x0 = Number.isFinite(line.fromBarIndex)
+              ? Math.max(0, Math.min(width, chart.barIndexToX(line.fromBarIndex))) : 0;
             if (line.dash) ctx.setLineDash(line.dash);
+            // 整条线满不透明、横贯绘图区：这是一笔当前有效的持仓价位，本来就该横着读。
+            // 开仓根只用小圆点 + 起点胶囊标出来，不靠"截断线段"表达来路 ——
+            // 截断法在开仓根贴着屏幕右缘时会让线几乎看不见，而这个观感成本不值得。
             ctx.beginPath();
             ctx.moveTo(0, y);
             ctx.lineTo(width, y);
             ctx.stroke();
             ctx.setLineDash([]);
-            this.drawPriceTag(ctx, line.p1.price, line.color,
-              line.role ? { entry: '开仓', sl: '止损', tp: '止盈' }[line.role] : null);
+            if (x0 > 8 && x0 < width - 8) {
+              // 只在开仓根真的落在图内时打点，否则它会在右缘糊成一个多余的色块
+              ctx.fillStyle = line.color;
+              ctx.beginPath(); ctx.arc(x0, y, 2.6, 0, Math.PI * 2); ctx.fill();
+            }
+            if (line.role) this.drawRoleChip(ctx, line, x0 > 8 && x0 < width - 90 ? x0 : 4, y);
+            this.drawPriceTag(ctx, line.p1.price, line.color);
 
           } else if (line.type === 'segment' && line.p2) {
             const p1 = this.getPointScreenXY(line.p1);
@@ -1958,7 +1989,7 @@
         const rrRatio = stopDiff > 0 ? (targetDiff / stopDiff) : 0;
 
         ctx.save();
-        // 1. 目标止盈绿色区间
+        // 1. 目标止盈区间 —— 红：涨的那一侧（与 --data-up 同色）
         const targetTop = Math.min(pEntry.y, pTarget.y);
         const targetH = Math.abs(pEntry.y - pTarget.y);
         ctx.fillStyle = 'rgba(239, 68, 68, 0.2)'; // 盈利区域
@@ -1967,7 +1998,7 @@
         ctx.lineWidth = 1.2;
         ctx.strokeRect(left, targetTop, width, targetH);
 
-        // 2. 止损风险绿色/红色区间
+        // 2. 止损风险区间 —— 绿：跌的那一侧（与 --data-down 同色）
         const stopTop = Math.min(pEntry.y, pStop.y);
         const stopH = Math.abs(pEntry.y - pStop.y);
         ctx.fillStyle = 'rgba(16, 185, 129, 0.2)'; // 止损区域
@@ -2076,20 +2107,54 @@
         ctx.restore();
       }
 
-      drawPriceTag(ctx, price, color, label) {
+      /** 线起点的小胶囊：角色 + 距开仓的百分比。价格轴那边只留价位，两处不打架。 */
+      drawRoleChip(ctx, line, x, y) {
+        const name = { entry: '开仓', sl: '止损', tp: '止盈' }[line.role] || '';
+        const pct = Number.isFinite(line.tagPct) ? ` ${line.tagPct > 0 ? '+' : ''}${line.tagPct.toFixed(1)}%` : '';
+        const text = name + pct;
+        const { chart } = this;
+        ctx.save();
+        ctx.font = '10px system-ui, -apple-system, "Microsoft YaHei", sans-serif';
+        const w = ctx.measureText(text).width + 10, h = 15;
+        const bx = Math.max(2, Math.min(x + 5, chart.mainWidth - w - 2));
+        // 止损的帽子戴在线下方，其余戴上方 —— 两条线靠得再近也不会互相盖住
+        const by = line.role === 'sl' ? y + 4 : y - h - 4;
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(bx, by, w, h, 3); else ctx.rect(bx, by, w, h);
+        ctx.fillStyle = 'rgba(18,21,28,0.88)';
+        ctx.fill();
+        ctx.strokeStyle = line.color;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.fillStyle = line.color;
+        ctx.textBaseline = 'middle';
+        ctx.fillText(text, bx + 5, by + h / 2 + 0.5);
+        ctx.restore();
+      }
+
+      /**
+       * 价格轴上的价位标签。角色线的名字已经戴在起点胶囊上了，这里只留价位：
+       * 轴宽只有 65px，"止损 4210.0" 会被裁一半，三条线的色块还糊成一片。
+       */
+      drawPriceTag(ctx, price, color) {
         const y = this.chart.priceToY(price);
         const x = this.chart.mainWidth;
-        const text = (label ? label + ' ' : '') + price.toFixed(1);
+        const w = this.chart.priceScaleWidth - 2;
 
         ctx.save();
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(x + 1, y - 8, w, 16, 2); else ctx.rect(x + 1, y - 8, w, 16);
         ctx.fillStyle = color || '#f59e0b';
-        ctx.fillRect(x + 1, y - 9, this.chart.priceScaleWidth - 2, 18);
+        ctx.globalAlpha = 0.9;
+        ctx.fill();
+        ctx.restore();
 
+        ctx.save();
         ctx.fillStyle = '#131722';
-        ctx.font = 'bold 10px monospace';
+        ctx.font = 'bold 10px Consolas, monospace';
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
-        ctx.fillText(text, x + 6, y);
+        ctx.fillText(price.toFixed(1), x + 6, y);
         ctx.restore();
       }
     }
@@ -3637,22 +3702,158 @@
         const pos = this.tradingEngine && this.tradingEngine.position;
         const slPct = parseFloat(document.getElementById('stopLossPct').value) || 0;
         const tpPct = parseFloat(document.getElementById('takeProfitPct').value) || 0;
-        const sig = pos ? [pos.direction, pos.entryPrice, slPct, tpPct].join('|') : 'flat';
+        const sig = pos ? [pos.direction, pos.entryPrice, pos.entryIndex, slPct, tpPct].join('|') : 'flat';
         if (sig === this._posLevelSig) return;
         this._posLevelSig = sig;
         dm.lines = dm.lines.filter(l => !l.role);
         if (pos && pos.entryPrice) {
           const entry = pos.entryPrice;
           const long = pos.direction === 'long';
-          const mk = (role, price, color) => ({
-            id: 'pos_' + role, type: 'hline', role,
-            p1: { barIndex: 0, price }, color, width: 1, dash: [6, 4]
+          const lv = this.levelColors();
+          // 从开仓那一根起画，不横贯全屏：它是"这笔交易"的价位，不是全局支撑压力。
+          // 叠加层那边已经吃过这个教训 —— 拖到最右边会让早就无效的线看着像当前有效。
+          const mk = (role, price, color, tagPct) => ({
+            id: 'pos_' + role, type: 'hline', role, tagPct,
+            fromBarIndex: Number.isFinite(pos.entryIndex) ? pos.entryIndex : 0,
+            p1: { barIndex: 0, price }, color, width: 1.5, dash: [7, 4]
           });
-          dm.lines.push(mk('entry', entry, '#9aa1ae'));
-          if (slPct > 0) dm.lines.push(mk('sl', long ? entry * (1 - slPct / 100) : entry * (1 + slPct / 100), '#ef4444'));
-          if (tpPct > 0) dm.lines.push(mk('tp', long ? entry * (1 + tpPct / 100) : entry * (1 - tpPct / 100), '#10b981'));
+          dm.lines.push(mk('entry', entry, lv.entry, null));
+          // 默认不止盈（0）就不画止盈线：挂一条不生效的线，只会让人以为它在起作用。
+          if (slPct > 0) dm.lines.push(mk('sl', long ? entry * (1 - slPct / 100) : entry * (1 + slPct / 100), lv.sl, -slPct));
+          if (tpPct > 0) dm.lines.push(mk('tp', long ? entry * (1 + tpPct / 100) : entry * (1 - tpPct / 100), lv.tp, tpPct));
         }
         this.chartModule.requestRender();
+      }
+
+      /**
+       * 线色跟着主题走，别在代码里写死 hex。
+       * 红涨绿跌是 A股口径：止盈在涨的那一侧所以是红，止损在跌的那一侧所以是绿
+       * （以前正好反了，和 K 线、叠加层两套语义同屏打架）。
+       */
+      levelColors() {
+        const css = getComputedStyle(document.documentElement);
+        const v = (name, fallback) => (css.getPropertyValue(name) || '').trim() || fallback;
+        return { sl: v('--data-down', '#10b981'), tp: v('--data-up', '#ef4444'), entry: v('--data-flat', '#9aa1ae') };
+      }
+
+      /**
+       * 下单前的成本与杠杆读数。
+       * 期货这一层不摆出来，"手数"就只是个数字：同样 2 手，螺纹和股指的名义差一个量级，
+       * 占用、隐含杠杆、爆仓价全都不一样。这些数以前只在下单失败的报错里露一次脸。
+       */
+      orderCostModel() {
+        const num = (id, d) => { const el = document.getElementById(id); const v = el ? parseFloat(el.value) : NaN; return Number.isFinite(v) ? v : d; };
+        const bar = this.chartModule.getCurrentBar();
+        if (!bar) return null;
+        const price = bar.close;
+        const eng = this.tradingEngine;
+        const mult = Math.abs(num('contractMultiplier', eng && eng.multiplier) || 1);
+        const rate = Math.min(1, Math.max(0.001, num('marginRatio', (eng && eng.marginRatio || 0.1) * 100) / 100));
+        const lots = Math.max(0, Math.round(num('tradeLots', 1)));
+        const feePerLot = Math.max(0, num('commissionPerLot', 0));
+        const perLotNotional = price * mult;
+        const perLotMargin = perLotNotional * rate;
+        const equity = eng.getTotalEquity(price);
+        const freeCash = Math.max(0, eng.cash);
+        const usedMargin = eng.position ? eng.position.margin : 0;
+        const orderMargin = perLotMargin * lots;
+        const orderFee = feePerLot * lots * 2;              // 一开一平，往返
+        const maxLots = perLotMargin > 0 ? Math.floor(freeCash / perLotMargin) : 0;
+        const stopPct = Math.max(0, num('stopLossPct', 0));
+        // 维持比例取 0.75（交易所常见口径）。真实结算是按当日结算价重算占用，这里给的是量级，
+        // 所以文案一律写"估算"，不装作能替代柜台。
+        const maint = 0.75;
+        const cashAfter = freeCash - orderMargin - orderFee;
+        // 杠杆要连**已有持仓**一起算：已占用保证金 ÷ 保证金率 = 已持仓名义。
+        // 只看本单的话，重仓加一笔会把风险读小一个量级。
+        const heldNotional = rate > 0.0001 ? usedMargin / rate : 0;
+        const totalNotional = heldNotional + perLotNotional * lots;
+        // 按"开多"估算：价格再跌多少，权益会掉到维持保证金线下
+        const liqDrop = (mult * lots) > 0 ? (cashAfter + orderMargin * (1 - maint)) / (mult * lots) : null;
+        const liqPrice = lots > 0 && perLotMargin > 0 ? price - liqDrop : null;
+        return { price, mult, rate, lots, perLotNotional, perLotMargin, equity, freeCash, usedMargin,
+                 heldNotional, orderMargin, orderFee, maxLots, stopPct, liqPrice,
+                 leverage: equity > 0 ? totalNotional / equity : null,
+                 riskAmt: stopPct > 0 ? perLotNotional * lots * stopPct / 100 : null,
+                 isStock: rate >= 0.999 };
+      }
+
+      syncOrderCost() {
+        this.bindOrderCostOnce();
+        const host = document.getElementById('orderCost');
+        if (!host) return;
+        const m = this.orderCostModel();
+        if (!m) { host.innerHTML = ''; return; }
+        const f = (v, d = 0) => (Number.isFinite(v) ? v.toLocaleString('zh-CN', { minimumFractionDigits: d, maximumFractionDigits: d }) : '—');
+        const row = (k, v, cls) => `<div>${k} <b${cls ? ` class="${cls}"` : ''}>${v}</b></div>`;
+        const out = [];
+        out.push('<div style="display:flex;justify-content:space-between;gap:8px;">'
+          + row('每手名义', f(m.perLotNotional) + ' 元') + row('每手占用', f(m.perLotMargin) + ' 元（' + (m.rate * 100).toFixed(0) + '%）') + '</div>');
+        out.push('<div style="display:flex;justify-content:space-between;gap:8px;">'
+          + row(`本单 ${m.lots} 手占用`, f(m.orderMargin) + ' 元') + row('往返手续费', f(m.orderFee, 1) + ' 元') + '</div>');
+        out.push('<div style="display:flex;justify-content:space-between;gap:8px;">'
+          + row('账户权益', f(m.equity) + ' 元') + row('可用现金', f(m.freeCash) + ' 元' + (m.usedMargin ? `（占用中 ${f(m.usedMargin)}）` : '')) + '</div>');
+        if (m.isStock) {
+          out.push('<div>A股/ETF 全额占用，<b class="oc-ok">无杠杆</b>；现金最多覆盖 <b>' + m.maxLots + '</b> 手（1 手 = ' + m.mult + ' 股）</div>');
+        } else {
+          out.push('<div style="display:flex;justify-content:space-between;gap:8px;">'
+            + row('总敞口杠杆' + (m.usedMargin ? '（含已持仓）' : ''), m.leverage === null ? '—' : f(m.leverage, 2) + ' 倍', m.leverage > 3 ? 'oc-warn' : 'oc-ok')
+            + row('本单最多亏', m.riskAmt === null ? '未设止损' : f(m.riskAmt) + ' 元', m.riskAmt === null ? 'oc-warn' : '') + '</div>');
+          // 账户里躺着大量闲置现金时，按公式算出来的"爆仓价"会跑到零以下 —— 那种数没有意义，
+          // 直说"打不到维持线"，别把 -390% 这种数字甩到用户脸上。
+          const liqReal = m.liqPrice !== null && m.liqPrice > 0 && m.liqPrice < m.price;
+          const liqText = m.liqPrice === null ? '—'
+            : liqReal ? `${f(m.liqPrice, 1)} 元（${f((m.liqPrice / m.price - 1) * 100, 2)}%）`
+                      : '按开多估算：跌不到维持线（闲置现金充裕）';
+          out.push('<div style="display:flex;justify-content:space-between;gap:8px;">'
+            + row('维持线价位', liqText, liqReal ? 'oc-warn' : 'oc-ok')
+            + row('资金够开吗', m.lots <= m.maxLots ? '够，上限 ' + m.maxLots + ' 手' : '不够，只能开 ' + m.maxLots + ' 手', m.lots <= m.maxLots ? 'oc-ok' : 'oc-warn') + '</div>');
+        }
+        host.innerHTML = out.join('');
+      }
+
+      bindOrderCostOnce() {
+        if (this._costBound) return;
+        this._costBound = true;
+        ['tradeLots', 'contractMultiplier', 'marginRatio', 'commissionPerLot', 'stopLossPct', 'takeProfitPct']
+          .forEach(id => { const el = document.getElementById(id); if (el) el.addEventListener('input', () => this.syncOrderCost()); });
+        const be = document.getElementById('btnSizeEquity');
+        if (be) be.addEventListener('click', () => this.sizeByEquityPct());
+        const br = document.getElementById('btnSizeRisk');
+        if (br) br.addEventListener('click', () => this.sizeByRiskAmount());
+      }
+
+      setLots(lots, msg) {
+        const el = document.getElementById('tradeLots');
+        if (!el) return;
+        el.value = String(Math.max(1, Math.min(100, lots)));
+        this.syncOrderCost();
+        this.showToast(msg);
+      }
+
+      /** 按权益占比反推：占用 = 名义 × 保证金率，杠杆越高同样占比能开的越多 —— 这正是要提醒的地方。 */
+      sizeByEquityPct() {
+        const m = this.orderCostModel();
+        if (!m || !(m.perLotMargin > 0)) { this.showToast('算不出来：每手占用为 0'); return; }
+        const pct = parseFloat(document.getElementById('sizeEquityPct').value) || 0;
+        if (!(pct > 0)) { this.showToast('先填占权益的百分比'); return; }
+        const lots = Math.floor(m.equity * (pct / 100) / m.perLotMargin);
+        if (lots < 1) { this.showToast(`权益 ${Math.round(m.equity)} 的 ${pct}% 还不够 1 手占用（${Math.round(m.perLotMargin)} 元/手）`); return; }
+        this.setLots(lots, `占权益 ${pct}% → ${lots} 手｜占用 ${Math.round(lots * m.perLotMargin)} 元｜杠杆 ${(lots * m.perLotNotional / m.equity).toFixed(2)} 倍`);
+      }
+
+      /** 按止损风险额反推：先回答"这笔最多亏多少"，再倒推手数 —— 这才是趋势交易的仓位观。 */
+      sizeByRiskAmount() {
+        const m = this.orderCostModel();
+        if (!m) return;
+        const stopPct = parseFloat(document.getElementById('stopLossPct').value) || 0;
+        if (!(stopPct > 0)) { this.showToast('这条要先设止损 %：没有止损就没有"最多亏多少"'); return; }
+        const risk = parseFloat(document.getElementById('sizeRiskAmt').value) || 0;
+        if (!(risk > 0)) { this.showToast('先填可承受的风险额（元）'); return; }
+        const per = m.perLotNotional * stopPct / 100;
+        const lots = Math.floor(risk / per);
+        if (lots < 1) { this.showToast(`风险额 ${risk} 元撑不起 1 手：1 手在 ${stopPct}% 止损下就亏 ${Math.round(per)} 元`); return; }
+        this.setLots(lots, `风险 ${risk} 元 ÷ 止损 ${stopPct}% → ${lots} 手｜实际风险 ${Math.round(lots * per)} 元｜杠杆 ${(lots * m.perLotNotional / m.equity).toFixed(2)} 倍`);
       }
 
       /** 推进一根后检查止损/止盈：读图上的线（拖过就按拖后的价），穿越即按线价平仓。同根同时穿越时优先止损。 */
@@ -3684,11 +3885,40 @@
         }
       }
 
+      /**
+       * 条件单在途状态。
+       * 这个方法在 69a05d7（M3 主题那次 wip 存档）里被整段删掉，但 syncUI 里的调用还在 ——
+       * 于是每次开仓/平仓/推进都会抛 "not a function"，手动复盘这条路整个是坏的。
+       * 颜色改用 M3 令牌，不再用 legacy aliases。
+       */
+      renderConditionalStatus() {
+        const badge = document.getElementById('condBadge');
+        const list = document.getElementById('condOrderList');
+        if (!badge || !list) return;
+        const pos = this.tradingEngine.position;
+        const orders = (pos && pos.orders) || [];
+        const idle = 'background:var(--md-sys-color-surface-container-high); color:var(--md-sys-color-on-surface-variant);';
+        if (!pos) { badge.textContent = '无持仓'; badge.style.cssText = idle; list.innerHTML = ''; return; }
+        if (!orders.length) {
+          badge.textContent = '未挂单'; badge.style.cssText = idle;
+          list.innerHTML = '<div>未挂条件单。持仓裸奔时，出场全靠你自己按。</div>';
+          return;
+        }
+        badge.textContent = `${orders.length} 张在途`;
+        badge.style.cssText = 'background:var(--md-sys-color-primary-container); color:var(--md-sys-color-primary);';
+        const dir = pos.direction === 'long' ? 1 : -1;
+        list.innerHTML = orders.map(o => {
+          const dist = ((o.price - pos.entryPrice) / pos.entryPrice * 100 * dir).toFixed(2);
+          return `<div>· <b>${o.label}</b> ${o.price}${o.qtyLots && o.qtyLots < pos.lots ? `（平 ${o.qtyLots}/${pos.lots} 手）` : ''} <span style="color:var(--md-sys-color-on-surface-variant);">距均价 ${dist}%</span></div>`;
+        }).join('') + (pos.trailCfg ? `<div style="color:var(--md-sys-color-primary);">· 移动止损 ${((pos.trailCfg.pct || 0) * 100).toFixed(1)}% → 当前 ${pos.stop ?? '—'}</div>` : '');
+      }
+
       syncUI() {
         this.syncPositionLevels();
         const bar = this.chartModule.getCurrentBar();
         const currentPrice = bar ? bar.close : 4200;
         this.renderConditionalStatus();
+        this.syncOrderCost();
         this.syncBlindUI();
 
         if (bar) {
