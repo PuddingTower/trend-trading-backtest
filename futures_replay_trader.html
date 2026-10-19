@@ -61,6 +61,7 @@
           <option value="monthly">月线</option>
           <option value="4h">4小时</option>
           <option value="60m">60分钟</option>
+          <option value="4h" title="东财没有 4 小时这个周期，由 60 分钟按自然 4 小时块本地合成">4小时(60m合成)</option>
         </select>
         <select id="adjustSelect" title="价格复权口径（A股）；期货用主连拼接" aria-label="价格复权口径">
           <option value="hfq" selected>后复权</option>
@@ -558,6 +559,7 @@
               <option value="weekly">周线</option>
               <option value="monthly">月线</option>
               <option value="60m">60分钟</option>
+              <option value="4h">4小时</option>
             </select>
             <button class="btn btn-primary" id="btnTriggerFetchOnline">立即拉取并缓存</button>
           </div>
@@ -3174,8 +3176,10 @@
           const negNote = negCount > 0
             ? `｜⚠ 有 ${negCount} 根价格 ≤0，对数轴不成立、本次已退回线性（轴上标了「线性」）；要回对数口径请切「后复权」或「不复权」`
             : '';
+          const depth = this.dataDepthNote(parsed, period, out);
           this.applyDataToChart(out.bars, label,
-            `🎉 ${label} 同步成功：${out.bars.length} 根K线（源:${src}，末根 ${out.bars[out.bars.length - 1].date}）${negNote}${out.caveat ? `｜⚠ ${out.caveat}` : ''}`);
+            `🎉 ${label} 同步成功：${out.bars.length} 根K线（源:${src}，起 ${String(out.bars[0].date).slice(0, 10)}，末根 ${out.bars[out.bars.length - 1].date}）`
+            + `${depth ? `｜${depth}` : ''}${negNote}${out.caveat ? `｜⚠ ${out.caveat}` : ''}${out.note ? `｜${out.note}` : ''}`);
           this.warnIfThinHistory(parsed, out.bars, period);
           this.refreshCacheListUI();
           return;
@@ -3201,7 +3205,9 @@
        */
       async acquireBars(parsed, symbol, period, adjust, forceOnline) {
         return resolveBars({ market: parsed.market, symbol, secid: parsed.secid,
-                             sinaSymbol: parsed.sinaCode, period, adjust, forceOnline });
+                             sinaSymbol: parsed.sinaCode, period, adjust, forceOnline,
+                             // 期货日线顺带用新浪补交易所结算价；60m/4h 没有结算价可补
+                             withSettlement: parsed.market === MARKETS.FUTURES && period === 'daily' });
       }
 
       /**
@@ -3302,16 +3308,36 @@
       }
 
 
+      /**
+       * 「为什么只有这么点数据」的答案，必须写在同步成功的提示里，而不是让人自己猜。
+       * 两种短法完全不同：月份合约短是市场事实（换主连就有几年），分钟线短是上游只给最近一段。
+       */
+      dataDepthNote(parsed, period, out) {
+        const bits = [];
+        const bars = out.bars || [];
+        if (out.pages) bits.push(`分钟线往前回填了 ${out.pages} 页`);
+        if (out.exhausted && bars.length < 400) {
+          bits.push(`东财分钟线只到 ${String(bars[0] && bars[0].date || '').slice(0, 10)} 为止，再往前没有了 —— 要跑长周期分钟回测请走 CSV 导入`);
+        }
+        if (parsed && parsed.market === 'futures' && !parsed.isDominant && bars.length < 400) {
+          bits.push(`这是具体月份合约，只有上市以来那几个月 —— 想回测几年改用主连（如 ${parsed.variety}0）`);
+        }
+        return bits.join('；');
+      }
+
       applyDataToChart(bars, symbol, toastMsg) {
         this._loadedBars = bars;                       // 全量留存，切换起点时免重新拉取
         const years = parseFloat(document.getElementById('startOffset').value) || 0;
         let view = bars;
         if (years > 0 && bars.length > 0) {
-          const last = new Date(bars[bars.length - 1].date);
-          if (!isNaN(last)) {
-            const cutoff = new Date(last);
-            cutoff.setMonth(cutoff.getMonth() - Math.round(years * 12));
-            const sliced = bars.filter(b => new Date(b.date) >= cutoff);
+          // 只按字符串切：60m/4h 的 date 是 '2026-10-14 10:30' 这种形状，
+          // Safari（iPad）下 new Date() 直接给 Invalid Date，起点选择会整个失效。
+          const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(bars[bars.length - 1].date));
+          if (m) {
+            const cut = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+            cut.setUTCMonth(cut.getUTCMonth() - Math.round(years * 12));
+            const cutStr = cut.toISOString().slice(0, 10);
+            const sliced = bars.filter(b => String(b.date).slice(0, 10) >= cutStr);
             if (sliced.length >= 30) view = sliced;    // 切完太窄会没图可看，回退全量
           }
         }
@@ -3330,7 +3356,7 @@
             container.innerHTML = `<div style="color:var(--text-muted); text-align:center; padding:8px;">暂无本地缓存数据。可点击上方【🌐 在线同步】抓取真实行情并自动缓存。</div>`;
             return;
           }
-          const PERIOD_CN = { daily: '日线', weekly: '周线', monthly: '月线', '60m': '60分钟' };
+          const PERIOD_CN = { daily: '日线', weekly: '周线', monthly: '月线', '60m': '60分钟', '4h': '4小时' };
           const ADJUST_CN = { none: '不复权', qfq: '前复权', hfq: '后复权' };
           // 按末根日期倒序：最近抓过的排前面，用户才找得到
           list.sort((a, b) => String(b.lastDate || b.updateTime || '').localeCompare(String(a.lastDate || a.updateTime || '')));

@@ -71,3 +71,49 @@ test('localStorage 也写不进（配额/隐私）时：必须报 ok:false，不
   assert.eq(r.where, 'none');
   globalThis.localStorage = good;
 });
+
+// ---------- 月份合约 → 主连（「日线只有一个月，没法回测」的正解） ----------
+const { toDominant, toItem } = await import('../src/watchlist/store.js');
+
+test('toDominant：截图里那批月份合约全部换成同品种主连', () => {
+  const cases = [
+    ['rb2701', '113.rbm'], ['i2701', '114.im'], ['SA701', '115.SAm'], ['FG701', '115.FGm'],
+    ['TA701', '115.TAm'], ['MA701', '115.MAm'], ['fu2701', '113.fum'], ['p2701', '114.pm'],
+    ['m2701', '114.mm'], ['lc2701', '225.lcm'], ['al2612', '113.alm']
+  ];
+  for (const [raw, want] of cases) {
+    const src = toItem(raw, '');
+    assert.ok(src.ok, `${raw} 本身就该能入池：${src.reason}`);
+    const dom = toDominant(src.item);
+    assert.ok(dom, `${raw} 应该能换成主连`);
+    assert.eq(dom.secid, want, `${raw} 换出来的主连不对`);
+    assert.eq(dom.isDominant, true, `${raw} → ${dom.openCode} 必须是主连，否则历史照样短`);
+  }
+});
+
+test('toDominant：已经是主连的原样返回 null，不许把 rbm 再换一次换出个别的', () => {
+  const dom = toItem('RB0', '');
+  assert.ok(dom.ok && dom.item.isDominant);
+  assert.eq(toDominant(dom.item), null);
+});
+
+test('toDominant：A股与解析不出品种的，返回 null 而不是硬凑一个代码', () => {
+  assert.eq(toDominant({ market: 'ashare', symbol: '600519', openCode: '600519' }), null);
+  assert.eq(toDominant({ market: 'futures', symbol: '???' }), null);
+  assert.eq(toDominant(null), null);
+});
+
+test('openCode 回喂必须落回同一个 secid（铁矿石主连 im 会被判成中证1000，是这条的真实由来）', async () => {
+  const { FUTURES_SPECS } = await import('../src/markets/contractSpecs.js');
+  const { parseSymbol } = await import('../src/markets/symbolMeta.js');
+  const bad = [];
+  for (const variety of Object.keys(FUTURES_SPECS)) {
+    const res = toItem(`${variety}0`, '');
+    if (!res.ok) { bad.push(`${variety}0 解析失败：${res.reason}`); continue; }
+    const back = parseSymbol(res.item.openCode);
+    if (!back.ok || back.secid !== res.item.secid) {
+      bad.push(`${variety}0 → openCode=${res.item.openCode} → 回喂成 ${back.ok ? back.secid + '(' + back.name + ')' : '失败'}`);
+    }
+  }
+  assert.ok(!bad.length, `这些品种点「看盘」会打开另一个品种：\n        ${bad.join('\n        ')}`);
+});

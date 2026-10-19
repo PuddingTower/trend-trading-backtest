@@ -13,6 +13,7 @@ const HEADER_MATCHERS = {
   close: ['close', 'c', '收盘', '收盘价'],
   volume: ['vol', 'volume', '量', '成交量', '成交'],
   amount: ['amount', 'amt', '额', '成交额'],
+  settlement: ['settlement', 'settle', '结算价', '结算'],
   symbol: ['symbol', 'code', '代码', '合约', '品种'],
   name: ['name', '名称', '品种名']
 };
@@ -60,6 +61,10 @@ export function parseCSV(text) {
       volume: idx.volume !== -1 ? (parseFloat(row[idx.volume]) || 0) : 50000
     };
     if (idx.amount !== -1) bar.amount = parseFloat(row[idx.amount]) || 0;
+    if (idx.settlement !== -1) {
+      const s = parseFloat(row[idx.settlement]);
+      if (Number.isFinite(s) && s > 0) bar.settlement = s;
+    }
     if (!Number.isFinite(bar.open) || !Number.isFinite(bar.high) ||
         !Number.isFinite(bar.low) || !Number.isFinite(bar.close)) continue;
     if (!bar.date) continue;

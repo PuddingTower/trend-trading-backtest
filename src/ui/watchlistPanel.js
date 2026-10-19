@@ -11,7 +11,7 @@
  * 线上版与本地版在这里是同一套代码，唯一差别只有 OCR 走哪条通道。
  */
 
-import { listGroups, getGroup, makeGroup, saveGroup, deleteGroup, addItem, removeItem, toItem, storageStatus } from '../watchlist/store.js';
+import { listGroups, getGroup, makeGroup, saveGroup, deleteGroup, addItem, removeItem, toItem, storageStatus, toDominant } from '../watchlist/store.js';
 import { runOcr, analyzeLine, analyzeLines, parseTsv, crossCheck, OCR_LANGS } from '../watchlist/imageImport.js';
 import { resolveSymbol } from '../data/sources.js';
 import { resolveBars } from '../data/periods.js';
@@ -103,6 +103,7 @@ export class WatchlistPanel {
       else if (act === 'clearRows') { this.rows = []; this.renderImport(); }
       else if (act === 'toggleRow') this.onToggleRow(el.dataset.idx);
       else if (act === 'pullGroup') this.onBatchPull();
+      else if (act === 'toDominant') this.onConvertDominant();
     });
     this.root.addEventListener('change', (e) => {
       const el = e.target.closest('[data-wl]');
@@ -156,6 +157,7 @@ export class WatchlistPanel {
         <input id="wlAddInput" placeholder="代码：600519 / sh000001 / rb2610 / 螺纹钢主连" style="${inp}flex:1;min-width:220px;" />
         <button class="btn btn-sm" style="${btnHi}" data-wl="addItem">＋ 加入自选</button>
         <button class="btn btn-sm" style="${btn}" data-wl="pullGroup">🔽 批量拉本组日线</button>
+        <button class="btn btn-sm" style="${btn}" data-wl="toDominant" title="把本组的具体月份合约（rb2701 这种）换成同品种主连：月份合约只有上市以来几个月，主连才有几年日线可回测">🔁 月份合约换主连</button>
       </div>`;
     if (!g.items.length) {
       return adder + `<div style="color:var(--text-muted);padding:18px;text-align:center;border:1px dashed var(--border-color);border-radius:6px;">
@@ -281,6 +283,35 @@ export class WatchlistPanel {
     }
     this.busy = '';
     this.api.toast && this.api.toast(`批量拉取完成：成功 ${ok}／${items.length}${fail.length ? `，失败 ${fail.join('、')}` : ''}`);
+    this.render();
+  }
+
+  /**
+   * 一键把本组的月份合约换成同品种主连。
+   *
+   * 顺序不动、已是主连的原样保留；换出来发现主连已经在组里，就把这条月份合约丢掉
+   * 并说出来 —— 留着两个指向同一品种的条目，批量拉数据时会白拉一遍。
+   */
+  async onConvertDominant() {
+    const g = this.group;
+    const items = [];
+    const done = [], kept = [], dropped = [];
+    for (const it of (g.items || [])) {
+      const dom = toDominant(it);
+      if (!dom) { items.push(it); kept.push(it); continue; }
+      if (items.some(x => x.secid === dom.secid)) {
+        dropped.push(`${it.openCode || it.symbol}（与 ${dom.openCode} 重复）`);
+        continue;
+      }
+      items.push(dom);
+      done.push(`${it.openCode || it.symbol}→${dom.openCode}`);
+    }
+    if (!done.length && !dropped.length) {
+      this.api.toast && this.api.toast('本组没有可换主连的月份合约（要么已经是主连，要么代码里没有品种字母）');
+      return;
+    }
+    g.items = items;
+    await this.save(g, `已换 ${done.length} 个主连${dropped.length ? `，丢掉 ${dropped.length} 个重复` : ''}`);
     this.render();
   }
 

@@ -18,7 +18,8 @@ def fetch_sina_futures_daily(symbol):
     通过新浪财经公开接口拉取国内期货真实日K线历史数据
     """
     clean_symbol = symbol.strip().upper()
-    url = f"https://stock2.finance.sina.com.cn/futures/api/jsonp.php/var%20_data=/IndexService.getInnerFuturesDailyKLine?symbol={clean_symbol}"
+    # 日线服务名：旧的 IndexService.getInnerFuturesDailyKLine 已失效（Invalid service name）
+    url = f"https://stock2.finance.sina.com.cn/futures/api/jsonp.php/var%20_data=/InnerFuturesNewService.getDailyKLine?symbol={clean_symbol}"
     
     print(f"正在从新浪行情服务器获取 {clean_symbol} 真实K线数据...")
     req = urllib.request.Request(
@@ -54,7 +55,8 @@ def save_to_csv(symbol, raw_data, output_dir="./"):
     filename = os.path.join(output_dir, f"{symbol}_daily.csv")
     with open(filename, 'w', newline='', encoding='utf-8-sig') as f:
         writer = csv.writer(f)
-        writer.writerow(['date', 'open', 'high', 'low', 'close', 'volume'])
+        # settlement 是新浪日线的交易所结算价；早年可能为 0，导入端会忽略非正值
+        writer.writerow(['date', 'open', 'high', 'low', 'close', 'volume', 'settlement'])
         for item in raw_data:
             writer.writerow([
                 item.get('d', ''),
@@ -62,7 +64,8 @@ def save_to_csv(symbol, raw_data, output_dir="./"):
                 item.get('h', ''),
                 item.get('l', ''),
                 item.get('c', ''),
-                item.get('v', '0')
+                item.get('v', '0'),
+                item.get('s', '')
             ])
     print(f"💾 数据已导出至 CSV: {filename}")
 

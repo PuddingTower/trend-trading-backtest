@@ -29,32 +29,49 @@ export function makeGroup(name = '新分组', groupId) {
   };
 }
 
+/**
+ * openCode 是「下次要喂给解析器的原文」，所以它必须能原样喂回去、落回同一个 secid。
+ *
+ * 铁矿石主连是最尖锐的反例：主连代码 im 再解析一次会被判成中证1000股指（IM 自己就是个品种），
+ * 于是「加入自选 → 点看盘」会打开另一个品种。A股 000001 的同码多义早就带前缀防住了，
+ * 期货这一类一直没管。换不到稳定写法时退回 <品种>0 —— 期货品种的 0 结尾恒等于主连。
+ */
+function stableOpenCode(parsed, first) {
+  const hits = (c) => { const p = parseSymbol(c); return !!(p.ok && p.secid === parsed.secid); };
+  if (hits(first)) return first;
+  const alt = parsed.market === 'futures' && parsed.variety ? `${parsed.variety}0` : null;
+  if (alt && hits(alt)) return alt;
+  return first;
+}
+
+/** 解析结果 → 品种项。toItem 与 toDominant 共用，避免两条路各造一份字段。 */
+export function itemFromParsed(parsed, nameHint = '') {
+  // 存一份「再次打开时该喂什么」的原文：000001 直接回喂会被重新判成沪市指数，
+  // 同码多义的品种必须带上交易所前缀才能稳定回到用户当初确认的那一个。
+  const raw = parsed.market === 'ashare' && parsed.ambiguous && parsed.exchange
+    ? `${String(parsed.exchange).toLowerCase()}${parsed.code}`
+    : (parsed.code || parsed.contractCode);
+  return {
+    secid: parsed.secid,
+    symbol: parsed.code || parsed.contractCode,
+    openCode: stableOpenCode(parsed, raw),
+    name: parsed.name || (nameHint ? String(nameHint).trim() : ''),
+    market: parsed.market,
+    kind: parsed.kind || (parsed.market === 'futures' ? 'futures' : undefined),
+    board: parsed.board,
+    exchange: parsed.exchange,
+    isDominant: parsed.isDominant,
+    // 新浪那条兜底通道只认 <品种>0，跟东财的 <品种>m 不通用，所以入池时就存下来
+    sinaCode: parsed.sinaCode,
+    ambiguous: parsed.ambiguous || undefined
+  };
+}
+
 /** 一条候选文本 → 可直接入库的品种项。解析权全交给 symbolMeta，这里不写正则。 */
 export function toItem(rawCode, nameHint = '') {
   const parsed = parseSymbol(String(rawCode || '').trim(), nameHint);
   if (!parsed.ok) return { ok: false, reason: parsed.reason || '无法解析', input: rawCode };
-  // 存一份「再次打开时该喂什么」的原文：000001 直接回喂会被重新判成沪市指数，
-  // 同码多义的品种必须带上交易所前缀才能稳定回到用户当初确认的那一个。
-  const openCode = parsed.market === 'ashare' && parsed.ambiguous && parsed.exchange
-    ? `${String(parsed.exchange).toLowerCase()}${parsed.code}`
-    : (parsed.code || parsed.contractCode);
-  return {
-    ok: true,
-    item: {
-      secid: parsed.secid,
-      symbol: parsed.code || parsed.contractCode,
-      openCode,
-      name: parsed.name || (nameHint ? String(nameHint).trim() : ''),
-      market: parsed.market,
-      kind: parsed.kind || (parsed.market === 'futures' ? 'futures' : undefined),
-      board: parsed.board,
-      exchange: parsed.exchange,
-      isDominant: parsed.isDominant,
-      // 新浪那条兜底通道只认 <品种>0，跟东财的 <品种>m 不通用，所以入池时就存下来
-      sinaCode: parsed.sinaCode,
-      ambiguous: parsed.ambiguous || undefined
-    }
-  };
+  return { ok: true, item: itemFromParsed(parsed, nameHint) };
 }
 
 /**
@@ -76,6 +93,25 @@ export function removeItem(group, secid) {
   group.items = (group.items || []).filter(i => i.secid !== secid);
   group.updatedAt = nowISO();
   return before !== (group.items || []).length;
+}
+
+/**
+ * 月份合约 → 同品种主连。
+ *
+ * 存在的理由是一句很具体的抱怨：自选池里放的是 rb2701、SA701 这类具体月份，
+ * 日线只有上市以来那几个月，回测根本跑不出东西。市场事实改不了，能改的是
+ * 让他一键换成同品种主连，而不是把十几个代码重新手输一遍。
+ *
+ * 只剥字母前缀、不猜月份：解析权仍然全交给 symbolMeta，剥完解析不出主连就返回 null。
+ */
+export function toDominant(item) {
+  if (!item || item.market !== 'futures' || item.isDominant) return null;
+  const letters = /^[A-Za-z]+/.exec(String(item.openCode || item.symbol || ''));
+  if (!letters) return null;
+  const parsed = parseSymbol(`${letters[0].toUpperCase()}0`);
+  if (!parsed.ok || !parsed.isDominant) return null;
+  // 直接吃解析结果，不再把主连代码回喂给 toItem：'im' 回喂一次就成了中证1000股指
+  return itemFromParsed(parsed, parsed.name || '');
 }
 
 /** 列表永远至少有一个可写的分组，否则新用户进来无处可加。 */

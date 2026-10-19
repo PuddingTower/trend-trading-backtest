@@ -7,6 +7,8 @@
  * 所以在撮合之前先把数据问一遍，比事后调参数有用得多。
  */
 
+import { builtinCalendar, calendarCoverage } from './tradingCalendar.js';
+
 const dayKey = (d) => String(d || '').slice(0, 10);
 
 /** 两个日期之间的自然日差（yyyy-mm-dd 前缀可直接字典序比较，不需要 new Date，避免 Safari 解析陷阱）。 */
@@ -23,14 +25,35 @@ export function calendarDayGap(fromDate, toDate) {
  * 为什么必须给参照：**光看本品种自己的 bar 序列分不出停牌和长假** ——
  * 春节/国庆的缺口能有 8~12 个自然日，比很多停牌还长。凭"缺口 > N 天"判停牌，
  * 会把每个长假都标成停牌，然后回测里那些天全部不成交，看起来反而更"真实"，
- * 而这恰恰是假的。没有参照时本函数如实返回 calendarKnown=false，让上层去提示而不是猜。
+ * 而这恰恰是假的。
+ *
+ * 现在有三层：
+ *   1. 调用方给了 refBars → 用参照序列（最准，能知道同市场其他品种停没停）；
+ *   2. 没给参照、但日期落在内置日历覆盖范围 → 用内置 A股/期货日历；
+ *   3. 都覆盖不了 → calendarKnown:false，让上层提示而不是猜。
+ *
+ * `own` 永远是本品种自己的日期集合，调用方拿它判断"这根 bar 到底存不存在"。
  */
-export function tradingCalendarOf(bars, refBars) {
-  const own = new Set((bars || []).map(b => dayKey(b.date)));
+export function tradingCalendarOf(bars, refBars, { market = 'ashare' } = {}) {
+  const own = new Set((bars || []).map(b => dayKey(b.date)).filter(Boolean));
   const ref = (refBars || []).map(b => dayKey(b.date)).filter(Boolean);
-  const calendarKnown = ref.length > 0;
-  const dates = calendarKnown ? [...new Set(ref)].sort() : [...own].sort();
-  return { dates, own, calendarKnown };
+  if (ref.length) {
+    return { dates: [...new Set(ref)].sort(), own, calendarKnown: true, calendarSource: 'ref', calendarReason: null };
+  }
+  const sorted = [...own].sort();
+  if (!sorted.length) {
+    return { dates: [], own, calendarKnown: false, calendarSource: 'own', calendarReason: '没有可用的 bar 日期' };
+  }
+  const builtin = builtinCalendar(sorted[0], sorted[sorted.length - 1], market);
+  if (builtin) {
+    return { dates: builtin.dates, own, calendarKnown: true, calendarSource: 'builtin',
+             calendarLabel: builtin.label, calendarReason: null };
+  }
+  const cov = calendarCoverage(market);
+  return {
+    dates: sorted, own, calendarKnown: false, calendarSource: 'own',
+    calendarReason: `${cov.label}内置日历只覆盖 ${cov.first} → ${cov.last}，本次数据超出该范围`
+  };
 }
 
 /**
@@ -39,7 +62,7 @@ export function tradingCalendarOf(bars, refBars) {
  *   有参照时：参照有、自己没有 → bar 上挂 suspended 语义（用 suspendedBefore 表示"这根之前停牌了多少天"）。
  *   没有参照时：只把 ≥ minSuspensionDays 的自然日缺口记进 longGaps，并明确标为"无法与长假区分"。
  */
-export function annotateGaps(bars, { refBars = null, minSuspensionDays = 4 } = {}) {
+export function annotateGaps(bars, { refBars = null, minSuspensionDays = 4, market = 'ashare' } = {}) {
   // 相等时必须返回 0：ES2019 起 Array#sort 稳定，同一天内的多根 bar 才会保持原顺序。
   // 原来写成 `? -1 : 1` 永不返回 0，分钟级序列里同一天的 bar 会被任意重排，
   // prevClose 就挂到了当天随便一根上 —— 停牌/缺口判定跟着一起错。
@@ -47,7 +70,8 @@ export function annotateGaps(bars, { refBars = null, minSuspensionDays = 4 } = {
     const x = dayKey(a.date), y = dayKey(b.date);
     return x < y ? -1 : x > y ? 1 : 0;
   });
-  const { dates, own, calendarKnown } = tradingCalendarOf(list, refBars);
+  const { dates, own, calendarKnown, calendarSource, calendarLabel, calendarReason } =
+    tradingCalendarOf(list, refBars, { market });
   const suspensions = [], longGaps = [];
   const dateSet = new Set(list.map(b => dayKey(b.date)));
   let pendingMissing = 0;
@@ -73,18 +97,22 @@ export function annotateGaps(bars, { refBars = null, minSuspensionDays = 4 } = {
       const prev = list[i - 1];
       next.prevClose = prev.close;
       next.gapNaturalDays = calendarDayGap(dayKey(prev.date), key);
+      const missingDays = pendingMissing;   // 下面会清零，判定要用清零前的值
       if (calendarKnown && pendingMissing > 0) {
         next.suspendedDays = pendingMissing;
         next.resumedAfterSuspension = true;
         pendingMissing = 0;
       }
-      // 缺口长到前收盘价已经不代表"昨天的市场"：拿它算涨跌停价是错的，标出来让撮合层跳过板锁判定
-      if (next.gapNaturalDays >= minSuspensionDays + 4) next.stalePrevClose = true;
+      // 缺口长到前收盘价已经不代表"昨天的市场"：拿它算涨跌停价是错的，标出来让撮合层跳过板锁判定。
+      // 有日历时按「缺了几个交易日」判，不能按自然日：国庆 8 天是休市，前收盘仍是有效的板幅基准；
+      // 只有真的停牌了若干交易日，复牌首日才需要跳过板锁。
+      if (calendarKnown && missingDays >= minSuspensionDays) next.stalePrevClose = true;
+      else if (!calendarKnown && next.gapNaturalDays >= minSuspensionDays + 4) next.stalePrevClose = true;
     }
     return next;
   });
 
-  return { bars: out, suspensions, longGaps, calendarKnown };
+  return { bars: out, suspensions, longGaps, calendarKnown, calendarSource, calendarLabel, calendarReason };
 }
 
 /**
@@ -123,10 +151,70 @@ export function checkAdjustmentContinuity(bars, { limitPct = 0.10, tol = 0.02 } 
     note: issues.length
       ? `发现 ${issues.length} 处超过涨跌停幅度的隔夜跳空（最大 ${(Math.max(...issues.map(x => Math.abs(x.jump))) * 100).toFixed(1)}%）。`
         + '这种价格变化在市场上不可能发生，几乎可以断定是**送转/分红未复权**。'
-        + '请把复权切到"前复权"再回测，否则这些断崖会被当成真跌破/真突破。'
+        + '请把复权切到"前复权"再回测；如果数据源本身就没复权，可在数据体检里勾选「修复杂复权断崖」按因子接回。'
       : (skipped
         ? `连续性比对跳过了 ${skipped} 对（前收或开盘不是正数，没法算比值）—— 详见价格有效性检查。`
         : '未发现超出板幅的隔夜跳空，复权口径看起来是连续的。')
+  };
+}
+
+/**
+ * 把「超过板幅的隔夜跳空」按复权因子接回去 —— 从只能报警升级为可以修数。
+ *
+ * 口径：前复权本来就是用除权/除息因子把历史价格缩放到最新价位。如果某天开盘相对前收
+ * 出现市场上不可能的跳空（超过涨跌停 + 容差），就按 `开盘 / 前收` 把这一天之前的所有价格
+ * 同比例缩放，使前收等于当天开盘。对 10 送 10 就是把历史腰斩、对分红就是把历史按比例下调，
+ * 这正是前复权该做的事。
+ *
+ * 三条边界：
+ *   - 只修价格字段（OHLC + settlement），不动 volume / amount：成交额是当时真实发生的钱；
+ *   - 比率超出 [1/maxRatio, maxRatio] 的不碰 —— 那更像数据错位/代码错配，不是除权；
+ *   - 这是**显式操作**，调用方（数据体检的勾选框）必须让用户知道改了什么。
+ *
+ * @returns {{bars:Array, fixes:Array, skipped:Array, changed:boolean, note:string}}
+ */
+export function repairAdjustmentGaps(bars, { limitPct = 0.10, tol = 0.02, maxRatio = 4 } = {}) {
+  const out = (bars || []).map(b => ({ ...b }));
+  if (!(limitPct > 0)) {
+    return { bars: out, fixes: [], skipped: [], changed: false, note: '该品种无涨跌幅限制，未做复权修正' };
+  }
+  const ceiling = limitPct + tol;
+  const fixes = [], skipped = [];
+  const round6 = (v) => Math.round(v * 1e6) / 1e6;
+  const derived = ['prevClose', 'gapNaturalDays', 'suspendedDays', 'resumedAfterSuspension',
+                   'stalePrevClose', 'ma5', 'ma10', 'ma20'];
+
+  for (let i = 1; i < out.length; i++) {
+    const prev = out[i - 1], cur = out[i];
+    if (!(prev.close > 0) || !(cur.open > 0)) continue;
+    const ratio = cur.open / prev.close;
+    if (Math.abs(ratio - 1) <= ceiling) continue;
+    if (!(ratio > 0) || ratio > maxRatio || ratio < 1 / maxRatio) {
+      skipped.push({ idx: i, date: dayKey(cur.date), ratio: Math.round(ratio * 1e4) / 1e4 });
+      continue;
+    }
+    for (let j = 0; j < i; j++) {
+      const b = out[j];
+      for (const k of ['open', 'high', 'low', 'close', 'settlement']) {
+        if (Number.isFinite(b[k])) b[k] = round6(b[k] * ratio);
+      }
+      for (const k of derived) delete b[k];
+    }
+    fixes.push({
+      idx: i, date: dayKey(cur.date), prevDate: dayKey(prev.date),
+      ratio: Math.round(ratio * 1e6) / 1e6,
+      jump: Math.round((ratio - 1) * 1e4) / 1e4,
+      scaledBars: i
+    });
+  }
+  // 修过价格后，已标注的 prevClose / MA 都是旧值；整段清掉，让调用方重新体检/重算
+  if (fixes.length) for (const b of out) for (const k of derived) delete b[k];
+  return {
+    bars: out, fixes, skipped, changed: fixes.length > 0,
+    note: fixes.length
+      ? `已按复权因子接回 ${fixes.length} 处断崖（最大 ${(Math.max(...fixes.map(x => Math.abs(x.jump))) * 100).toFixed(1)}%）；`
+        + '只改了此前的价格，成交额/成交量保持原值'
+      : (skipped.length ? `有 ${skipped.length} 处跳空超出可修正范围，未动` : '没有需要修正的复权断崖')
   };
 }
 

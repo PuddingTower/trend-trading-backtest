@@ -6,9 +6,10 @@
  *      静态托管上整条跳过，避免每次取数都在控制台留一条 404。
  *   2. 浏览器直连 eastmoney   —— 备用。实测 push2his 会回显请求 Origin，
  *      所以 http://localhost 下能直连；file:// 下 Origin 为 null 会被拒，属预期。
- *   3. 新浪 JSONP             —— 遗留期货通道，file:// 也能跑。
- *      已知：新浪期货日线数据冻结在 2024-07-17（实测 RB0/M0/CU0 末根都是那天），
- *      所以它只作为对照/兜底，不再是主源。
+ *   3. 新浪 JSONP             —— 期货兜底通道，file:// 也能跑，日线带交易所结算价。
+ *      注意：日线服务名是 InnerFuturesNewService.getDailyKLine；旧的 IndexService 名字
+ *      早已失效（返回 Invalid service name），别再把它当成"新浪数据冻结"。
+ *      它仍只作对照/兜底：主源是东财，字段更全、主连拼接口径也更稳定。
  *
  * bars 一律归一化成 {date,open,high,low,close,volume}，按日期升序，并 pre-bake ma5/ma10/ma20。
  */
@@ -58,13 +59,16 @@ async function viaServer(params, timeoutMs = 12000) {
 }
 
 /** 通道 2：浏览器直连 eastmoney */
-async function viaEastmoneyDirect(secid, period, adjust, count) {
+async function viaEastmoneyDirect(secid, period, adjust, count, end) {
+  // 未知周期不能悄悄退回 klt=101：那样请求 4 小时会给一屏日线，回测跑完都不知道数据是假的
+  const klt = KLTL[period];
+  if (!klt) throw new Error(`eastmoney 没有 ${period} 这个周期`);
   const qs = new URLSearchParams({
     secid, fields1: 'f1,f2,f3,f4,f5,f6', fields2: 'f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61',
-    klt: KLTL[period] || '101', fqt: FQT[adjust] ?? '1'
+    klt, fqt: FQT[adjust] ?? '1'
   });
-  if (count) { qs.set('end', '20500101'); qs.set('lmt', String(count)); }
-  else { qs.set('beg', '19700101'); qs.set('end', '20500101'); }
+  if (count) { qs.set('end', end || '20500101'); qs.set('lmt', String(count)); }
+  else { qs.set('beg', '19700101'); qs.set('end', end || '20500101'); }
   const res = await withTimeout(fetch(`${EM_HOST}/api/qt/stock/kline/get?${qs}`), 12000, 'eastmoney 直连');
   const json = await res.json();
   const d = json.data || {};
@@ -88,7 +92,10 @@ export function fetchSinaJSONP(symbol, period = 'daily', timeoutMs = 8000) {
     // 新浪只有这两个服务。以前非 60m 一律落到日线服务，于是"取周线"会拿到**日线**
     // 还带 ok:true —— 上层据此跳过本地聚合，再把日线按 weekly 键写进 IndexedDB，
     // 之后每次开周线都"秒开"那份被污染的数据。没有的服务必须明确拒绝，不能拿别的周期顶替。
-    const SINA_SERVICES = { daily: 'IndexService.getInnerFuturesDailyKLine',
+    //
+    // 日线服务名：InnerFuturesNewService.getDailyKLine 是现行接口（数据到当前交易日）；
+    // 旧的 IndexService.getInnerFuturesDailyKLine 已失效/冻结，不要再拿它当"新浪只有旧数据"。
+    const SINA_SERVICES = { daily: 'InnerFuturesNewService.getDailyKLine',
                             '60m': 'IndexService.getInnerFuturesMiniKLine60m' };
     const svc = SINA_SERVICES[period];
     if (!svc) {
@@ -117,9 +124,13 @@ export function fetchSinaJSONP(symbol, period = 'daily', timeoutMs = 8000) {
       }
       const bars = sortByDate(rawData.map(normalizeSinaRow).filter(Boolean));
       if (bars.length === 0) { reject(new Error('新浪数据解析后无有效条目')); return; }
+      const withSettle = period === 'daily' ? bars.filter(b => b.settlement > 0).length : 0;
       resolve({ ok: true, source: 'sina', name: null, secid: `sina.${cleanSymbol}`,
                 period, adjust: 'none', count: bars.length, bars,
-                warning: '新浪期货日线实测已冻结在 2024-07-17，仅作兜底对照' });
+                settlementBars: withSettle,
+                note: period === 'daily'
+                  ? (withSettle ? `日线含交易所结算价 ${withSettle}/${bars.length} 根` : '日线未返回结算价，逐日盯市将回退收盘价')
+                  : '60 分钟线不带结算价' });
     }
 
     const timer = setTimeout(() => {
@@ -140,18 +151,79 @@ export function fetchSinaJSONP(symbol, period = 'daily', timeoutMs = 8000) {
   });
 }
 
+/** 新浪期货代码：东财主连写法 rbm / RB0 都归一到 RB0；具体合约 rb2701 → RB2701。 */
+export function sinaSymbolOf(symbol) {
+  const s = String(symbol || '').toUpperCase().trim();
+  const m = /^([A-Z]+)M$/.exec(s);
+  return m ? `${m[1]}0` : s;
+}
+
 /**
- * 统一入口。
+ * 用新浪日线的交易所结算价补全东财序列。
+ *
+ * 东财 kline 不带结算价，逐日盯市只能拿收盘价代理；新浪日线的 s 字段就是结算价。
+ * 两边的主连都不是"某一份合约"而是拼接口径，所以只按日期合并结算价、不拿新浪的价格覆盖 OHLC。
+ * 失败就原样返回：补不上是缺一份更好的近似，不是让整次同步失败。
+ *
+ * @returns {Promise<{merged:number, matched:number, error?:string}>}
+ */
+export async function enrichSettlementFromSina(bars, symbol, { timeoutMs = 5000 } = {}) {
+  if (!bars || !bars.length || typeof document === 'undefined') return { merged: 0, matched: 0 };
+  try {
+    const out = await fetchSinaJSONP(sinaSymbolOf(symbol), 'daily', timeoutMs);
+    const byDate = new Map();
+    for (const b of out.bars || []) {
+      if (b.settlement > 0) byDate.set(String(b.date).slice(0, 10), b.settlement);
+    }
+    let merged = 0;
+    for (const b of bars) {
+      const v = byDate.get(String(b.date).slice(0, 10));
+      if (v > 0) { b.settlement = v; merged++; }
+    }
+    return { merged, matched: byDate.size };
+  } catch (e) {
+    return { merged: 0, matched: 0, error: String(e.message || e) };
+  }
+}
+
+/**
+ * 统一入口。分钟线在这里会自动往前回填；4 小时由 data/periods.js 的 resolveBars
+ * 从 60m 合成，**不在这里兜底** —— 把 4h 直接喂给上游只会被 KLTL 兜成日线，
+ * 那正是上一轮"4 小时缓存里其实是日线"的来源。
+ *
+ * withSettlement 只对期货日线生效：东财 kline 不带结算价，用新浪日线的 s 字段按日期补；
+ * sinaSymbol 是新浪的 <品种>0 代码（东财是 <品种>m），由 symbolMeta 给出。
+ *
  * @returns {ok, source, bars, name, count, attempted:[{channel,error}]}
  */
 export async function fetchBars({ market = 'futures', symbol, secid, period = 'daily',
                                   adjust = 'none', count = null, provider = 'eastmoney',
-                                  sinaSymbol = null } = {}) {
+                                  sinaSymbol = null, withSettlement = false, end = null } = {}) {
+  const targetSecid = secid || symbol;
+  const sinaTarget = sinaSymbol || sinaSymbolOf(symbol);
+  const out = await fetchBarsOnce({ market, symbol, secid: targetSecid, period, adjust, provider,
+                                    count, end, sinaSymbol: sinaTarget });
+  if (out.ok && out.bars && out.bars.length && withSettlement
+      && market === 'futures' && period === 'daily' && adjust === 'none' && out.source !== 'sina') {
+    const en = await enrichSettlementFromSina(out.bars, sinaTarget);
+    if (en.merged) {
+      out.settlementBars = en.merged;
+      out.note = `已用新浪日线补全 ${en.merged} 根交易所结算价（仅补 s 字段，不改 OHLC）`;
+    }
+  }
+  // 回填路上的一页（count 非空）不再递归回填；日线/周线本来就没有深度问题
+  if (!out.ok || !out.bars || !out.bars.length || count || !/^\d+m$/.test(period)) return out;
+  const merged = await backfillIntraday({ market, symbol, secid: targetSecid, period, adjust,
+                                          bars: out.bars, sinaSymbol: sinaTarget });
+  return { ...out, bars: attachDefaultMAs(merged.bars), count: merged.bars.length,
+           depth: depthOf(merged.bars), pages: merged.pages, exhausted: merged.exhausted };
+}
+
+/** 三条通道按序降级，一次取数，不做合成也不回填。 */
+async function fetchBarsOnce({ market, symbol, secid, period, adjust, provider, count, end, sinaSymbol }) {
   const attempted = [];
-  const targetSecid = secid || (market === 'ashare' ? symbol : symbol);
-  // 新浪用的是 <品种>0 那套代码，跟东财的 <品种>m 不是一回事；不给 sinaSymbol 就退回原值，
-  // 让 A股/具体合约的调用点行为不变。
-  const sinaTarget = sinaSymbol || symbol;
+  const targetSecid = secid || symbol;
+  const sinaTarget = sinaSymbol || sinaSymbolOf(symbol);
 
   if (provider === 'sina') {
     try {
@@ -168,6 +240,7 @@ export async function fetchBars({ market = 'futures', symbol, secid, period = 'd
     try {
       const params = { secid: targetSecid, market, symbol, period, adjust };
       if (count) params.count = count;
+      if (end) params.end = end;
       const out = await viaServer(params);
       return { ...out, bars: attachDefaultMAs(sortByDate(out.bars || [])), attempted };
     } catch (e) {
@@ -179,25 +252,74 @@ export async function fetchBars({ market = 'futures', symbol, secid, period = 'd
 
   // 2. 浏览器直连 eastmoney
   try {
-    const out = await viaEastmoneyDirect(targetSecid, period, adjust, count);
+    const out = await viaEastmoneyDirect(targetSecid, period, adjust, count, end);
     return { ...out, bars: attachDefaultMAs(out.bars), attempted };
   } catch (e) {
     attempted.push({ channel: 'eastmoney-direct', error: String(e.message || e) });
   }
 
-  // 3. 期货再兜一层新浪。实测新浪这条对主连的历史比东财还长（RB0 回到 2009，东财 rbm 只到 2015），
-  //    但数据冻结在 2024-07-17 —— 当"更长的过去"用可以，别当最新行情用。
+  // 3. 期货再兜一层新浪。东财不可用时才走这里；新浪日线带交易所结算价，
+  //    历史可回到 2009（RB0），比东财主连拼接的 2015 还长。
   if (market === 'futures') {
     try {
       const out = await fetchSinaJSONP(sinaTarget, period);
       return { ...out, bars: attachDefaultMAs(out.bars), attempted,
-               note: '已降级到新浪通道（数据可能滞后）' };
+               note: '已降级到新浪通道（东财不可用；日线带交易所结算价）' };
     } catch (e) {
       attempted.push({ channel: 'sina-jsonp', error: String(e.message || e) });
     }
   }
 
   return { ok: false, error: '三条行情通道全部失败', attempted };
+}
+
+/** 分钟线一次往前翻多少根。期货 60 分钟一天约 6~7 根，500 根够跨两个多月。 */
+const BACKFILL_PAGE = 500;
+const BACKFILL_MAX_PAGES = 6;
+
+/**
+ * 分钟线往前回填 —— 想解决的问题是「60 分钟只给一个月，根本没法回测」。
+ *
+ * 为什么要单独一条路：带 beg 的那次请求，上游按「全部可得」返回，实测期货 60 分钟只有约一个月。
+ * 但 run_local_server.py 里记着另一条实测：不带 beg 时 lmt 才被尊重，带上 beg 就被忽略、返回全部历史。
+ * 两条都是量出来的，说明 end+lmt 走的是另一条取数分支，有可能够到更深的位置。这里就拿 end 当游标
+ * 一段一段往前挪，能挖多深挖多深；第一页翻不出新 bar 就停手，不空转。
+ *
+ * 上限刻意压得很低（6 页）：这不保证更多数据，只保证「上游要是放开了，我们不改代码就能吃到」。
+ *
+ * @returns {{bars:Array, pages:number, exhausted:boolean}}
+ */
+export async function backfillIntraday({ market = 'futures', symbol, secid, period = '60m',
+                                         adjust = 'none', sinaSymbol = null, bars = [],
+                                         targetBars = 2000, maxPages = BACKFILL_MAX_PAGES } = {}) {
+  if (!/^\d+m$/.test(period)) return { bars, pages: 0, exhausted: true };
+  let out = bars.slice();
+  const seen = new Set(out.map(b => b.date));
+  let pages = 0, exhausted = false;
+  while (out.length < targetBars && pages < maxPages) {
+    const endDay = String(out[0].date || '').slice(0, 10).replace(/-/g, '');
+    if (!/^\d{8}$/.test(endDay)) break;
+    let page;
+    try {
+      page = await fetchBarsOnce({ market, symbol, secid, period, adjust,
+                                   count: BACKFILL_PAGE, end: endDay, sinaSymbol });
+    } catch (e) {
+      break;
+    }
+    pages++;
+    const rows = (page && page.ok && page.bars) ? page.bars : [];
+    const fresh = rows.filter(b => b && b.date && !seen.has(b.date));
+    if (!fresh.length) { exhausted = true; break; }   // 翻不出新 bar：上游就到这儿了
+    for (const b of fresh) seen.add(b.date);
+    out = sortByDate(out.concat(fresh));
+  }
+  return { bars: out, pages, exhausted };
+}
+
+/** 序列实际覆盖到哪儿 —— 界面上要把它讲出来，不然用户以为是自己哪里没设对。 */
+export function depthOf(bars) {
+  if (!bars || !bars.length) return { first: null, last: null, count: 0 };
+  return { first: bars[0].date, last: bars[bars.length - 1].date, count: bars.length };
 }
 
 /**

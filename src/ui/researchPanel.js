@@ -534,6 +534,10 @@ export class ResearchPanel {
         <label>ATR 倍数<input id="rsPoolAtrMult" type="number" value="${v('rsPoolAtrMult', 3)}" step="0.5" style="${INP}width:56px;" /></label>
         <label>止损%<input id="rsPoolStop" type="number" value="${v('rsPoolStop', 3)}" step="0.5" style="${INP}width:56px;" title="开仓即挂的初始止损，按开仓价百分比；0=不挂" /></label>
         <label>盈亏比目标<input id="rsPoolRr" type="number" value="${v('rsPoolRr', 0)}" step="0.5" style="${INP}width:60px;" title="止盈 = 止损距离 × 该倍数；0=不挂止盈" /></label>
+        <label>止盈平仓%<input id="rsPoolTpFrac" type="number" value="${v('rsPoolTpFrac', 100)}" min="1" max="100" style="${INP}width:62px;" title="到止盈只平这么多仓位，剩下的继续带止损跑；100=全平。需要先设「盈亏比目标」或策略自带止盈价" /></label>
+        <label>加仓次数<input id="rsPoolAdds" type="number" value="${v('rsPoolAdds', 0)}" min="0" max="3" style="${INP}width:56px;" title="金字塔加仓次数；0=不加仓。加仓单按突破首仓价 + 步长成交" /></label>
+        <label>加仓步长%<input id="rsPoolAddStep" type="number" value="${v('rsPoolAddStep', 2)}" step="0.5" style="${INP}width:62px;" title="第 k 次加仓的突破价 = 首仓价 × (1 + k × 步长)" /></label>
+        <label>加仓衰减<input id="rsPoolAddDecay" type="number" value="${v('rsPoolAddDecay', 0.5)}" step="0.1" min="0.05" max="1" style="${INP}width:58px;" title="每次加仓手数 = 首仓 × 衰减^k；0.5 表示逐次减半" /></label>
         <label>维持比例%<input id="rsPoolMaint" type="number" value="${v('rsPoolMaint', 75)}" style="${INP}width:60px;" title="权益低于「占用保证金 × 该比例」时逐品种强平" /></label>
         <label>强平冷却<input id="rsPoolCooldown" type="number" value="${v('rsPoolCooldown', 3)}" min="0" style="${INP}width:52px;" title="被强平的品种多少根 bar 内不许重开" /></label>
         <label style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="rsPoolSettle" ${document.getElementById('rsPoolSettle')?.checked !== false ? 'checked' : ''} style="width:auto;" />逐日盯市结算</label>
@@ -639,7 +643,7 @@ export class ResearchPanel {
       ${Object.keys(kinds).length ? `<div style="font-size:11px;margin-top:4px;color:var(--text-muted);">
         拒单分布：${Object.entries(kinds).map(([k, n]) => `${esc(k)} ×${n}`).join('，')}（明细最多存 200 条）</div>` : ''}
       <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">仓位算法 ${esc(p.sizing.mode)}（占比/单笔风险 ${pc(p.sizing.riskPct, 1)}）·
-        总敞口上限 ${pc(p.exposure.maxMarginPct, 0)} · ${p.exposure.settlement ? '逐日盯市结算' : '不结算（浮动留到平仓）'}。${esc(p.note)}</div>
+        总敞口上限 ${pc(p.exposure.maxMarginPct, 0)} · ${p.exposure.settlement ? '逐日盯市结算' : '不结算（浮动留到平仓）'}${p.adds ? ` · 加仓 ${p.adds} 次` : ''}。${esc(p.note)}</div>
       ${(this.skipped || []).length ? `<div style="color:var(--accent-gold);font-size:12px;margin-top:4px;">⚠ 已跳过 ${this.skipped.length} 个勾选项：${esc(this.skipped.join('、'))}</div>` : ''}
       ${sparklineHtml(eqCurve, '共享池权益曲线')}`;
   }
@@ -663,6 +667,12 @@ export class ResearchPanel {
       atrMult: num('rsPoolAtrMult', 3),
       stopPct: num('rsPoolStop', 3) > 0 ? num('rsPoolStop', 3) / 100 : null,
       targetRr: num('rsPoolRr', 0) > 0 ? num('rsPoolRr', 0) : null,
+      takeProfitFraction: Math.min(100, Math.max(1, num('rsPoolTpFrac', 100))) / 100,
+      pyramid: num('rsPoolAdds', 0) > 0 ? {
+        maxAdds: Math.round(num('rsPoolAdds', 0)),
+        stepPct: Math.max(0.1, num('rsPoolAddStep', 2)) / 100,
+        decay: Math.min(1, Math.max(0.05, num('rsPoolAddDecay', 0.5)))
+      } : null,
       maintenanceRatio: num('rsPoolMaint', 75) / 100,
       reentryCooldownBars: num('rsPoolCooldown', 3),
       settlement: document.getElementById('rsPoolSettle')?.checked !== false,

@@ -67,9 +67,13 @@ def fetch_em_kline(secid, period, adjust, beg, end, count):
     （要 3 根给 6019 根）。所以 count 语义走 end+lmt，区间语义走 beg+end。
     """
     fields2 = "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
+    # 未知周期必须报错，不能 .get 默认成 101：那样请求 4 小时会悄悄拿到一屏日线，
+    # 回测照样跑完，只有价格量级对不上的人才发现。4 小时由前端从 60 分钟自己合成。
+    if period not in KLTL:
+        raise ValueError(f"eastmoney 没有 {period} 这个周期（4 小时请在前端由 60m 聚合）")
     qs = {
         "secid": secid, "fields1": "f1,f2,f3,f4,f5,f6", "fields2": fields2,
-        "klt": KLTL.get(period, "101"), "fqt": FQT.get(adjust, "1"),
+        "klt": KLTL[period], "fqt": FQT.get(adjust, "1"),
     }
     if count:
         qs["end"] = end or "20500101"
@@ -114,10 +118,11 @@ def normalize_sina_date(date):
 
 
 def fetch_sina_futures(symbol, period):
-    """新浪期货（遗留通道）。已知问题：日线数据冻结在 2024-07-17，仅作备用对照。
-    响应是 JSONP 包裹的位置数组 [[date,open,high,low,close,volume], ...]，且 60m 是倒序。
+    """新浪期货兜底通道。日线是对象数组，s 字段为交易所结算价；60m 是位置数组且倒序。
+    日线服务名：InnerFuturesNewService.getDailyKLine 是现行接口（数据到当前交易日）；
+    旧的 IndexService.getInnerFuturesDailyKLine 已失效/冻结，别再当成"新浪只有旧数据"。
     只有 daily / 60m 两个服务；别的周期明确拒绝，绝不拿日线顶替成"周线"。"""
-    svc = {"daily": "IndexService.getInnerFuturesDailyKLine",
+    svc = {"daily": "InnerFuturesNewService.getDailyKLine",
            "60m": "IndexService.getInnerFuturesMiniKLine60m"}.get(period)
     if svc is None:
         raise ValueError(f"新浪通道没有 {period} 这个周期（只有 daily / 60m），拒绝用日线顶替")
@@ -128,24 +133,34 @@ def fetch_sina_futures(symbol, period):
         raise ValueError("新浪返回格式异常")
     arr = json.loads(m.group(1))
     bars = []
+    settled = 0
     for row in arr:
-        if isinstance(row, dict):  # 兼容对象形态
+        s = None
+        if isinstance(row, dict):  # 日线对象形态带 s=结算价；60m 数组形态没有
             date, o, h, l, c, v = row.get("d"), row.get("o"), row.get("h"), row.get("l"), row.get("c"), row.get("v")
+            s = row.get("s")
         else:
             date, o, h, l, c, v = row[0], row[1], row[2], row[3], row[4], row[5]
         try:
             # 钟点必须留住：新浪 60m 发的是 "2023-11-07 15:00:00" 且整段倒序，
             # 截成纯日期会让同一天的 bar 全部同键、排序退化成"保持倒序"，
             # 前端再拿去做 4 小时合成就是 open/close 整根反掉。
-            bars.append({"date": normalize_sina_date(date), "open": float(o), "high": float(h),
-                         "low": float(l), "close": float(c), "volume": float(v or 0)})
+            bar = {"date": normalize_sina_date(date), "open": float(o), "high": float(h),
+                   "low": float(l), "close": float(c), "volume": float(v or 0)}
+            settle = float(s or 0)
+            if settle > 0:
+                bar["settlement"] = settle
+                settled += 1
+            bars.append(bar)
         except (TypeError, ValueError):
             continue
     bars.sort(key=lambda b: b["date"])  # 60m 上游是倒序，统一成升序
     return {
         "ok": True, "source": "sina", "secid": f"sina.{symbol.upper()}", "name": None,
         "period": period, "adjust": "none", "decimal": None, "totalAvailable": len(bars),
-        "count": len(bars), "bars": bars, "fetchedAt": datetime.now().isoformat(timespec="seconds"),
+        "count": len(bars), "settlementBars": settled, "bars": bars,
+        "note": "日线 s 字段为交易所结算价；60 分钟线不带结算价" if period == "daily" else "60 分钟线不带结算价",
+        "fetchedAt": datetime.now().isoformat(timespec="seconds"),
     }
 
 

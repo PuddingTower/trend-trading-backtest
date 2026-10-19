@@ -10,6 +10,7 @@
  *            并给出 rollover 标记供策略避开换月日交易。
  *
  * 周期聚合自己做，是为了让 CSV 导入/离线数据也能出周月线（上游 klt=102/103 只覆盖在线数据）。
+ * 4 小时线则是**只能**自己做：东财根本没有这个 klt，只有 60 分钟往上的整点块。
  */
 
 export const STITCH_MODES = { DIFF: 'diff', RATIO: 'ratio', RAW: 'raw' };
@@ -117,6 +118,8 @@ const PERIOD_OF = {
 /**
  * 日线聚合到周线/月线。日期取该组内最后一个交易日（与国内行情软件一致）。
  * dailyBars 必须按日期升序。
+ *
+ * 4 小时不走这里：它按交易日锚定、连续 4 根 60 分钟并 1 根，口径在 aggregateIntraday。
  */
 export function aggregate(dailyBars, period = 'weekly') {
   if (period === 'daily') return dailyBars.slice();

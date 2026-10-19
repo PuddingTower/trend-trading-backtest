@@ -135,10 +135,15 @@ export function evalExitOrders(orders, bar, dir) {
   return { hits: picked, reason: stops.length ? 'stop' : 'target', anyHit: picked.length > 0 };
 }
 
-/** 突破方向的加仓单结算（与出场单分开判：一根 bar 里既触止损又触加仓时，止损优先）。 */
+/**
+ * 突破方向的加仓单结算（与出场单分开判：一根 bar 里既触止损又触加仓时，止损优先）。
+ * 已成交的加仓单 qtyLots=0，必须像出场单一样过滤掉：否则同一张单下一根又命中，
+ * 会把「加一次」变成「只要价格还在突破位上方就每天加一次」。
+ */
 export function evalAddOrders(orders, bar, dir) {
   const out = [];
-  for (const o of (orders || []).filter(x => x && x.kind === ORDER_KIND.ADD)) {
+  for (const o of (orders || []).filter(x => x && x.kind === ORDER_KIND.ADD
+    && (x.qtyLots === undefined || x.qtyLots === null || x.qtyLots > 0))) {
     const f = fillPrice(o, bar, dir);
     if (f.hit) out.push({ order: o, price: f.price, gap: f.gap, kind: o.kind });
   }
@@ -156,4 +161,22 @@ export function pyramidScales(maxAdds, decay = 0.5) {
   let w = 1;
   for (let i = 0; i < Math.max(0, maxAdds); i++) { w *= decay; out.push(w); }
   return out;
+}
+
+/**
+ * 图上止损/止盈胶囊读的百分比：这条线价相对开仓价，站在持仓方向的盈亏口径。
+ *
+ * 为什么不在建线时算死：拖动只改线价，不改建线那一刻按止损% 烘进去的数。
+ * 于是线上永远写着最初那个百分比，拖到哪都不变 —— 看着像线坏了，其实是标签没跟着走。
+ * 空头要把价差翻号：价格涨上去对空头是亏，胶囊得显示成负数。
+ *
+ * @param {number} price   当前线价（可能已被用户拖过）
+ * @param {number} refPrice 参照价，通常是开仓均价
+ * @param {1|-1} dir       持仓方向，1=多
+ * @returns {number|null}  百分数（-9 表示 -9%）；参照价不可用时返回 null
+ */
+export function levelPct(price, refPrice, dir = 1) {
+  const p = Number(price), r = Number(refPrice);
+  if (!Number.isFinite(p) || !Number.isFinite(r) || r === 0) return null;
+  return (p - r) / r * 100 * (dir === -1 ? -1 : 1);
 }

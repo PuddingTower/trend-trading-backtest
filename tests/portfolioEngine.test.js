@@ -150,6 +150,47 @@ test('PortfolioEngine：ATR 预算下单笔风险不超设定比例（大波动�
   }
 });
 
+test('PortfolioEngine：分批止盈只平目标手数，剩余仓位继续跑，且账仍闭合', () => {
+  const d = cal(30);
+  const bars = series(30, 100, 2, d);
+  const partial = {
+    id: 'partial', params: {},
+    signals() { return bars.map((b, i) => (i === 2 ? { i, dir: 1, stop: 90, target: 110, takeProfitFraction: 0.5 } : null)); }
+  };
+  const res = new PortfolioEngine([entry('P', bars, FSPEC, partial)], {
+    capital: 1_000_000, sizing: 'notional', notionalPct: 0.5, slippageTicks: 0
+  }).run();
+  assert.ok(!res.error, res.error || '');
+  assert.eq(res.trades.length, 2, `应是一笔分批止盈 + 一笔收尾，实际 ${res.trades.map(t => t.exitReason).join(',')}`);
+  const first = res.trades[0], last = res.trades[1];
+  assert.eq(first.exitReason, 'gap_target', '目标价 110 在开盘即被越过，应按开盘成交');
+  assert.eq(first.partial, true, '第一笔必须标成分批平仓');
+  assert.ok(first.lots >= 1 && last.lots >= 1, '两边都要有手数');
+  assert.eq(last.exitReason, 'end_of_data');
+  assert.eq(first.lots + last.lots > first.lots, true, '剩余仓位必须还在');
+  const sumNet = res.trades.reduce((s, t) => s + t.netPnL, 0);
+  assert.near(res.finalEquity, 1_000_000 + sumNet, 0.5, '分批止盈后账必须闭合');
+});
+
+test('PortfolioEngine：金字塔加仓按突破单成交，加仓后的成本与账都闭合', () => {
+  const d = cal(30);
+  const bars = series(30, 100, 2, d);
+  const plain = { id: 'plain', params: {}, signals() { return bars.map((b, i) => (i === 2 ? { i, dir: 1 } : null)); } };
+  const base = new PortfolioEngine([entry('A', bars, FSPEC, plain)], {
+    capital: 1_000_000, sizing: 'notional', notionalPct: 0.2, slippageTicks: 0
+  }).run();
+  const pyr = new PortfolioEngine([entry('A', bars, FSPEC, plain)], {
+    capital: 1_000_000, sizing: 'notional', notionalPct: 0.2, slippageTicks: 0,
+    pyramid: { maxAdds: 2, stepPct: 0.02, decay: 0.5 }
+  }).run();
+  assert.eq(base.adds, 0);
+  assert.eq(pyr.adds, 2, `两根突破单都该成交，实际 ${pyr.adds}`);
+  assert.ok(pyr.trades[0].lots > base.trades[0].lots, '加仓后总手数必须大于不加仓');
+  assert.ok(pyr.trades[0].entryPrice > base.trades[0].entryPrice, '加仓把平均成本推高，不能还按首仓价记账');
+  const sumNet = pyr.trades.reduce((s, t) => s + t.netPnL, 0);
+  assert.near(pyr.finalEquity, 1_000_000 + sumNet, 0.5, '加仓后的手续费/保证金必须全部入账');
+});
+
 test('PortfolioEngine：没有可用数据时明确报错，而不是跑出一条平线', () => {
   const r = new PortfolioEngine([], { capital: 100000 }).run();
   assert.ok(r.error && /没有可用品种/.test(r.error));

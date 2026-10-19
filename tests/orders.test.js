@@ -97,6 +97,9 @@ test('evalAddOrders 与 pyramidScales：突破加仓方向与规模递减', () =
   const adds = [{ kind: ORDER_KIND.ADD, price: 110, qtyLots: 2 }];
   assert.eq(evalAddOrders(adds, mk('d', 100, 109, 99, 108), 1).length, 0, '没突破不加仓');
   assert.eq(evalAddOrders(adds, mk('d', 100, 111, 100, 110.5), 1).length, 1);
+  const used = [{ kind: ORDER_KIND.ADD, price: 110, qtyLots: 0 }];
+  assert.eq(evalAddOrders(used, mk('d', 100, 111, 100, 110.5), 1).length, 0,
+    '已成交的加仓单 qtyLots=0，下一根不许再触发，否则会天天加仓');
   assert.eq(pyramidScales(3, 0.6).map(x => x.toFixed(3)).join(','), '0.600,0.360,0.216', '加仓必须小于首仓且逐次递减');
   assert.eq(pyramidScales(0).length, 0);
 });
@@ -212,4 +215,14 @@ test('引擎·加仓受板锁拦阻：A股涨停那天加不进去，且留下 r
   const res = eng.run(sigs);
   assert.ok(res.rejects.some(r => r.kind === 'boardLock'), '涨停加仓应被板锁拒绝并记账');
   assert.ok((eng.adds || 0) < 2, '不该把加仓当成全部成交');
+});
+
+test('levelPct：图上胶囊按当前线价读，拖到哪显示哪（空头翻号）', async () => {
+  const { levelPct } = await import('../src/core/orders.js');
+  assert.near(levelPct(91, 100, 1), -9, 1e-9, '多头止损在下方 → 负');
+  assert.near(levelPct(109, 100, -1), -9, 1e-9, '空头止损在上方，价格差是正的但盈亏是负的');
+  assert.near(levelPct(95, 100, 1), -5, 1e-9, '从 -9% 拖到 95 → 读数要跟着变成 -5%');
+  assert.near(levelPct(112, 100, 1), 12, 1e-9, '止盈在多头方向是正数');
+  assert.eq(levelPct(95, 0, 1), null, '参照价为 0 不能算出 Infinity 糊到图上');
+  assert.eq(levelPct(undefined, 100, 1), null);
 });

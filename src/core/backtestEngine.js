@@ -72,7 +72,7 @@ export class BacktestEngine {
      *   warningRatio     —— 可用资金为负（权益 < 占用）即发追保通知
      *
      * 与原来那道"底线强平"的三点区别：
-     *   1. 每日按结算价把浮动盈亏**划转进现金**（真实结算价是当日加权均价，这里用收盘价代理并写明）；
+     *   1. 每日按结算价把浮动盈亏**划转进现金**（bar.settlement 有就用交易所结算价，没有才用收盘价代理并写明）；
      *   2. 保证金占用按结算价**重算**，不是按开仓价挂着不动 —— 价格涨上去多头占用跟着涨，
      *      否则杠杆品种的回撤会被系统性低估；
      *   3. 先追保通知、再到维持线才强平，且强平在**次根开盘**成交（不当根假设能出掉）。
@@ -408,7 +408,12 @@ export class BacktestEngine {
   _markToMarket(pos, bar, cash, i) {
     const mult = this.spec.multiplier;
     const rate = this.spec.marginRate ?? 0.1;
-    const settle = bar.close;                    // 真实结算价是当日加权均价，这里用收盘价代理
+    // 新浪日线带交易所结算价，优先用它；东财不带，只能回退收盘价代理。
+    // 0 或缺失都不算数：拿 0 结算会把权益瞬间打穿，比用收盘价坏得多。
+    const hasSettlement = Number.isFinite(bar.settlement) && bar.settlement > 0;
+    const settle = hasSettlement ? bar.settlement : bar.close;
+    if (hasSettlement) this._settledReal = (this._settledReal || 0) + 1;
+    else this._settledProxy = (this._settledProxy || 0) + 1;
     const base = pos.lastSettle ?? pos.entryPrice;
     const segPnl = (pos.dir === DIR.LONG ? settle - base : base - settle) * mult * pos.lots;
     const equity = cash + pos.margin + segPnl;
@@ -478,8 +483,11 @@ export class BacktestEngine {
       pos.margin += addMargin;
       pos.feePaid += fee;
       pos.addCount = (pos.addCount || 0) + 1;
-      // 加仓把平均成本推高了，止损不动就等于风险被放大；同步抬一条新的止损单并把已加的仓位纳入保护
-      for (const o of pos.orders) if (o.kind === ORDER_KIND.STOP || o.kind === ORDER_KIND.TARGET) o.qtyLots = pos.lots;
+      // 加仓把平均成本推高了，止损不动就等于风险被放大；同步抬一条新的止损单并把已加的仓位纳入保护。
+      // 只改仍有效的单：qtyLots=0 是已经成交过的分批止盈单，借加仓复活它等于凭空多平一次。
+      for (const o of pos.orders) {
+        if ((o.kind === ORDER_KIND.STOP || o.kind === ORDER_KIND.TARGET) && o.qtyLots > 0) o.qtyLots = pos.lots;
+      }
       a.order.qtyLots = 0;
       this.adds = (this.adds || 0) + 1;
     }
@@ -667,7 +675,13 @@ export class BacktestEngine {
       equityCurve: this.equityCurve,
       rejected: { ...this.rejected },
       marginNotices: this.marginNotices.slice(),
-      settlement: this.settlement ? { ...this.settlement, note: '结算价用收盘价代理（真实为当日加权均价）' } : null,
+      settlement: this.settlement ? {
+        ...this.settlement,
+        realBars: this._settledReal || 0, proxyBars: this._settledProxy || 0,
+        note: this._settledReal
+          ? `结算价：${this._settledReal} 根用交易所结算价${this._settledProxy ? `，${this._settledProxy} 根缺失、回退收盘价` : ''}`
+          : '数据源没有结算价，本次逐日盯市用收盘价代理（真实为当日加权均价）'
+      } : null,
       riskControls: { breakeven: this.breakeven, timeStop: this.timeStop, pyramid: this.pyramid },
       rejects: this.rejects.slice(),
       finalEquity: this._endCash ?? (this.equityCurve.length ? this.equityCurve[this.equityCurve.length - 1].equity : this.capital0),

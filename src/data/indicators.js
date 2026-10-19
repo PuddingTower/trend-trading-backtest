@@ -27,13 +27,13 @@ export function attachDefaultMAs(bars, periods = [5, 10, 20]) {
  * 被过滤掉，在线拉取静默降级成仿真数据。两种都吃才是安全的。
  */
 export function normalizeSinaRow(row) {
-  let date, o, h, l, c, v;
+  let date, o, h, l, c, v, s;
   if (Array.isArray(row)) {
-    [date, o, h, l, c, v] = row;
+    [date, o, h, l, c, v] = row;   // 60m 的数组形态没有结算价
   } else {
     date = row.d ?? row.date;
     o = row.o ?? row.open; h = row.h ?? row.high; l = row.l ?? row.low;
-    c = row.c ?? row.close; v = row.v ?? row.volume;
+    c = row.c ?? row.close; v = row.v ?? row.volume; s = row.s ?? row.settlement;
   }
   const bar = {
     // 曾经这里是 String(date).slice(0,10)：新浪 60m 实测发的是 "2023-11-07 15:00:00"，
@@ -45,6 +45,10 @@ export function normalizeSinaRow(row) {
     open: parseFloat(o), high: parseFloat(h), low: parseFloat(l),
     close: parseFloat(c), volume: parseFloat(v) || 0
   };
+  const settle = parseFloat(s);
+  // 早年新浪的 s 是 0（没有结算价），不能把 0 当有效结算价写进 bar：
+  // 逐日盯市会把权益直接归零，比回退收盘价坏得多。
+  if (Number.isFinite(settle) && settle > 0) bar.settlement = settle;
   return Number.isFinite(bar.open) && Number.isFinite(bar.close) ? bar : null;
 }
 

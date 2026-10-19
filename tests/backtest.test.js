@@ -9,8 +9,21 @@ import { ema, sma, rsi, macd, atr, priorExtreme, crosses } from '../src/strategy
 
 const DIRNAME = path.dirname(fileURLToPath(import.meta.url));
 const FIX = path.join(DIRNAME, '..', 'fixtures');
-/** 夹具不入库（可由 tools/fetch_fixtures.py 重抓），所以缺时相关用例跳过而不是报错。 */
-const HAS_FIXTURES = fs.existsSync(path.join(FIX, 'index.json'));
+/**
+ * 夹具不入库（可由 tools/fetch_fixtures.py 重抓），所以缺时相关用例跳过而不是报错。
+ * 只判断 index.json 存在是不够的：抓取全失败时脚本也会写一个 `{}`，
+ * 于是「有夹具」为真、读文件却 ENOENT —— 跳过门禁必须看索引里真的有条目。
+ */
+function hasFixtures() {
+  try {
+    const idx = JSON.parse(fs.readFileSync(path.join(FIX, 'index.json'), 'utf8'));
+    const files = Object.keys(idx);
+    return files.length > 0 && files.every(f => fs.existsSync(path.join(FIX, f)));
+  } catch {
+    return false;
+  }
+}
+const HAS_FIXTURES = hasFixtures();
 const SPEC = { multiplier: 10, tick: 1, marginRate: 0.1, fee: { mode: 'fixed', value: 3 }, closeTodayFee: { mode: 'fixed', value: 3 } };
 const mk = (date, o, h, l, c, v = 1000) => ({ date, open: o, high: h, low: l, close: c, volume: v });
 
@@ -256,6 +269,21 @@ test('逐日盯市强平：权益跌破维持线必须在下一根开盘平掉�
   assert.eq(t.exitIdx, 4, '跌破只发生在 d3 收盘盯市后，强平在 d4 开盘 —— 不能用 d3 的价格提前平掉');
   const minEquity = Math.min(...out.equityCurve.map(p => p.equity));
   assert.ok(minEquity > 0, `强平后权益不该转负，实际最低 ${minEquity.toFixed(0)}`);
+});
+
+test('逐日盯市优先用交易所结算价，缺失才回退收盘价', () => {
+  const bars = [
+    mk('d0', 100, 101, 99, 100), mk('d1', 100, 101, 99, 100),
+    mk('d2', 100, 101, 99, 100), mk('d3', 105, 111, 104, 110),
+    mk('d4', 110, 111, 109, 110)
+  ];
+  bars[3].settlement = 120;                    // 结算价故意远离收盘价：用错基准一眼能看出来
+  const spec = { ...SPEC, fee: { mode: 'fixed', value: 0 }, closeTodayFee: { mode: 'fixed', value: 0 } };
+  const out = new BacktestEngine(bars, spec, { capital: 1_000_000, lots: 1, slippageTicks: 0,
+    settlement: { enabled: true } }).run([null, { i: 1, dir: DIR.LONG }, null, null, null]);
+  assert.eq(out.settlement.realBars, 1, 'd3 有结算价，应走真实结算');
+  assert.eq(out.settlement.proxyBars, 1, 'd4 没给结算价，应回退收盘价并记账');
+  assert.near(out.equityCurve[3].equity, 1_000_200, 1e-6, 'd3 应按 120 结算，而不是按收盘 110');
 });
 
 test('爆仓要标 ruined，而不是让年化/Sharpe 静默变 NaN 冒充"业绩差"', () => {

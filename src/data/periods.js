@@ -56,8 +56,9 @@ export function periodSpacingOk(bars, period) {
  * @returns {ok, bars, source, count, caveat?}
  */
 export async function resolveBars({ market, symbol, secid, sinaSymbol = null,
-                                    period = 'daily', adjust = 'none', forceOnline = false }) {
-  const ask = (p) => fetchBars({ market, symbol, secid, period: p, adjust, sinaSymbol });
+                                    period = 'daily', adjust = 'none', forceOnline = false,
+                                    withSettlement = false }) {
+  const ask = (p) => fetchBars({ market, symbol, secid, period: p, adjust, sinaSymbol, withSettlement });
   const base = AGG_BASE[period];
   if (!base) return ask(period);
 

@@ -19,6 +19,22 @@ test('normalizeSinaRow：吃位置数组（接口实际形态），也吃对象�
   assert.eq(normalizeSinaRow(['2024-01-01', 'x', 'y', 'z', 'w', '0']), null, '非数字要丢掉而不是产 NaN');
 });
 
+test('normalizeSinaRow：日线 s 字段是交易所结算价，0 不能当成有效结算价', () => {
+  const withSettle = normalizeSinaRow({ d: '2026-10-19', o: '3069', h: '3096', l: '3066', c: '3068', v: '793143', s: '3080.000' });
+  assert.eq(withSettle.settlement, 3080, 's 必须落到 settlement');
+  const zero = normalizeSinaRow({ d: '2009-03-27', o: '3550', h: '3663', l: '3513', c: '3561', v: '354590', s: '0.000' });
+  assert.eq(zero.settlement, undefined, '早年 s=0 是缺失，不是"结算价为零"');
+  assert.eq(normalizeSinaRow(['2026-10-19', '1', '2', '0.5', '1.5', '10']).settlement, undefined, '60m 数组形态没有结算价');
+});
+
+test('CSV 导入能吃到结算价列，非正值忽略', () => {
+  const rows = ['date,open,high,low,close,volume,settlement'];
+  for (let i = 0; i < 5; i++) rows.push(`2026-10-0${i + 1},100,101,99,100,1000,${i === 0 ? 0 : 100.5}`);
+  const out = parseCSV(rows.join('\n'));
+  assert.eq(out.bars[0].settlement, undefined, '0 不是有效结算价');
+  assert.eq(out.bars[1].settlement, 100.5);
+});
+
 test('60m 倒序输入 → 升序输出（新浪 60m 实测是倒序）', () => {
   const sorted = sortByDate([mk('2024-01-03', 1, 1, 1, 1), mk('2024-01-01', 1, 1, 1, 1), mk('2024-01-02', 1, 1, 1, 1)]);
   assert.deep(sorted.map(b => b.date), ['2024-01-01', '2024-01-02', '2024-01-03']);
@@ -168,6 +184,11 @@ test('月线聚合跨月分组正确', () => {
   assert.eq(m.length, 2);
   assert.eq(m[0].date, '2026-01-28');
   assert.eq(m[1].high, 12);
+});
+
+test('4 小时不走 aggregate：周期入口是 aggregateIntraday（按交易日锚定）', () => {
+  // aggregate 只管日→周/月；4h 若漏进来必须报错，不能悄悄返回日线冒充 4 小时
+  assert.throws(() => aggregate([mk('2026-10-15', 1, 2, 0.5, 1.5)], '4h'), '不支持的聚合周期');
 });
 
 // ---------- barStore key ----------

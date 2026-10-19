@@ -10,7 +10,7 @@ import { BacktestEngine } from '../core/backtestEngine.js';
 import { computeMetrics, benchmarkCompare } from '../report/metrics.js';
 import { resolveTradeSpec } from '../markets/instrumentSpec.js';
 import { rulesFor } from '../markets/marketRules.js';
-import { annotateGaps, checkAdjustmentContinuity, checkRolloverGaps, checkPriceValidity } from '../markets/dataQuality.js';
+import { annotateGaps, checkAdjustmentContinuity, checkRolloverGaps, checkPriceValidity, repairAdjustmentGaps } from '../markets/dataQuality.js';
 
 const pct = (v, d = 1) => (v === null || v === undefined || !Number.isFinite(v)) ? '—' : (v * 100).toFixed(d) + '%';
 const num = (v, d = 2) => (v === null || v === undefined || !Number.isFinite(v)) ? '—' : Number(v).toFixed(d);
@@ -38,6 +38,7 @@ export class BacktestPanel {
       maintenanceRatio: (Number(this.root.querySelector('#btMaint')?.value) || 75) / 100,
       breakevenR: Number(this.root.querySelector('#btBe')?.value) || 0,
       timeStopBars: Number(this.root.querySelector('#btTimeStop')?.value) || 0,
+      repairAdjustment: this.root.querySelector('#btRepair')?.checked ?? false,
       range: this.root.querySelector('#btRange').value
     };
   }
@@ -90,6 +91,9 @@ export class BacktestPanel {
           <input id="btTimeStop" class="form-input" type="number" value="0" min="0" step="1" style="width:48px;" /></label>
         <button class="btn btn-primary btn-sm" id="btRun">▶ 运行回测</button>
         <button class="btn btn-sm" id="btCheck" title="只体检数据不跑策略：停牌缺口、复权断崖、换月跳空">🩺 数据体检</button>
+        <label style="font-size:11px; color:var(--text-muted); display:flex; align-items:center; gap:4px;"
+          title="A股专用：把超过涨跌停幅度的隔夜跳空按复权因子接回（前复权本来就该这么做）。默认关闭，勾选后体检和回测都会用修正后的序列；成交额/成交量不改。">
+          <input id="btRepair" type="checkbox" /> 修复杂复权断崖</label>
         <button class="btn btn-sm" id="btClearMarks">清除图上标记</button>
       </div>
       <div id="btParams" style="display:flex; flex-wrap:wrap; gap:10px; padding:0 4px 8px; border-bottom:1px solid var(--border-color);"></div>
@@ -148,28 +152,40 @@ export class BacktestPanel {
     const resolved = resolveTradeSpec(code || 'RB0');
     const spec = resolved.ok ? resolved.spec : null;
     const limitPct = spec && Number(spec.limitPct) > 0 ? Number(spec.limitPct) : 0;
+    // 指数/无板幅品种的 spec.limitPct 是 0；不能拿 10% 的默认值去判它"复权断崖"
+    const adjLimit = spec && Number.isFinite(Number(spec.limitPct)) ? Number(spec.limitPct) : 0.10;
     if (!bars || bars.length < 2) {
       if (host) host.innerHTML = '<span style="color:var(--up-color);">数据不足两根，无法体检。</span>';
       return { bars: bars || [], usable: false };
     }
-    const ann = annotateGaps(bars, {});
-    const keepsOrder = ann.bars.length === bars.length
-      && ann.bars.every((b, i) => String(b.date).slice(0, 10) === String(bars[i].date).slice(0, 10));
     const isFutures = !!spec && spec.market === 'futures';
+    // 复权修正只在用户显式勾选时做：悄悄改历史价格比报错更危险。
+    let useBars = bars;
+    let repair = null;
+    if (!isFutures && this.state.repairAdjustment) {
+      repair = repairAdjustmentGaps(useBars, { limitPct: adjLimit });
+      if (repair.changed) useBars = repair.bars;
+    }
+    const ann = annotateGaps(useBars, { market: isFutures ? 'futures' : 'ashare' });
+    const keepsOrder = ann.bars.length === useBars.length
+      && ann.bars.every((b, i) => String(b.date).slice(0, 10) === String(useBars[i].date).slice(0, 10));
     const cont = isFutures
-      ? { issues: checkRolloverGaps(bars, { limitPct: limitPct > 0 ? limitPct : 0.08 }),
+      ? { issues: checkRolloverGaps(useBars, { limitPct: limitPct > 0 ? limitPct : 0.08 }),
           label: '换月跳空', tail: '连续合约在换月当天的价差不是行情。若拼接模式用的是「原始价位」，这些缺口会被当成真突破/真跌破。' }
-      : { ...checkAdjustmentContinuity(bars, { limitPct: limitPct > 0 ? limitPct : 0.10 }), label: '复权断崖' };
-    const pv = checkPriceValidity(bars);
+      : { ...checkAdjustmentContinuity(useBars, { limitPct: adjLimit }), label: '复权断崖' };
+    const pv = checkPriceValidity(useBars);
     const gaps = ann.longGaps;
     const worst = gaps.length ? gaps.reduce((a, b) => (b.naturalDays > a.naturalDays ? b : a)) : null;
     const staleCount = ann.bars.filter(b => b.stalePrevClose).length;
 
     const parts = [];
+    if (repair && repair.changed) parts.push(`<span style="color:var(--accent-gold);">🔧 ${esc(repair.note)}</span>`);
     parts.push(`自然日缺口 <b>${gaps.length}</b> 处（≥4 天）${worst ? `，最长 ${worst.naturalDays} 天：${esc(worst.from)}→${esc(worst.to)}（${esc(worst.to)} 那根不套用板锁）` : ''}`);
     parts.push(ann.calendarKnown
-      ? '已用参照交易日历区分停牌与节假日'
-      : '<span style="color:var(--accent-gold);">无参照序列：长假与停牌在单品种数据里无法区分，只报自然日缺口</span>');
+      ? (ann.calendarSource === 'builtin'
+        ? `已用内置${esc(ann.calendarLabel || '')}交易日历区分停牌与节假日`
+        : '已用参照交易日历区分停牌与节假日')
+      : `<span style="color:var(--accent-gold);">无可用的交易日历${ann.calendarReason ? `（${esc(ann.calendarReason)}）` : ''}：长假与停牌在单品种数据里无法区分，只报自然日缺口</span>`);
     if (cont.issues.length) {
       parts.push(`<span style="color:var(--accent-gold);">${cont.label} <b>${cont.issues.length}</b> 处：`
         + cont.issues.slice(0, 5).map(x => `${esc(x.date)} ${(x.jump * 100).toFixed(1)}%`).join('、')
@@ -188,8 +204,9 @@ export class BacktestPanel {
     if (!keepsOrder) parts.push('<span style="color:var(--up-color);">K 线日期不是升序，缺口标注已跳过（否则图上标记会错位）</span>');
     if (staleCount) parts.push(`前收盘失效（缺口过长）<b>${staleCount}</b> 根：这些 bar 的涨跌停判定已跳过`);
     if (host) host.innerHTML = `🩺 数据体检 · ${parts.join(' · ')}`;
-    return { bars: keepsOrder ? ann.bars : bars, usable: keepsOrder && pv.usable,
-             gaps, suspensions: ann.suspensions, continuity: cont, priceValidity: pv };
+    return { bars: keepsOrder ? ann.bars : useBars, usable: keepsOrder && pv.usable,
+             gaps, suspensions: ann.suspensions, continuity: cont, priceValidity: pv,
+             repair, repaired: !!(repair && repair.changed) };
   }
 
   sliceBars(range) {

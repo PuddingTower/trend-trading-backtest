@@ -11,13 +11,15 @@
  * 一旦在两个引擎里长得不一样，组合回测和单品种回测就永远对不上账。
  *
  * 已知简化（都写在返回值 note 里，不装作是完整清算系统）：
- *   - 结算价用收盘价代理（真实为当日加权均价）；
- *   - 不做跨品种对冲保证金优惠（国内交易所对套利持仓有减免，这里全额占用，偏保守）；
- *   - 组合层面不支持部分平仓，只支持整笔开平。
+ *   - 东财日线不带结算价时用收盘价代理；新浪日线的 settlement 字段可用时优先用它；
+ *   - 不做跨品种对冲保证金优惠（国内交易所对套利持仓有减免，这里全额占用，偏保守）。
+ *
+ * 部分平仓与金字塔加仓走 core/orders 的同一套 qtyLots / ADD 判定：
+ * 条件单平多少、加多少由订单自己说，引擎只负责按比例释放保证金、摊开仓费。
  */
 
 import { DIR } from './backtestEngine.js';
-import { ORDER_KIND, evalExitOrders, ratchetStop, makeBracket } from './orders.js';
+import { ORDER_KIND, evalExitOrders, evalAddOrders, ratchetStop, makeBracket, pyramidScales } from './orders.js';
 import { atrRiskSize, notionalSize, volTargetSize, annualizedVol } from './sizing.js';
 import { atr } from '../analysis/common.js';
 
@@ -35,12 +37,16 @@ export class PortfolioEngine {
     this.o = {
       capital: 1_000_000, sizing: 'notional', riskPct: 0.01, atrMult: 2, atrLen: 14,
       targetVolPct: 0.10, maxMarginPct: 0.6, maintenanceRatio: 0.75, slippageTicks: 1,
-      settlement: false, stopPct: null, targetRr: null, reentryCooldownBars: 3, ...opts
+      settlement: false, stopPct: null, targetRr: null, takeProfitFraction: null,
+      reentryCooldownBars: 3, ...opts
     };
+    this.pyramid = opts.pyramid && opts.pyramid.maxAdds > 0
+      ? { stepPct: 0.02, decay: 0.5, ...opts.pyramid } : null;
     this.trades = [];
     this.equityCurve = [];
+    this.adds = 0;
     this.rejected = { boardLock: 0, boardLockClose: 0, suspended: 0, suspendedClose: 0,
-                      cash: 0, sizingZero: 0, marginCalls: 0, reentryBlocked: 0 };
+                      cash: 0, margin: 0, sizingZero: 0, marginCalls: 0, reentryBlocked: 0 };
     this.rejects = [];
     this.notices = [];
   }
@@ -102,6 +108,54 @@ export class PortfolioEngine {
       eq += p.pos.margin + (p.pos.dir === DIR.LONG ? price - p.pos.lastSettle : p.pos.lastSettle - price) * p.spec.multiplier * p.pos.lots;
     }
     return eq;
+  }
+
+  /**
+   * 信号 → 条件单。优先用 sig.orders，其次 sig.stop/sig.target，最后才用组合层的
+   * stopPct / targetRr 兜底。与 BacktestEngine 的口径一致：信号给了就不要再叠一层全局括号单，
+   * 否则同一根 bar 上两条止盈单谁先成交取决于遍历顺序。
+   */
+  _buildOrders(sig, dir, entryPrice, lots) {
+    const orders = [];
+    const qtyOf = (o) => {
+      const q = o.qtyLots ?? o.qty;
+      return (q === null || q === undefined) ? lots : Math.max(1, Math.min(lots, Math.round(q)));
+    };
+    if (Array.isArray(sig?.orders) && sig.orders.length) {
+      for (const o of sig.orders) {
+        if (!o || ![ORDER_KIND.STOP, ORDER_KIND.TARGET, ORDER_KIND.ADD].includes(o.kind)) continue;
+        if (!(Number(o.price) > 0)) continue;
+        orders.push({ ...o, qtyLots: qtyOf(o) });
+      }
+    } else {
+      if (sig?.stop !== null && sig?.stop !== undefined) orders.push({ kind: ORDER_KIND.STOP, price: sig.stop, qtyLots: lots, label: '止损' });
+      if (sig?.target !== null && sig?.target !== undefined) orders.push({ kind: ORDER_KIND.TARGET, price: sig.target, qtyLots: lots, label: '止盈' });
+    }
+    if (!orders.some(o => o.kind === ORDER_KIND.STOP || o.kind === ORDER_KIND.TARGET)) {
+      const b = makeBracket({ entryPrice, dir, stopPct: this.o.stopPct, rr: this.o.targetRr });
+      if (b.ok) for (const o of b.orders) orders.push({ ...o, qtyLots: lots });
+    }
+    // 分批止盈：只平目标单的一部分，剩下的继续带止损跑
+    const frac = Number(sig?.takeProfitFraction ?? this.o.takeProfitFraction);
+    if (Number.isFinite(frac) && frac > 0 && frac < 1) {
+      const t = orders.find(o => o.kind === ORDER_KIND.TARGET);
+      if (t && t.qtyLots >= lots) t.qtyLots = Math.max(1, Math.min(lots - 1, Math.floor(lots * frac)));
+    }
+    if (sig?.trailPct || sig?.trailAtr) orders.trailCfg = { pct: sig.trailPct, atr: sig.trailAtr };
+    else if (this.o.trailPct) orders.trailCfg = { pct: this.o.trailPct };
+    if (this.pyramid) {
+      const scales = pyramidScales(this.pyramid.maxAdds, this.pyramid.decay);
+      scales.forEach((w, k) => {
+        const off = this.pyramid.stepPct * (k + 1);
+        orders.push({
+          kind: ORDER_KIND.ADD,
+          price: Math.round((dir === DIR.LONG ? entryPrice * (1 + off) : entryPrice * (1 - off)) * 1e4) / 1e4,
+          qtyLots: Math.max(1, Math.floor(lots * w)),
+          label: `加仓${k + 1}`
+        });
+      });
+    }
+    return orders;
   }
 
   _desiredLots(entry, equity, price, atrValue, vol) {
@@ -172,6 +226,7 @@ export class PortfolioEngine {
         if (i === undefined) continue;              // 今天没有这根 bar（停牌或未上市）：什么也不做
         const bar = s.bars[i];
         s._lastClose = bar.close;
+        s._lastBar = bar;
         const spec = s.spec, rules = s.rules;
         const tick = spec.tick || 1;
 
@@ -191,13 +246,26 @@ export class PortfolioEngine {
           }
           const tPlus1Block = rules?.tPlus1 && String(bar.date).slice(0, 10) === String(s.bars[s.pos.entryIdx].date).slice(0, 10);
           if (!tPlus1Block) {
-            const { hits, anyHit } = evalExitOrders(s.pos.orders, bar, s.pos.dir);
-            if (anyHit) {
-              const px = this._slip(hits[0].price, s.pos.dir === DIR.LONG ? 'sell' : 'buy', tick);
-              const sealRef = hits[0].gap ? bar.open : (s.pos.dir === DIR.LONG ? bar.low : bar.high);
-              const gate = this._closingAllowed(s, px, i, s.pos.dir, sealRef);
-              if (gate.ok) cash = this._close(s, px, i, hits[0].gap ? `gap_${hits[0].kind}` : hits[0].kind, cash, date);
-              else this._noteReject(date, s.symbol, gate, hits[0].kind);   // 委托不下岗，下一根继续判
+            const { hits } = evalExitOrders(s.pos.orders, bar, s.pos.dir);
+            if (hits.length) {
+              for (const h of hits) {
+                if (!s.pos) break;
+                const px = this._slip(h.price, s.pos.dir === DIR.LONG ? 'sell' : 'buy', tick);
+                const sealRef = h.gap ? bar.open : (s.pos.dir === DIR.LONG ? bar.low : bar.high);
+                const gate = this._closingAllowed(s, px, i, s.pos.dir, sealRef);
+                if (!gate.ok) { this._noteReject(date, s.symbol, gate, h.kind); continue; }
+                const lotsToClose = Math.min(s.pos.lots, Math.max(1, Math.round(h.order.qtyLots ?? s.pos.lots)));
+                cash = this._close(s, px, i, h.gap ? `gap_${h.kind}` : h.kind, cash, date, lotsToClose);
+                h.order.qtyLots = 0;                         // 一次性委托：成交过就作废
+                if (s.pos) {
+                  // 部分平仓后剩余仓位的止损/止盈单不能还挂着原来的手数
+                  for (const other of (s.pos.orders || [])) {
+                    if (other !== h.order && other.qtyLots > 0 && other.qtyLots > s.pos.lots) other.qtyLots = s.pos.lots;
+                  }
+                }
+              }
+            } else {
+              cash = this._settleAdds(s, bar, i, cash, positions, priceOf);
             }
           }
         }
@@ -260,15 +328,15 @@ export class PortfolioEngine {
                   } else {
                     const fee = this._fee(spec, px, lots, {});
                     cash -= (px * spec.multiplier * marginRate * lots + fee);
-                    const b = makeBracket({ entryPrice: px, dir: want, stopPct: o.stopPct, rr: o.targetRr });
+                    const orders = this._buildOrders(sig, want, px, lots);
+                    const stopOrder = orders.find(x => x.kind === ORDER_KIND.STOP);
                     s.pos = {
                       dir: want, lots, entryPrice: px, entryIdx: i, entryDate: date, lastSettle: px,
                       margin: px * spec.multiplier * (spec.marginRate ?? 0.1) * lots, feePaid: fee,
-                      stop: b.ok ? b.orders.find(x => x.kind === ORDER_KIND.STOP).price : null,
-                      orders: b.ok ? b.orders.slice() : [],
+                      stop: stopOrder ? stopOrder.price : null,
+                      orders,
                       peak: bar.high, trough: bar.low, reason: sig.reason || 'signal'
                     };
-                    if (b.ok && o.trailPct) s.pos.orders.trailCfg = { pct: o.trailPct };
                   }
                 }
               }
@@ -282,8 +350,11 @@ export class PortfolioEngine {
       if (o.settlement) {
         for (const s of positions.values()) {
           if (!s.pos || d === 0) continue;
-          const settle = s._lastClose;
+          const hasSettlement = Number.isFinite(s._lastBar?.settlement) && s._lastBar.settlement > 0;
+          const settle = hasSettlement ? s._lastBar.settlement : s._lastClose;
           if (settle === undefined) continue;
+          if (hasSettlement) this._settledReal = (this._settledReal || 0) + 1;
+          else this._settledProxy = (this._settledProxy || 0) + 1;
           const segPnl = (s.pos.dir === DIR.LONG ? settle - s.pos.lastSettle : s.pos.lastSettle - settle) * s.spec.multiplier * s.pos.lots;
           const newMargin = settle * s.spec.multiplier * (s.spec.marginRate ?? 0.1) * s.pos.lots;
           const eq = cash + s.pos.margin + segPnl;
@@ -369,28 +440,110 @@ export class PortfolioEngine {
     return (s.pos.dir === DIR.LONG ? price - s.pos.entryPrice : s.pos.entryPrice - price) * s.spec.multiplier * s.pos.lots;
   }
 
+  /**
+   * 金字塔加仓：突破加仓单成交后按手数加权平均成本，保证金/手续费逐笔累加。
+   * 资金不足或板锁挡住要记账，不能静默跳过 —— 否则「计划加 3 次」和实际加上的次数对不上。
+   */
+  _settleAdds(s, bar, idx, cash, positions, priceOf) {
+    const pos = s.pos;
+    if (!pos || !pos.orders || !pos.orders.some(o => o.kind === ORDER_KIND.ADD)) return cash;
+    if (idx <= pos.entryIdx) return cash;
+    const adds = evalAddOrders(pos.orders, bar, pos.dir);
+    for (const a of adds) {
+      if (!s.pos || s.pos !== pos) break;
+      if (this.pyramid && (pos.addCount || 0) >= this.pyramid.maxAdds) break;
+      if (s.rules?.tPlus1 && String(bar.date).slice(0, 10) === String(s.bars[pos.entryIdx].date).slice(0, 10)) {
+        this.rejects.push({ date: bar.date, symbol: s.symbol, kind: 'tPlus1', reason: 'T+1：当日买入不可当日加仓' });
+        break;
+      }
+      const side = pos.dir === DIR.LONG ? 'buy' : 'sell';
+      const px = this._slip(a.price, side, s.spec.tick || 1);
+      if (bar.suspended) {
+        this.rejected.suspended++;
+        this.rejects.push({ date: bar.date, symbol: s.symbol, kind: 'suspended', reason: '停牌日不可加仓' });
+        continue;
+      }
+      const stale = bar.stalePrevClose || bar.gapNaturalDays > 8;
+      if (s.rules && !stale) {
+        const gate = s.rules.canFillAt(side, px, s.bars[idx - 1]?.close, { closing: false, sealRef: bar.open });
+        if (!gate.ok) {
+          this.rejected.boardLock++;
+          this.rejects.push({ date: bar.date, symbol: s.symbol, kind: 'boardLock', reason: gate.reason });
+          continue;
+        }
+      }
+      let lots = Math.max(1, Math.round(a.order.qtyLots ?? 1));
+      const marginRate = s.spec.marginRate ?? 0.1;
+      const marginPerLot = px * s.spec.multiplier * marginRate;
+      const feePerLot = this._fee(s.spec, px, 1, {});
+      const equity = this._equity(cash, positions, priceOf);
+      const marginCap = Math.max(0, this.o.maxMarginPct * equity - this._usedMargin(positions));
+      while (lots > 0 && lots * (marginPerLot + feePerLot) > Math.min(marginCap, cash)) lots--;
+      if (lots <= 0) {
+        this.rejected.cash++;
+        this.rejects.push({ date: bar.date, symbol: s.symbol, kind: 'cash',
+          reason: `加仓资金不足（可用 ${Math.round(cash)}、保证金上限余额 ${Math.round(marginCap)}）` });
+        continue;
+      }
+      const fee = this._fee(s.spec, px, lots, {});
+      cash -= (marginPerLot * lots + fee);
+      const total = pos.lots + lots;
+      const oldLots = pos.lots;
+      const base = pos.lastSettle ?? pos.entryPrice;
+      pos.lastSettle = Math.round(((base * oldLots + px * lots) / total) * 1e6) / 1e6;
+      pos.entryPrice = Math.round(((pos.entryPrice * oldLots + px * lots) / total) * 1e6) / 1e6;
+      pos.lots = total;
+      pos.margin = round2(pos.margin + marginPerLot * lots);
+      pos.feePaid = round2(pos.feePaid + fee);
+      pos.addCount = (pos.addCount || 0) + 1;
+      // 只把仍有效的止损/止盈单扩到新仓位；已经成交过的单 qtyLots=0，不能借加仓复活
+      for (const o of pos.orders) {
+        if ((o.kind === ORDER_KIND.STOP || o.kind === ORDER_KIND.TARGET) && o.qtyLots > 0) o.qtyLots = pos.lots;
+      }
+      a.order.qtyLots = 0;
+      this.adds = (this.adds || 0) + 1;
+    }
+    return cash;
+  }
+
   _usedMargin(positions) {
     let m = 0;
     for (const s of positions.values()) if (s.pos) m += s.pos.margin;
     return m;
   }
 
-  _close(s, price, idx, reason, cash, date) {
+  /**
+   * 平仓。`lotsToClose` 省略/等于持仓手数时是全平；小于就是分批止盈的一部分。
+   * 保证金按比例释放、开仓费按比例摊、平仓费按本次手数算 —— 三处必须同一批，
+   * 否则部分平仓会把剩余仓位的成本基础算歪，后半段盈亏全是错的。
+   */
+  _close(s, price, idx, reason, cash, date, lotsToClose = null) {
     const spec = s.spec, pos = s.pos;
     if (!pos) return cash;
-    const grossRecord = (pos.dir === DIR.LONG ? price - pos.entryPrice : pos.entryPrice - price) * spec.multiplier * pos.lots;
-    const grossCash = (pos.dir === DIR.LONG ? price - pos.lastSettle : pos.lastSettle - price) * spec.multiplier * pos.lots;
-    const fee = this._fee(spec, price, pos.lots, { sell: pos.dir === DIR.LONG, closeToday: idx === pos.entryIdx });
-    cash += pos.margin + grossCash - fee;
+    const closing = lotsToClose === null ? pos.lots : Math.max(1, Math.min(pos.lots, Math.round(lotsToClose)));
+    const beforeLots = pos.lots;
+    const frac = closing / beforeLots;
+    const marginReleased = pos.margin * frac;
+    const grossRecord = (pos.dir === DIR.LONG ? price - pos.entryPrice : pos.entryPrice - price) * spec.multiplier * closing;
+    const grossCash = (pos.dir === DIR.LONG ? price - pos.lastSettle : pos.lastSettle - price) * spec.multiplier * closing;
+    const sameDay = idx === pos.entryIdx;
+    const exitFee = this._fee(spec, price, closing, { sell: pos.dir === DIR.LONG, closeToday: sameDay });
+    const entryFeeShare = pos.feePaid * frac;
+    const net = grossRecord - entryFeeShare - exitFee;
+    cash += marginReleased + grossCash - exitFee;
+    pos.lots -= closing;
+    pos.margin = round2(pos.margin - marginReleased);
+    pos.feePaid = round2(pos.feePaid - entryFeeShare);
+    if (pos.lots <= 0) { pos.lots = 0; pos.margin = 0; pos.feePaid = 0; s.pos = null; }
     this.trades.push({
       symbol: s.symbol, name: s.name, id: this.trades.length + 1,
       dir: pos.dir === DIR.LONG ? 'long' : 'short',
       entryIdx: pos.entryIdx, entryDate: pos.entryDate, entryPrice: pos.entryPrice,
-      exitIdx: idx, exitDate: date, exitPrice: price, lots: pos.lots,
-      gross: round2(grossRecord), fee: round2(pos.feePaid + fee), netPnL: round2(grossRecord - pos.feePaid - fee),
-      holdingBars: idx - pos.entryIdx, entryReason: pos.reason, exitReason: reason
+      exitIdx: idx, exitDate: date, exitPrice: price, lots: closing,
+      gross: round2(grossRecord), fee: round2(entryFeeShare + exitFee), netPnL: round2(net),
+      holdingBars: idx - pos.entryIdx, entryReason: pos.reason, exitReason: reason,
+      partial: closing < beforeLots ? true : undefined
     });
-    s.pos = null;
     return cash;
   }
 
@@ -403,7 +556,13 @@ export class PortfolioEngine {
       symbols: this.entries.map(e => e.symbol),
       sizing: { mode: this.o.sizing, riskPct: this.o.riskPct, atrMult: this.o.atrMult, targetVolPct: this.o.targetVolPct },
       exposure: { maxMarginPct: this.o.maxMarginPct, peakMargin: Math.max(0, ...curve.map(p => p.margin)), settlement: !!this.o.settlement },
-      note: '共享现金池：结算价用收盘价代理；不做跨品种对冲保证金减免；组合层不支持部分平仓。'
+      adds: this.adds || 0,
+      note: `共享现金池：${this.o.settlement
+        ? (this._settledReal
+          ? `结算价 ${this._settledReal} 根用交易所价${this._settledProxy ? `、${this._settledProxy} 根缺数据回退收盘价` : ''}`
+          : '结算价用收盘价代理（数据源未提供结算价）')
+        : '不逐日结算，浮动留到平仓'}；`
+        + '不做跨品种对冲保证金优惠（全额占用，偏保守）；部分平仓与金字塔加仓走同一份条件单判定。'
     };
   }
 }

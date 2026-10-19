@@ -1,5 +1,6 @@
 import { test, assert } from './harness.js';
-import { calendarDayGap, annotateGaps, checkAdjustmentContinuity, checkRolloverGaps, tradingCalendarOf } from '../src/markets/dataQuality.js';
+import { calendarDayGap, annotateGaps, checkAdjustmentContinuity, checkRolloverGaps, tradingCalendarOf, repairAdjustmentGaps } from '../src/markets/dataQuality.js';
+import { isTradingDay, calendarCoverage } from '../src/markets/tradingCalendar.js';
 import { BacktestEngine, DIR } from '../src/core/backtestEngine.js';
 
 const mk = (date, o, h, l, c, v = 1000) => ({ date, open: o, high: h, low: l, close: c, volume: v });
@@ -28,24 +29,63 @@ test('annotateGaps：有参照序列时能真指出停牌了哪几天', () => {
   assert.eq(resumed.suspendedDays, 5);
 });
 
-test('annotateGaps：没有参照时不许把长假谎报成停牌', () => {
-  // 只有本品种自己的序列：国庆 8 天缺口和停牌 8 天在数据上长得一模一样
+test('annotateGaps：没有参照时用内置日历认出国庆长假，不许谎报停牌', () => {
+  // 国庆 8 天缺口与停牌 8 天在单品种数据上长得一样；内置日历知道 10-01..10-07 是休市
   const bars = [mk('2024-09-30', 10, 10, 10, 10), mk('2024-10-08', 10, 10, 10, 10), mk('2024-10-09', 10, 10, 10, 10)];
-  const r = annotateGaps(bars, {});
-  assert.eq(r.calendarKnown, false, '没有交易日历参照时必须如实报告');
-  assert.eq(r.suspensions.length, 0, '拿不到参照就不能声称"这是停牌"');
-  assert.eq(r.longGaps.length, 1, '长缺口本身要如实记下来，标为"无法与长假区分"');
-  assert.ok(r.longGaps[0].naturalDays >= 8);
-  assert.ok(r.bars[1].stalePrevClose === true, '缺口过长时前收盘价已不代表昨天的市场，板幅判定必须被跳过');
-  assert.ok(!('suspendedDays' in r.bars[1]), '没参照就不许造出停牌天数这种数字');
+  const r = annotateGaps(bars, { market: 'ashare' });
+  assert.eq(r.calendarKnown, true);
+  assert.eq(r.calendarSource, 'builtin');
+  assert.eq(r.suspensions.length, 0, '长假不是停牌');
+  assert.eq(r.longGaps.length, 0, '有日历时不该再把长假塞进"无法区分"的缺口里');
+  assert.ok(!r.bars[1].stalePrevClose, '节后第一天的前收盘仍是有效的板幅基准，不能跳过板锁');
+  assert.ok(!('suspendedDays' in r.bars[1]), '没有停牌就不许造出停牌天数');
 });
 
-test('tradingCalendarOf：有参照用参照，没参照退回自身日期', () => {
+test('annotateGaps：内置日历能认出真正的停牌（缺的是一周中的交易日）', () => {
+  // 2024-03-04(一) ~ 03-08(五) 都是交易日，本品种整周没有 bar → 停牌 5 天
+  const bars = [mk('2024-03-01', 10, 10, 10, 10), mk('2024-03-11', 10, 10, 10, 10), mk('2024-03-12', 10, 10, 10, 10)];
+  const r = annotateGaps(bars, { market: 'ashare' });
+  assert.eq(r.calendarKnown, true);
+  assert.eq(r.suspensions.length, 1, `应识别出一次停牌，实际 ${JSON.stringify(r.suspensions)}`);
+  assert.eq(r.suspensions[0].days, 5);
+  assert.ok(r.bars[1].resumedAfterSuspension);
+  assert.eq(r.bars[1].suspendedDays, 5);
+  assert.ok(r.bars[1].stalePrevClose, '停牌 5 个交易日后复牌，前收盘已不是有效板幅基准');
+});
+
+test('annotateGaps：超出内置日历覆盖范围时如实退回"无法区分"', () => {
+  // 2035 年内置日历还没生成（未来休市安排也不该猜）
+  const bars = [mk('2035-09-28', 10, 10, 10, 10), mk('2035-10-08', 10, 10, 10, 10)];
+  const r = annotateGaps(bars, { market: 'ashare' });
+  assert.eq(r.calendarKnown, false);
+  assert.eq(r.longGaps.length, 1, '覆盖不到就只报自然日缺口');
+  assert.ok(/只覆盖/.test(r.calendarReason || ''));
+});
+
+test('内置日历：A股节假日、期货夜盘日期、覆盖边界都必须对', () => {
+  assert.eq(isTradingDay('2024-10-01', 'ashare'), false, '国庆 A股休市');
+  assert.eq(isTradingDay('2024-10-08', 'ashare'), true, '国庆后第一个交易日');
+  assert.eq(isTradingDay('2024-02-09', 'ashare'), false, '除夕休市');
+  assert.eq(isTradingDay('2024-02-19', 'ashare'), true, '春节后开市');
+  assert.eq(isTradingDay('2015-10-01', 'ashare'), false);
+  assert.eq(isTradingDay('2015-10-01', 'futures'), true, 'RB0 有夜盘 bar 记在 10-01，期货日历要认');
+  assert.eq(isTradingDay('2024-03-09', 'ashare'), false, '周末');
+  assert.eq(isTradingDay('2035-01-02', 'ashare'), null, '超出覆盖面只能返回 null，不能猜');
+  const cov = calendarCoverage('ashare');
+  assert.ok(cov.first <= '1990-12-19' && cov.last >= '2026-10-19');
+});
+
+test('tradingCalendarOf：有参照用参照，没参照用内置日历，覆盖不到才退回自身日期', () => {
   const bars = [mk('2024-01-02', 1, 1, 1, 1), mk('2024-01-03', 1, 1, 1, 1)];
   const ref = [mk('2024-01-02', 1, 1, 1, 1), mk('2024-01-03', 1, 1, 1, 1), mk('2024-01-04', 1, 1, 1, 1)];
   assert.eq(tradingCalendarOf(bars, ref).dates.length, 3);
-  assert.eq(tradingCalendarOf(bars, null).dates.length, 2);
-  assert.eq(tradingCalendarOf(bars, null).calendarKnown, false);
+  const builtin = tradingCalendarOf(bars, null);
+  assert.eq(builtin.calendarKnown, true);
+  assert.eq(builtin.calendarSource, 'builtin');
+  assert.eq(builtin.dates.length, 2);
+  const far = tradingCalendarOf([mk('2035-01-02', 1, 1, 1, 1)], null);
+  assert.eq(far.calendarKnown, false);
+  assert.eq(far.dates.length, 1);
 });
 
 // ---------- 复权连续性 ----------
@@ -72,6 +112,34 @@ test('checkAdjustmentContinuity：正常涨跌停范围内不报警，无板幅�
   const r = checkAdjustmentContinuity(idx, { limitPct: null });
   assert.eq(r.usable, true, '指数没有涨跌停限制，不能拿板幅去判它');
   assert.eq(r.issues.length, 0);
+});
+
+test('repairAdjustmentGaps：10 送 10 的腰斩按复权因子接回，成交额/量不动', () => {
+  const bars = [
+    mk('2024-05-06', 100, 101, 99, 100),
+    mk('2024-05-07', 100.5, 101, 99, 100.5),
+    mk('2024-05-08', 50, 51, 49, 50),                 // 10 送 10
+    mk('2024-05-09', 50.2, 51, 50, 50.5)
+  ];
+  bars[0].amount = 123456; bars[0].volume = 999;
+  const r = repairAdjustmentGaps(bars, { limitPct: 0.10 });
+  assert.eq(r.changed, true);
+  assert.eq(r.fixes.length, 1);
+  assert.near(r.bars[1].close, 50, 1e-6, '前收要接回当天开盘');
+  assert.near(r.bars[1].close / r.bars[0].close, 100.5 / 100, 1e-6, '历史段整体按同一因子缩放');
+  assert.eq(r.bars[2].open, 50, '断崖当根及其后不动');
+  assert.eq(r.bars[0].volume, 999, '成交量不是价格，不能乘复权因子');
+  assert.eq(r.bars[0].amount, 123456, '成交额是当时真实发生的钱，不能缩放');
+  assert.eq(checkAdjustmentContinuity(r.bars, { limitPct: 0.10 }).usable, true, '修完必须通过连续性校验');
+  assert.eq(bars[0].close, 100, '入参不能被就地改掉');
+});
+
+test('repairAdjustmentGaps：超出合理复权范围的跳空不硬修', () => {
+  const bars = [mk('2024-05-06', 100, 101, 99, 100), mk('2024-05-07', 1100, 1101, 1099, 1100)];
+  const r = repairAdjustmentGaps(bars, { limitPct: 0.10, maxRatio: 4 });
+  assert.eq(r.changed, false);
+  assert.eq(r.skipped.length, 1);
+  assert.eq(r.bars[1].open, 1100, '宁可报出来不修，也不要把代码错配当成除权');
 });
 
 test('checkRolloverGaps：主力换月当天的跳空单列，不与未复权混淆', () => {
