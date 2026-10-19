@@ -17,6 +17,58 @@ const num = (v, d = 2) => (v === null || v === undefined || !Number.isFinite(v))
 const money = (v) => (v === null || !Number.isFinite(v)) ? '—' : Math.round(v).toLocaleString('zh-CN');
 const esc = (s) => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
+/**
+ * 参数的中文名与提示。策略库里存的是 `fast/slow/...` 这种给代码看的键，
+ * 直接把它们当标签摆给用户，等于要求用户先读源码才知道该调什么。
+ * 这里只做展示层映射，不改策略库的键名 —— 跑批/寻优/历史结果仍用原键。
+ */
+const PARAM_LABELS = {
+  fast: '快线', slow: '慢线', signal: '信号线周期', mode: '均线类型',
+  atrLen: 'ATR周期', stopAtr: '初始止损(ATR倍)', trailAtr: '移动止损(ATR倍)', bothWays: '允许反手',
+  entry: '入场回看(根)', exit: '出场回看(根)', n: '周期N(根)', k1: '上轨系数', k2: '下轨系数',
+  zeroFilter: '零轴过滤', swingPct: '摆动幅度%', lookback: '回看根数', period: 'RSI周期',
+  low: '超卖线', high: '超买线', exitLevel: '退出线',
+  maFast: '快线', maMid: '中线', maSlow: '慢线', rangeLook: '区间回看(根)',
+  minAboveLow: '站上低点最少条', maxBelowHigh: '距高点最多%', riseLook: '上涨回看(根)',
+  useRs: '相对强度过滤', pivotLook: '枢轴回看(根)', pivotVolMul: '枢轴量能倍数',
+  stopPct: '止损%', exitMa: '退出均线',
+  maLen: '均线周期', adxLen: 'ADX周期', adxMin: 'ADX阈值', breakout: '突破回看(根)',
+  volLen: '量能周期', volMul: '量能倍数',
+  startMul: '起涨量倍数', shrinkMul: '回调缩量倍数', minPull: '最短回调(根)',
+  maxPull: '最长回调(根)', breakMul: '突破量倍数', exitLowLook: '退出低点回看(根)'
+};
+const PARAM_HINTS = {
+  fast: '短周期均线；越小越灵敏，也越容易被震荡打脸',
+  slow: '长周期均线；必须大于快线',
+  atrLen: 'ATR 回看根数；止损/移动止损都按它算',
+  stopAtr: '0 = 不挂初始止损；趋势策略常用 1.5~2 倍 ATR',
+  trailAtr: '从持仓极值回撤 N 倍 ATR 收紧止损；0 = 不移动',
+  bothWays: '关闭则只做多，不再反手做空',
+  mode: 'EMA 响应快；SMA 更平滑',
+  zeroFilter: '只做与 MACD 零轴同向的信号',
+  useRs: '要求品种强于基准；没有基准数据时会自动跳过',
+  minPull: 'N 字回调允许的最少根数',
+  maxPull: 'N 字回调允许的最多根数',
+  startMul: '起涨根成交量至少是均量的几倍；调低更容易触发',
+  shrinkMul: '回调段每根成交量最多是均量的几倍；调高更容易触发',
+  breakMul: '突破根成交量至少是均量的几倍；调低更容易触发'
+};
+const PARAM_OPTIONS = { mode: [['ema', 'EMA（响应快）'], ['sma', 'SMA（更平滑）']] };
+const STRATEGY_DESC = {
+  maCross: '快慢均线交叉：金叉做多、死叉反手；最基础的趋势跟随。',
+  donchianBreak: '唐奇安通道：突破 N 日高点追多，跌破 N 日低点反手，海龟式。',
+  dualThrust: 'Dual Thrust：用前 N 日振幅定上下轨，突破区间才入场。',
+  macdTrend: 'MACD 趋势：快慢线与信号线定方向，可加零轴过滤。',
+  hhLlStructure: '高低点结构：按 HH/HL 判趋势，结构破坏才出场。',
+  rsiReversion: 'RSI 均值回归：超买做空、超卖做多；作为趋势策略的对照，不是趋势系统。',
+  minerviniTemplate: 'Minervini 趋势模板 + 枢轴突破；参数最多，建议先用默认值。',
+  trendRegime: '趋势区间过滤：均线/ADX 确认趋势，放量突破才入场。',
+  nVolumePattern: 'N 字量价：倍量起涨 → 缩量回调 → 放量突破；条件较严，0 笔成交时先调低量能倍数。'
+};
+const paramLabel = (k) => PARAM_LABELS[k] || k;
+const paramValueLabel = (k, v) => k === 'mode'
+  ? (v === 'ema' ? 'EMA' : v === 'sma' ? 'SMA' : v) : v;
+
 export class BacktestPanel {
   constructor(chart, rootId) {
     this.chart = chart;
@@ -50,7 +102,7 @@ export class BacktestPanel {
       <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; padding:8px 4px;">
         <label style="font-size:11px; color:var(--text-muted);">策略
           <select id="btStrategy" class="form-input" style="width:auto;">
-            ${STRATEGIES.map(s => `<option value="${s.id}" ${s.id === st.id ? 'selected' : ''}>${s.name}</option>`).join('')}
+            ${STRATEGIES.map(s => `<option value="${s.id}" title="${esc(STRATEGY_DESC[s.id] || '')}" ${s.id === st.id ? 'selected' : ''}>${s.name}</option>`).join('')}
           </select>
         </label>
         <label style="font-size:11px; color:var(--text-muted);">区间
@@ -69,13 +121,14 @@ export class BacktestPanel {
             <option value="fixed">固定手数</option>
           </select>
         </label>
-        <label style="font-size:11px; color:var(--text-muted);">单笔占比%
+        <label data-sizing="notional" style="font-size:11px; color:var(--text-muted);">单笔占比%
           <input id="btNotional" class="form-input" type="number" value="25" min="1" max="100" style="width:56px;" /></label>
-        <label style="font-size:11px; color:var(--text-muted);">固定手数
+        <label data-sizing="fixed" style="font-size:11px; color:var(--text-muted);">固定手数
           <input id="btLots" class="form-input" type="number" value="1" min="1" style="width:52px;" /></label>
         <label style="font-size:11px; color:var(--text-muted);">滑点tick
           <input id="btSlip" class="form-input" type="number" value="1" min="0" style="width:48px;" /></label>
-        <label style="font-size:11px; color:var(--text-muted); display:flex; align-items:center; gap:4px;">
+        <label style="font-size:11px; color:var(--text-muted); display:flex; align-items:center; gap:4px;"
+          title="仅期货有效；A股按 T+1 与仅做多规则处理，勾了也不会开空">
           <input id="btAllowShort" type="checkbox" checked /> 允许做空</label>
         <label style="font-size:11px; color:var(--text-muted); display:flex; align-items:center; gap:4px;"
           title="当日无负债结算：每天按收盘价盯市、重算占用保证金，浮亏真的从可用资金里扣。关掉则浮盈浮亏只在平仓时入账（旧口径）。">
@@ -100,9 +153,18 @@ export class BacktestPanel {
       <div id="btDq" style="padding:6px 4px 0; font-size:11px; color:var(--text-muted);"></div>
       <div id="btOut" style="padding:8px 4px; color:var(--text-muted); font-size:12px;">
         选策略与参数后点【运行回测】。成交口径为<b style="color:var(--accent-gold);">信号次日开盘成交</b>，
-        含手续费、平今费与滑点；跳空穿透止损按开盘价成交，不做美化。
+        含手续费、平今费与滑点；跳空穿透止损按开盘价成交，不做美化。<br>
+        <span style="font-size:11px; opacity:.8;">默认参数只用于跑通口径，不代表策略能赚钱；判断策略请用寻优与 Walk-Forward 的样本外结果。</span>
       </div>`;
     this.renderParams();
+    const syncSizing = () => {
+      const mode = this.root.querySelector('#btSizing').value;
+      this.root.querySelectorAll('[data-sizing]').forEach(el => {
+        el.style.display = el.getAttribute('data-sizing') === mode ? '' : 'none';
+      });
+    };
+    this.root.querySelector('#btSizing').addEventListener('change', syncSizing);
+    syncSizing();
     this.root.querySelector('#btStrategy').addEventListener('change', () => this.renderParams());
     this.root.querySelector('#btRun').addEventListener('click', () => this.run());
     this.root.querySelector('#btCheck').addEventListener('click', () => {
@@ -118,16 +180,29 @@ export class BacktestPanel {
   renderParams() {
     const st = STRATEGIES.find(s => s.id === this.root.querySelector('#btStrategy').value);
     const box = this.root.querySelector('#btParams');
-    box.innerHTML = Object.entries(st.params).map(([k, v]) => {
+    const inputs = Object.entries(st.params).map(([k, v]) => {
       const isBool = typeof v === 'boolean';
-      const isStr = typeof v === 'string';
+      const options = PARAM_OPTIONS[k];
       const input = isBool
         ? `<input data-p="${k}" data-t="bool" type="checkbox" ${v ? 'checked' : ''} style="width:auto;" />`
-        : isStr
-          ? `<input data-p="${k}" data-t="str" value="${esc(v)}" class="form-input" style="width:70px;" />`
-          : `<input data-p="${k}" data-t="num" type="number" value="${v}" step="${Math.abs(v) < 1 ? 0.05 : 1}" class="form-input" style="width:64px;" />`;
-      return `<label style="font-size:11px; color:var(--text-muted); display:flex; align-items:center; gap:4px;">${k} ${input}</label>`;
-    }).join('') + `<span style="font-size:11px; color:var(--text-muted); align-self:center;">— ${esc(st.name)} 默认参数</span>`;
+        : options
+          ? `<select data-p="${k}" data-t="str" class="form-input" style="width:118px;">`
+            + options.map(([val, label]) => `<option value="${esc(val)}" ${v === val ? 'selected' : ''}>${esc(label)}</option>`).join('')
+            + '</select>'
+          : typeof v === 'string'
+            ? `<input data-p="${k}" data-t="str" value="${esc(v)}" class="form-input" style="width:80px;" />`
+            : `<input data-p="${k}" data-t="num" type="number" value="${v}" step="${Math.abs(v) < 1 ? 0.05 : 1}" class="form-input" style="width:68px;" />`;
+      const hint = PARAM_HINTS[k] ? ` title="${esc(PARAM_HINTS[k])}"` : '';
+      return `<label style="font-size:11px; color:var(--text-muted); display:flex; align-items:center; gap:4px;"${hint}>${esc(paramLabel(k))} ${input}</label>`;
+    }).join('');
+    box.innerHTML = `
+      <div style="flex-basis:100%; font-size:11px; color:var(--text-muted);">
+        ${esc(STRATEGY_DESC[st.id] || '')}
+        <span style="opacity:.7;">参数名后括号是单位；改完点「运行回测」即可。</span>
+      </div>
+      ${inputs}
+      <button class="btn btn-sm" id="btResetParams" style="font-size:11px;" title="把当前策略的参数恢复为策略库默认值">恢复默认</button>`;
+    box.querySelector('#btResetParams')?.addEventListener('click', () => this.renderParams());
   }
 
   collectParams() {
@@ -184,6 +259,7 @@ export class BacktestPanel {
     parts.push(ann.calendarKnown
       ? (ann.calendarSource === 'builtin'
         ? `已用内置${esc(ann.calendarLabel || '')}交易日历区分停牌与节假日`
+          + (ann.calendarPartial ? `（${esc(ann.calendarReason || '部分日期超出日历覆盖')}）` : '')
         : '已用参照交易日历区分停牌与节假日')
       : `<span style="color:var(--accent-gold);">无可用的交易日历${ann.calendarReason ? `（${esc(ann.calendarReason)}）` : ''}：长假与停牌在单品种数据里无法区分，只报自然日缺口</span>`);
     if (cont.issues.length) {
@@ -203,7 +279,10 @@ export class BacktestPanel {
     }
     if (!keepsOrder) parts.push('<span style="color:var(--up-color);">K 线日期不是升序，缺口标注已跳过（否则图上标记会错位）</span>');
     if (staleCount) parts.push(`前收盘失效（缺口过长）<b>${staleCount}</b> 根：这些 bar 的涨跌停判定已跳过`);
-    if (host) host.innerHTML = `🩺 数据体检 · ${parts.join(' · ')}`;
+    if (host) {
+      host.innerHTML = `<div style="margin-bottom:2px;">🩺 数据体检</div>`
+        + parts.map(p => `<div style="margin-top:2px;">· ${p}</div>`).join('');
+    }
     return { bars: keepsOrder ? ann.bars : useBars, usable: keepsOrder && pv.usable,
              gaps, suspensions: ann.suspensions, continuity: cont, priceValidity: pv,
              repair, repaired: !!(repair && repair.changed) };
@@ -271,7 +350,8 @@ export class BacktestPanel {
         equityCurve: raw.equityCurve, trades: raw.trades, capital: s.capital,
         periodsPerYear: this.chart.periodsPerYear || 252, bars: useBars
       });
-      res = { ...raw, metrics, bars: useBars, spec, strategy: def.name, params, signals, rejected: raw.rejected, settlementOn: s.settlement };
+      res = { ...raw, metrics, bars: useBars, spec, strategy: def.name, strategyId: def.id,
+              params, signals, rejected: raw.rejected, settlementOn: s.settlement };
     } catch (e) {
       out.innerHTML = `<span style="color:var(--up-color);">回测失败：${esc(e.message)}</span>`;
       console.error(e);
@@ -299,8 +379,8 @@ export class BacktestPanel {
 
   paintReport(res, resolved) {
     const m = res.metrics;
-    // 基准要换算成「同样这么多钱、同样手数」的权益，不能直接拿价格除资金：
-    // 价格量级（5000 点）和权益量级（20 万元）不同底，相减得到的“超额”毫无意义。
+    // 基准用「第一笔成交的手数」从区间首根开盘持有到末根，按同样本金折算；
+    // 这不是等资金/等风险基准，只是回答"同样手数一直拿着会怎样"的粗略对照。
     const lots0 = res.trades.length ? res.trades[0].lots : 1;
     const benchEquity = res.bars.map(b => res.capital + (b.close - res.bars[0].open) * res.spec.multiplier * lots0);
     const cmp = benchmarkCompare(res.equityCurve.map(p => p.equity), benchEquity, res.capital);
@@ -315,6 +395,9 @@ export class BacktestPanel {
 
     this.root.querySelector('#btOut').innerHTML = `
       ${m.ruined ? `<div style="color:var(--up-color); font-weight:700; padding:6px 0;">⚠ 本次回测权益曾归零或转负：年化/Sharpe 无意义，仓位口径过激进，别把它当业绩。</div>` : ''}
+      ${!m.ruined && m.totalReturn < 0 ? `<div style="font-size:11px; color:var(--text-muted); padding:2px 0;">默认参数跑出负收益很常见，不是程序坏了；策略好坏要看样本外、成本敏感性与参数邻域，不要只看这一行。</div>` : ''}
+      ${m.trades === 0 ? `<div style="font-size:11px; color:var(--accent-gold); padding:2px 0;">本次没有触发任何成交：不是撮合失败，而是这个策略/参数在当前数据上没有满足入场条件。可以调低起涨量/突破量门槛，或换品种、周期再试；先看信号是否出现，再谈收益。</div>` : ''}
+      ${m.trades > 0 && m.trades < 10 ? `<div style="font-size:11px; color:var(--accent-gold); padding:2px 0;">本次只有 ${m.trades} 笔成交，Sharpe/胜率还没有统计意义；别据此判断策略好坏。</div>` : ''}
       ${resolved.warning ? `<div style="color:var(--accent-gold); padding:4px 0;">${esc(resolved.warning)}</div>` : ''}
       <div class="kpi-bar" style="margin:6px 0;">
         ${card('总收益率', pct(m.totalReturn), sign(m.totalReturn))}
@@ -329,7 +412,9 @@ export class BacktestPanel {
       <div style="display:flex; gap:24px; flex-wrap:wrap; font-size:11px; color:var(--text-muted); padding:4px 0;">
         <span>品种 <b style="color:var(--text-main);">${esc(res.spec.name || '')} / ${esc(resolved.parsed.contractCode || resolved.parsed.code || '')}</b></span>
         <span>策略 <b style="color:var(--text-main);">${esc(res.strategy)}</b></span>
-        <span>参数 <b>${esc(JSON.stringify(res.params))}</b></span>
+        <span>参数 <b>${esc(Object.entries(res.params).map(([k, v]) =>
+          `${paramLabel(k)}=${typeof v === 'boolean' ? (v ? '开' : '关') : paramValueLabel(k, v)}`).join('，'))}</b></span>
+        <span>说明 <b style="color:var(--text-main); font-weight:400;">${esc(STRATEGY_DESC[res.strategyId] || '')}</b></span>
         <span>区间 <b>${res.bars[0].date} → ${res.bars[res.bars.length - 1].date}</b>（${res.bars.length} 根）</span>
         <span>期末权益 <b>${money(m.finalEquity)}</b></span>
         <span>总手续费 <b>${money(m.totalFees)}</b></span>
@@ -344,8 +429,8 @@ export class BacktestPanel {
         <span>时间止损出场 <b>${(res.trades || []).filter(t => t.exitReason === 'time_stop').length}</b> 笔</span>
         <span>涨停买不进 <b>${res.rejected.boardLock || 0}</b></span>
         <span>T+1/方向被拒 <b>${(res.rejects || []).filter(x => x.kind === 'tPlus1').length} / ${res.rejected.rules || 0}</b></span>
-        <span>同期持有涨幅 <b class="${sign(cmp.benchReturn)}">${pct(cmp.benchReturn)}</b></span>
-        <span>超额 <b class="${sign(cmp.alpha)}">${pct(cmp.alpha)}</b></span>
+        <span title="用第一笔成交的手数，从区间首根开盘买入并持有到末根，按同样本金折算；不是策略平均仓位，也不是等风险基准">同期持有涨幅 <b class="${sign(cmp.benchReturn)}">${pct(cmp.benchReturn)}</b></span>
+        <span title="策略收益率 − 上述「同期持有」收益率，只作粗略对照">超额 <b class="${sign(cmp.alpha)}">${pct(cmp.alpha)}</b></span>
       </div>
       <div style="display:flex; gap:20px; flex-wrap:wrap;">
         <table class="data-table" style="flex:1; min-width:220px;"><thead><tr><th>年份</th><th>收益</th></tr></thead><tbody>${years}</tbody></table>

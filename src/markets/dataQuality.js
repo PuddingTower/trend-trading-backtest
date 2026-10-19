@@ -47,9 +47,27 @@ export function tradingCalendarOf(bars, refBars, { market = 'ashare' } = {}) {
   const builtin = builtinCalendar(sorted[0], sorted[sorted.length - 1], market);
   if (builtin) {
     return { dates: builtin.dates, own, calendarKnown: true, calendarSource: 'builtin',
-             calendarLabel: builtin.label, calendarReason: null };
+             calendarPartial: false, calendarLabel: builtin.label, calendarReason: null };
   }
   const cov = calendarCoverage(market);
+  // 数据只比日历多出一两天（最常见：最后一根是今天，而日历生成到昨天）时，
+  // 不能因为尾巴一天就丢掉整段日历。用覆盖段 + 实际存在的 bar 日期补齐，
+  // 并显式标 partial；覆盖范围外的缺口仍然不知道，不假装知道。
+  const first = sorted[0], last = sorted[sorted.length - 1];
+  const overlaps = first <= cov.last && last >= cov.first;
+  if (overlaps) {
+    const covered = builtinCalendar(first < cov.first ? cov.first : first,
+                                    last > cov.last ? cov.last : last, market);
+    if (covered) {
+      const outside = [...own].filter(d => d < cov.first || d > cov.last);
+      return {
+        dates: [...new Set([...covered.dates, ...outside])].sort(),
+        own, calendarKnown: true, calendarSource: 'builtin', calendarPartial: true,
+        calendarLabel: covered.label,
+        calendarReason: `内置日历覆盖 ${cov.first} → ${cov.last}，范围外 ${outside.length} 个 bar 日期按实际存在补齐`
+      };
+    }
+  }
   return {
     dates: sorted, own, calendarKnown: false, calendarSource: 'own',
     calendarReason: `${cov.label}内置日历只覆盖 ${cov.first} → ${cov.last}，本次数据超出该范围`
@@ -70,7 +88,7 @@ export function annotateGaps(bars, { refBars = null, minSuspensionDays = 4, mark
     const x = dayKey(a.date), y = dayKey(b.date);
     return x < y ? -1 : x > y ? 1 : 0;
   });
-  const { dates, own, calendarKnown, calendarSource, calendarLabel, calendarReason } =
+  const { dates, own, calendarKnown, calendarSource, calendarLabel, calendarPartial, calendarReason } =
     tradingCalendarOf(list, refBars, { market });
   const suspensions = [], longGaps = [];
   const dateSet = new Set(list.map(b => dayKey(b.date)));
@@ -112,7 +130,7 @@ export function annotateGaps(bars, { refBars = null, minSuspensionDays = 4, mark
     return next;
   });
 
-  return { bars: out, suspensions, longGaps, calendarKnown, calendarSource, calendarLabel, calendarReason };
+  return { bars: out, suspensions, longGaps, calendarKnown, calendarSource, calendarLabel, calendarPartial, calendarReason };
 }
 
 /**

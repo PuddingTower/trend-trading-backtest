@@ -75,6 +75,16 @@ test('内置日历：A股节假日、期货夜盘日期、覆盖边界都必须�
   assert.ok(cov.first <= '1990-12-19' && cov.last >= '2026-10-19');
 });
 
+test('tradingCalendarOf：数据尾巴只超出日历一两天时用部分日历，不丢掉整段', () => {
+  // 最常见的情形：日历生成到昨天，最后一根 bar 是今天。不能因为尾巴一天就报"无日历"。
+  const bars = [mk('2026-10-19', 1, 1, 1, 1), mk('2026-10-20', 1, 1, 1, 1)];
+  const r = tradingCalendarOf(bars, null, { market: 'ashare' });
+  assert.eq(r.calendarKnown, true);
+  assert.eq(r.calendarPartial, true);
+  assert.ok(r.dates.includes('2026-10-19') && r.dates.includes('2026-10-20'));
+  assert.ok(/只覆盖|内置日历覆盖/.test(r.calendarReason || ''));
+});
+
 test('tradingCalendarOf：有参照用参照，没参照用内置日历，覆盖不到才退回自身日期', () => {
   const bars = [mk('2024-01-02', 1, 1, 1, 1), mk('2024-01-03', 1, 1, 1, 1)];
   const ref = [mk('2024-01-02', 1, 1, 1, 1), mk('2024-01-03', 1, 1, 1, 1), mk('2024-01-04', 1, 1, 1, 1)];
