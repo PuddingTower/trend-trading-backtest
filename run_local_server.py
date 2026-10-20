@@ -220,13 +220,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, fmt, *args):
         sys.stdout.write("  %s\n" % (fmt % args))
 
+    def end_headers(self):
+        # 本地开发服务器，一律不缓存。SimpleHTTPRequestHandler 默认只给 Last-Modified，
+        # 浏览器会把 ES module 留在缓存里：改完 JS 普通刷新仍执行旧逻辑，排查半天代码。
+        self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
     def _send(self, code, payload):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 

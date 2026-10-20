@@ -3118,9 +3118,9 @@
         this.currentMarket = parsed.market;
         const adjust = isFutures ? 'none' : (adjustSel ? adjustSel.value : 'hfq');
         const symbol = isFutures ? parsed.contractCode : parsed.code;
-        // 换品种必须清掉上一轮的回测标记，否则旧成交点会叠在新K线上
+        // 换品种先清掉上一轮的回测标记；代码本身等数据真正进图再改（applyDataToChart），
+        // 否则取数失败时图上还是旧品种、研究面板却已按新品种规格算成本。
         this.chartModule.backtestMarkers = null;
-        this.chartModule.backtestCode = symbol;
         this.chartModule.periodsPerYear = periodsPerYear(period);
         // 寻优/组合报表读这个字段标头，以前全仓库没人赋值，于是无论选哪个周期都印 "周期 daily"
         this.chartModule.periodLabel = periodLabel(period);
@@ -3148,7 +3148,7 @@
                 const csrc = { 'eastmoney': '东财', 'eastmoney-direct': '东财直连', 'sina': '新浪',
                                'local-aggregate': '本地日线聚合', 'local-aggregate-60m': '本地60分钟合成' }[cached.meta && cached.meta.source] || '';
                 this.applyDataToChart(cached.data, label,
-                  `已从本地缓存秒开 ${label} (${cached.data.length} 根K线${csrc ? `, 源:${csrc}` : ''}, 缓存时间: ${cached.updateTime})`);
+                  `已从本地缓存秒开 ${label} (${cached.data.length} 根K线${csrc ? `, 源:${csrc}` : ''}, 缓存时间: ${cached.updateTime})`, symbol);
                 this.refreshCacheListUI();
                 return;
               }
@@ -3178,7 +3178,7 @@
           const depth = this.dataDepthNote(parsed, period, out);
           this.applyDataToChart(out.bars, label,
             `🎉 ${label} 同步成功：${out.bars.length} 根K线（源:${src}，起 ${String(out.bars[0].date).slice(0, 10)}，末根 ${out.bars[out.bars.length - 1].date}）`
-            + `${depth ? `｜${depth}` : ''}${negNote}${out.caveat ? `｜⚠ ${out.caveat}` : ''}${out.note ? `｜${out.note}` : ''}`);
+            + `${depth ? `｜${depth}` : ''}${negNote}${out.caveat ? `｜⚠ ${out.caveat}` : ''}${out.note ? `｜${out.note}` : ''}`, symbol);
           this.warnIfThinHistory(parsed, out.bars, period);
           this.refreshCacheListUI();
           return;
@@ -3187,11 +3187,12 @@
         // 缓存里还有一版真实数据就先顶着，但必须说清楚这不是最新行情
         const stale = await MarketDataCache.getCache(cacheKey);
         if (stale && stale.data && stale.data.length) {
-          this.applyDataToChart(stale.data, label, `在线拉取失败，已离线加载本地缓存 ${label} (${stale.data.length} 根K线, 缓存于 ${stale.updateTime})`);
+          this.applyDataToChart(stale.data, label, `在线拉取失败，已离线加载本地缓存 ${label} (${stale.data.length} 根K线, 缓存于 ${stale.updateTime})`, symbol);
           this.refreshCacheListUI();
         } else {
           // 拉不到真数据就留白 —— 本项目不允许用合成K线填空，画一根假线比画不出来更糟
           this.chartModule.setData([]);
+          this.chartModule.backtestCode = null;
           this._loadedBars = [];
           this.syncUI();
         }
@@ -3324,8 +3325,14 @@
         return bits.join('；');
       }
 
-      applyDataToChart(bars, symbol, toastMsg) {
+      applyDataToChart(bars, symbol, toastMsg, code) {
         this._loadedBars = bars;                       // 全量留存，切换起点时免重新拉取
+        // 代码跟数据走：研究面板/回测面板都读 backtestCode 去查合约规格，
+        // 数据换了而代码没换，会把上一个品种的乘数/保证金套在新数据上。
+        if (code) {
+          this.chartModule.backtestCode = code;
+          this.chartModule.backtestMarkers = null;
+        }
         const years = parseFloat(document.getElementById('startOffset').value) || 0;
         let view = bars;
         if (years > 0 && bars.length > 0) {
@@ -3390,7 +3397,8 @@
         const cached = await MarketDataCache.getCache(key);
         if (cached && cached.data && cached.data.length) {
           const symbol = cached.symbol || (cached.meta ? cached.meta.symbol : key.split(/[:_]/)[0]);
-          this.applyDataToChart(cached.data, symbol, `已载入缓存: ${symbol} (${cached.data.length} 根)`);
+          this.currentSymbol = symbol;              // 起点重切片会用 backtestCode，但下单记录等其他入口读 currentSymbol
+          this.applyDataToChart(cached.data, symbol, `已载入缓存: ${symbol} (${cached.data.length} 根)`, symbol);
           const sel = document.getElementById('symbolSelect');
           if (sel) {
             const match = Array.from(sel.options).find(o => o.value.toUpperCase() === String(symbol).toUpperCase());
@@ -3626,7 +3634,8 @@
         // 回测起点：从留存的全量数据里重新切片，无需重新联网拉取
         document.getElementById('startOffset').addEventListener('change', () => {
           if (this._loadedBars && this._loadedBars.length) {
-            this.applyDataToChart(this._loadedBars, this.currentSymbol);
+            const code = this.chartModule.backtestCode || this.currentSymbol;
+            this.applyDataToChart(this._loadedBars, this.currentSymbol, undefined, code);
             this.showToast('已按新起点重新载入，回测进度已重置');
           }
         });
@@ -4618,7 +4627,8 @@
         try {
           const { bars, detectedSymbol } = parseCSV(text);
           const symbol = detectedSymbol || filename.replace(/\.[^.]+$/, '');
-          this.applyDataToChart(bars, symbol, `🎉 成功导入 ${filename}，共 ${bars.length} 根 K 线！`);
+          this.currentSymbol = symbol;
+          this.applyDataToChart(bars, symbol, `🎉 成功导入 ${filename}，共 ${bars.length} 根 K 线！`, symbol);
           document.querySelector('.tab-btn[data-tab="tabTrades"]').click();
         } catch (err) {
           alert('CSV 解析失败: ' + err.message);

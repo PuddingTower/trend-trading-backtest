@@ -20,6 +20,7 @@ import { rulesFor } from '../markets/marketRules.js';
 import { scanUniverse, filterRows, sortRows, scanSummary } from '../markets/scanner.js';
 import { rotationSignals, rotationSnapshot } from '../core/rotation.js';
 import { buyHold } from '../core/backtestEngine.js';
+import { compareStrategies, compareToCsv, COMPARE_COLORS, BENCH_COLOR, MAX_COMPARE } from '../report/strategyCompare.js';
 
 const esc = (s) => String(s === null || s === undefined ? '' : s)
   .replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -95,12 +96,17 @@ export class ResearchPanel {
     this.progress = null;
     this.scanSortKey = 'score';
     this.scanSortDir = 'desc';
+    this.compare = null;
+    this.cmpPicks = null;
     this._worker = null;
     this.bind();
     this.render();
   }
 
-  get code() { return this.api.chart?.currentSymbol || 'RB0'; }
+  // 图表模块没有 currentSymbol，只有 backtestCode（数据真正进图时赋值）。
+  // 之前取 currentSymbol 永远落回 'RB0'：在 EG0/MA 这些乘数同为 10 的品种上不容易露馅，
+  // 换成黄金/铜/股指后，研究面板的保证金、成本、tick 全按螺纹钢算。
+  get code() { return this.api.chart?.backtestCode || this.api.chart?.currentSymbol || 'RB0'; }
   get bars() { return (this.api.chart?.data) || []; }
 
   /** Worker 起不来就退回主线程分块，功能不减，只是慢一点、UI 会卡一下。 */
@@ -140,6 +146,9 @@ export class ResearchPanel {
       else if (act === 'exportCsv') this.exportCsv();
       else if (act === 'exportHtml') this.exportHtml();
       else if (act === 'stop') this.stopRun();
+      else if (act === 'runCompare') this.runCompare();
+      else if (act === 'cmpUse') this.useCompared(el.dataset.id);
+      else if (act === 'cmpExport') this.exportCompareCsv();
     });
     // 核算方式/仓位算法一改，下面这排参数就整块换掉，不重绘的话用户看到的是上一套控件
     this.root.addEventListener('change', (e) => {
@@ -147,6 +156,23 @@ export class ResearchPanel {
       if (id === 'rsPortMode' || id === 'rsPoolSizing') { this.render(); return; }
       // 扫描的四个过滤条件都在 DOM 里，改一个就得重新过滤+排序，否则表格还是上一次的结果
       if (id.startsWith('rsScan') && id !== 'rsScanBench') this.applyScanFilter();
+    });
+    // 对比勾选：更新集合后重绘这一页，让结果区立刻标出「勾选变了、表还是旧的」
+    this.root.addEventListener('change', (e) => {
+      const cid = e.target?.dataset?.cmpid;
+      if (!cid) return;
+      const set = this.cmpPicksSet();
+      if (e.target.checked) {
+        if (set.size >= MAX_COMPARE) {
+          e.target.checked = false;
+          this.api.toast?.(`一次最多对比 ${MAX_COMPARE} 个策略；先去掉一个再勾`);
+          return;
+        }
+        set.add(cid);
+      } else set.delete(cid);
+      // 重绘这一页：结果区要立刻标出「勾选变了，下表还是旧的」。
+      // render 会保留资金/手数/滑点，所以不会把用户填的数抹掉。
+      this.render();
     });
   }
 
@@ -173,23 +199,31 @@ export class ResearchPanel {
   render() {
     if (!this.root) return;
     const bars = this.bars;
+    // render 会重建整块 DOM，资金/手数/滑点不能每次都弹回默认值 —— 切个 tab 就把用户填的数抹掉，
+    // 后面的寻优/对比就会在用户不知情的情况下用另一套参数跑。
+    const keep = (id, d) => {
+      const el = this.root.querySelector(`#${id}`);
+      return el && el.value !== '' ? el.value : d;
+    };
+    const capital = keep('rsCapital', 200000), lots = keep('rsLots', 1), slip = keep('rsSlip', 1);
     const tabs = [['grid', '🎯 参数寻优'], ['wf', '🚪 Walk-Forward'], ['port', '🧺 组合回测'],
-      ['mc', '🎲 蒙特卡洛·成本'], ['scan', '🔍 市场扫描'], ['rep', '📊 报表与导出']]
+      ['mc', '🎲 蒙特卡洛·成本'], ['scan', '🔍 市场扫描'], ['cmp', '🧪 策略对比'], ['rep', '📊 报表与导出']]
       .map(([k, label]) => `<button class="tab-btn ${this.tab === k ? 'active' : ''}" data-rs="tab" data-tab="${k}" style="font-size:12px;">${label}</button>`).join('');
     const head = `
       <div style="display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid var(--border-color);margin-bottom:10px;">${tabs}</div>
       ${bars.length < 60 ? `<div style="color:var(--up-color);padding:10px;">当前图表只有 ${bars.length} 根 K 线，先去「行情与缓存中心」拉一个品种。</div>` : ''}
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px;font-size:12px;">
-        <label>资金<input id="rsCapital" type="number" value="200000" style="${INP}width:92px;" /></label>
-        <label>手数<input id="rsLots" type="number" value="1" min="1" style="${INP}width:56px;" /></label>
-        <label>滑点tick<input id="rsSlip" type="number" value="1" min="0" style="${INP}width:56px;" /></label>
+        <label>资金<input id="rsCapital" type="number" value="${esc(capital)}" style="${INP}width:92px;" /></label>
+        <label>手数<input id="rsLots" type="number" value="${esc(lots)}" min="1" style="${INP}width:56px;" /></label>
+        <label>滑点tick<input id="rsSlip" type="number" value="${esc(slip)}" min="0" style="${INP}width:56px;" /></label>
         <span style="color:var(--text-muted);">品种 ${esc(this.code)} · ${bars.length} 根 · 周期 ${esc(this.api.chart?.periodLabel || 'daily')}</span>
       </div>`;
     const body = this.tab === 'grid' ? this.gridHtml()
       : this.tab === 'wf' ? this.wfHtml()
         : this.tab === 'port' ? this.portHtml()
           : this.tab === 'mc' ? this.mcHtml()
-            : this.tab === 'scan' ? this.scanHtml() : this.reportHtml();
+            : this.tab === 'scan' ? this.scanHtml()
+              : this.tab === 'cmp' ? this.cmpHtml() : this.reportHtml();
     this.root.innerHTML = head + body;
   }
 
@@ -1044,6 +1078,198 @@ export class ResearchPanel {
     this.render();
   }
 
+  // ---------------- 策略对比 ----------------
+  cmpPicksSet() {
+    if (!this.cmpPicks) {
+      const cur = this.api.currentStrategyId?.() || 'donchianBreak';
+      this.cmpPicks = new Set([...new Set([cur, 'donchianBreak', 'maCross'])].slice(0, MAX_COMPARE));
+    }
+    return this.cmpPicks;
+  }
+
+  cmpHtml() {
+    const picks = this.cmpPicksSet();
+    const cards = STRATEGIES.map(s => {
+      const on = picks.has(s.id);
+      const params = Object.entries(s.params).slice(0, 4).map(([k, v]) => `${k}=${v}`).join(' ');
+      return `<label data-cmpcard style="display:flex;gap:7px;align-items:flex-start;padding:7px 9px;border:1px solid ${on ? 'var(--accent-blue)' : 'var(--border-color)'};border-radius:5px;background:${on ? 'rgba(41,98,255,.08)' : 'var(--bg-tertiary)'};cursor:pointer;">
+        <input type="checkbox" data-cmpid="${esc(s.id)}" ${on ? 'checked' : ''} style="margin-top:2px;" />
+        <span style="min-width:0;"><span style="color:#fff;font-size:12px;">${esc(s.name)}</span>
+          <span style="display:block;font-size:10.5px;color:var(--text-muted);margin-top:1px;">默认 ${esc(params)}</span></span>
+      </label>`;
+    }).join('');
+    return `
+      <div style="font-size:12px;color:var(--text-muted);line-height:1.75;margin-bottom:9px;">
+        <b style="color:var(--text-white);">同一品种、同一区间、同一资金/手数/滑点与市场规则</b>，把几个策略各跑一遍。
+        比较的是<b>各自默认参数</b>在这段行情里的表现，不是各自调优后的上限；参数稳不稳要看寻优与 Walk-Forward。
+        统一走固定手数 + 当前滑点/成本，不启用回测面板里的保本止损与时间止损开关。
+        已选 <b data-cmpcount>${picks.size}</b> 个（上限 ${MAX_COMPARE}）。
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:6px;margin-bottom:9px;">${cards}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px;">
+        <button class="btn btn-sm" style="${BTN_HI}" data-rs="runCompare">⚖ 运行对比</button>
+        ${this.compare && !this.compare.error ? `<button class="btn btn-sm" style="${BTN}" data-rs="cmpExport">⬇ 导出 CSV</button>` : ''}
+        ${this.busy === '策略对比计算中' ? `<span style="font-size:12px;color:var(--accent-gold);">计算中…</span>` : ''}
+      </div>
+      ${this.compareHtml_()}`;
+  }
+
+  compareHtml_() {
+    const r = this.compare;
+    if (!r) {
+      return `<div style="font-size:12px;color:var(--text-muted);line-height:1.8;">
+        对比会输出：每个策略的收益/回撤/Sharpe/笔数、归一化权益叠加图、
+        日收益相关性矩阵，以及「各策略日收益等权平均」的合成曲线。
+        相关性低才谈得上互补；几个高相关策略叠在一起，只等于把一个仓位放大。</div>`;
+    }
+    if (r.error) return `<div style="color:var(--up-color);font-size:12px;">${esc(r.error)}</div>`;
+
+    const period = this.api.chart?.periodLabel || 'daily';
+    const last = this.bars.length ? String(this.bars[this.bars.length - 1].date) : '';
+    const stale = r.stamp && (r.stamp.code !== this.code || r.stamp.last !== last || r.stamp.period !== period);
+    // 勾选集合变了但还没重跑：表里仍是上一次的结果，必须说出来，否则读者会把它当成当前勾选
+    const picksStale = [...this.cmpPicksSet()].sort().join(',') !== r.runs.map(x => x.id).sort().join(',');
+    const bench = r.benchmark;
+    const rows = r.runs;
+    const p = r.portfolio;
+
+    const best = (getter, mode = 'max') => {
+      const vals = rows.map(getter).filter(v => Number.isFinite(v));
+      if (!vals.length) return null;
+      return mode === 'max' ? Math.max(...vals) : Math.min(...vals);
+    };
+    const star = (v, b) => (Number.isFinite(v) && b !== null && Math.abs(v - b) < 1e-12 ? '<span style="color:var(--accent-gold);">★</span> ' : '');
+    const bTotal = best(x => x.metrics.totalReturn);
+    const bDD = best(x => x.metrics.maxDDPct, 'min');
+    const bSharpe = best(x => x.metrics.sharpe);
+    const bCalmar = best(x => x.metrics.calmar);
+    const bWin = best(x => x.metrics.winRate);
+
+    const rowHtml = (r0, color, isStrategy) => {
+      const m = r0.metrics;
+      const excess = isStrategy && bench && Number.isFinite(m.totalReturn) && Number.isFinite(bench.metrics.totalReturn)
+        ? m.totalReturn - bench.metrics.totalReturn : null;
+      // 基准没有「自己的胜率/盈亏比」；策略一笔没成交时这些数也没有统计意义，统一显示 —，不摆一个 0 出来
+      const hasTrades = isStrategy && m.trades > 0;
+      return `<tr style="border-top:1px solid var(--border-color);${isStrategy ? '' : 'color:var(--text-muted);'}">
+        <td style="text-align:left;padding:4px 6px;">
+          <span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${color};margin-right:5px;vertical-align:middle;"></span>
+          <span title="${esc(JSON.stringify(r0.params || {}))}">${esc(r0.name)}</span>
+          ${isStrategy ? `<button class="btn btn-sm" style="${BTN}padding:2px 7px;margin-left:6px;" data-rs="cmpUse" data-id="${esc(r0.id)}" title="把这套默认参数交给回测面板继续调">调参</button>` : ''}
+          ${m.ruined ? '<span style="color:var(--up-color);margin-left:4px;">亏光</span>' : ''}
+          ${hasTrades && m.trades < 10 ? '<span style="color:var(--accent-gold);margin-left:4px;" title="少于 10 笔，胜率/Sharpe 统计意义很弱">⚠</span>' : ''}
+          ${isStrategy && m.trades === 0 ? '<span style="color:var(--accent-gold);margin-left:4px;" title="这段行情里没有触发任何成交">0 笔</span>' : ''}
+        </td>
+        <td style="text-align:right;">${isStrategy ? star(m.totalReturn, bTotal) : ''}${pc(m.totalReturn)}</td>
+        <td style="text-align:right;color:${excess === null ? 'var(--text-muted)' : excess >= 0 ? 'var(--up-color)' : 'var(--down-color)'};">${excess === null ? '—' : (excess >= 0 ? '+' : '') + pc(excess)}</td>
+        <td style="text-align:right;">${pc(m.annualReturn)}</td>
+        <td style="text-align:right;">${isStrategy ? star(m.maxDDPct, bDD) : ''}${pc(m.maxDDPct)}</td>
+        <td style="text-align:right;">${isStrategy ? star(m.sharpe, bSharpe) : ''}${nf(m.sharpe, 2)}</td>
+        <td style="text-align:right;">${isStrategy ? star(m.calmar, bCalmar) : ''}${nf(m.calmar, 2)}</td>
+        <td style="text-align:right;">${hasTrades ? star(m.winRate, bWin) + pc(m.winRate, 1) : '—'}</td>
+        <td style="text-align:right;">${hasTrades ? nf(m.payoffRatio, 2) : '—'}</td>
+        <td style="text-align:right;">${m.trades || '—'}</td></tr>`;
+    };
+
+    const strategyRows = rows.map((x, i) => rowHtml(x, COMPARE_COLORS[i % COMPARE_COLORS.length], true)).join('');
+    const benchRow = bench ? rowHtml(bench, BENCH_COLOR, false) : '';
+    const portRow = `<tr style="border-top:1px solid var(--border-color);color:#e2e8f0;background:rgba(255,255,255,.03);">
+      <td style="text-align:left;padding:4px 6px;">
+        <span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:#e2e8f0;margin-right:5px;vertical-align:middle;"></span>
+        等权组合（${p.of} 个策略）</td>
+      <td style="text-align:right;">${pc(p.metrics.totalReturn)}</td>
+      <td style="text-align:right;">—</td>
+      <td style="text-align:right;">${pc(p.metrics.annualReturn)}</td>
+      <td style="text-align:right;">${pc(p.metrics.maxDDPct)}</td>
+      <td style="text-align:right;">${nf(p.metrics.sharpe, 2)}</td>
+      <td style="text-align:right;">${nf(p.metrics.calmar, 2)}</td>
+      <td style="text-align:right;">—</td><td style="text-align:right;">—</td><td style="text-align:right;">—</td></tr>`;
+
+    const corr = compareCorrelationHtml(r);
+    return `
+      ${stale ? `<div style="border:1px solid var(--accent-gold);border-radius:5px;padding:7px 9px;margin-bottom:8px;font-size:12px;color:var(--accent-gold);">
+        ⚠ 这份结果来自 ${esc(r.stamp.code)} · ${esc(r.stamp.last)}（${r.stamp.bars} 根）。当前图表已经换了品种/周期/数据，重新点「运行对比」再引用这些数。
+      </div>` : ''}
+      ${picksStale ? `<div style="border:1px solid var(--accent-gold);border-radius:5px;padding:7px 9px;margin-bottom:8px;font-size:12px;color:var(--accent-gold);">
+        ⚠ 勾选已经变了，下表仍是上一次的 ${r.runs.length} 个策略（${esc(r.runs.map(x => x.name).join('、'))}）。点「运行对比」刷新。
+      </div>` : ''}
+      ${metricCards([
+        ['对齐区间', `${r.range.from} → ${r.range.to}`],
+        ['K 线根数', String(r.range.bars)],
+        ['等权组合收益', pc(p.metrics.totalReturn)],
+        ['等权组合 Sharpe', nf(p.metrics.sharpe, 2)],
+        ['等权组合回撤', pc(p.metrics.maxDDPct)],
+        ['买入持有收益', bench ? pc(bench.metrics.totalReturn) : '—']
+      ])}
+      <div style="overflow:auto;border:1px solid var(--border-color);border-radius:6px;margin:10px 0;">
+        <table style="width:100%;border-collapse:collapse;font-size:12px;">
+          <thead><tr style="background:var(--bg-tertiary);">
+            <th style="text-align:left;padding:5px 6px;">策略</th><th>总收益</th><th title="策略总收益 − 同期买入持有总收益">超额</th>
+            <th>年化</th><th title="越小越好">最大回撤</th><th>Sharpe</th><th>Calmar</th><th>胜率</th><th>盈亏比</th><th>笔数</th>
+          </tr></thead>
+          <tbody>${strategyRows}${benchRow}${portRow}</tbody></table>
+      </div>
+      <div style="font-size:11px;color:var(--text-muted);margin:-4px 0 10px;">
+        ★ = 策略里该项最优（基准与组合不参与比较）。⚠ = 少于 10 笔。「超额」只与<b>同手数买入持有</b>比，不是等风险基准。
+        所有策略共用同一套成本与规则；手数相同，但各策略实际仓位占比可能不同（见回测面板的持仓占比）。
+      </div>
+      ${compareCurveSvg(r)}
+      ${corr}
+      <div style="font-size:11px;color:var(--text-muted);line-height:1.8;margin-top:8px;">
+        ${esc(p.note)}<br>
+        默认参数跑出亏损/跑输基准很常见，这不是程序坏了 —— 换参数前先看寻优的邻域稳健度与 Walk-Forward 效率比，
+        那两页回答的才是「这套逻辑值不值得继续调」。
+      </div>`;
+  }
+
+  runCompare() {
+    const bars = this.bars;
+    if (bars.length < 60) { this.api.toast?.('K 线不足 60 根，先同步一个品种'); return; }
+    const sp = this.specFor(this.code);
+    if (!sp) { this.api.toast?.('当前品种规格无法解析'); return; }
+    const entries = STRATEGIES.filter(s => this.cmpPicksSet().has(s.id)).map(s => s.id);
+    if (entries.length < 2) { this.api.toast?.('至少勾选两个策略才能对比'); return; }
+    const engineOpts = { ...this.engineOpts(), rules: sp.rules };
+    this.busy = '策略对比计算中';
+    this.compare = null;
+    this.render();
+    setTimeout(() => {
+      try {
+        const r = compareStrategies({
+          bars, spec: sp.spec, entries, engineOpts,
+          periodsPerYear: this.api.chart?.periodsPerYear || 252,
+          benchmarkLots: Math.max(1, Number(engineOpts.lots) || 1)
+        });
+        this.compare = r.error ? r : {
+          ...r,
+          stamp: {
+            code: this.code, bars: bars.length, last: String(bars[bars.length - 1].date),
+            period: this.api.chart?.periodLabel || 'daily'
+          }
+        };
+      } catch (e) {
+        this.compare = { error: `对比失败：${e.message}` };
+      }
+      this.busy = '';
+      this.render();
+      if (this.compare && !this.compare.error) this.api.toast?.(`已对比 ${entries.length} 个策略`);
+    }, 20);
+  }
+
+  useCompared(id) {
+    const st = getStrategy(id);
+    if (!st) return;
+    this.api.runBacktestWith?.(id, { ...st.params });
+    this.api.toast?.(`已把「${st.name}」的默认参数交给回测面板`);
+  }
+
+  exportCompareCsv() {
+    const r = this.compare;
+    if (!r || r.error) return;
+    downloadFile(`${this.code}_compare.csv`, compareToCsv(r), 'text/csv');
+    this.api.toast?.('对比结果已导出 CSV');
+  }
+
   // ---------------- 报表 ----------------
   reportHtml() {
     const r = this.report;
@@ -1178,6 +1404,77 @@ function bandChartSvg(r) {
       <path d="${line(b.p50)}" fill="none" stroke="#60a5fa" stroke-width="0.7" vector-effect="non-scaling-stroke" />
       ${actual ? `<path d="${actual}" fill="none" stroke="#f59e0b" stroke-width="0.7" vector-effect="non-scaling-stroke" />` : ''}
     </svg></div>`;
+}
+
+function downsample(values, maxPoints = 600) {
+  if (values.length <= maxPoints) return values;
+  const step = (values.length - 1) / (maxPoints - 1);
+  const out = [];
+  for (let i = 0; i < maxPoints; i++) out.push(values[Math.round(i * step)]);
+  return out;
+}
+
+/** 多策略归一化权益叠加图。横轴不画日期刻度（点数太多会糊），只保留首尾区间说明。 */
+function compareCurveSvg(r) {
+  const series = r.runs.map((x, i) => ({
+    name: x.name, values: x.normalized, color: COMPARE_COLORS[i % COMPARE_COLORS.length], dash: ''
+  }));
+  if (r.benchmark) series.push({ name: r.benchmark.name, values: r.benchmark.normalized, color: BENCH_COLOR, dash: '3,2' });
+  series.push({ name: '等权组合（研究口径）', values: r.portfolio.normalized, color: '#e2e8f0', dash: '5,2' });
+
+  let lo = Infinity, hi = -Infinity;
+  for (const s of series) for (const v of s.values) { if (v < lo) lo = v; if (v > hi) hi = v; }
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return '';
+  const pad = (hi - lo) * 0.06 || 1;
+  const y0 = lo - pad, y1 = hi + pad;
+  const W = 100, H = 44;
+  const pathOf = (values) => {
+    const vs = downsample(values);
+    return vs.map((v, i) => `${i === 0 ? 'M' : 'L'}${(i / (vs.length - 1) * W).toFixed(2)},${(H - (v - y0) / (y1 - y0) * H).toFixed(2)}`).join(' ');
+  };
+  const y100 = H - (100 - y0) / (y1 - y0) * H;
+  return `<div style="margin:10px 0;">
+    <div style="font-size:12px;color:var(--text-white);margin-bottom:3px;">归一化权益（起点 = 100）</div>
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:150px;background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:4px;">
+      <line x1="0" y1="${y100.toFixed(2)}" x2="${W}" y2="${y100.toFixed(2)}" stroke="#848c9e" stroke-width="0.4" stroke-dasharray="1.5,1.5" vector-effect="non-scaling-stroke" />
+      ${series.map(s => `<path d="${pathOf(s.values)}" fill="none" stroke="${s.color}" stroke-width="0.75" ${s.dash ? `stroke-dasharray="${s.dash}"` : ''} vector-effect="non-scaling-stroke" />`).join('')}
+    </svg>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;font-size:11px;color:var(--text-muted);margin-top:4px;">
+      ${series.map(s => `<span><span style="display:inline-block;width:12px;height:2px;background:${s.color};vertical-align:middle;margin-right:4px;"></span>${esc(s.name)}</span>`).join('')}
+      <span>纵轴 ${lo.toFixed(1)} ~ ${hi.toFixed(1)}</span>
+    </div></div>`;
+}
+
+/** 日收益相关性矩阵：蓝=正、橙=负；无波动序列（从没开仓）返回 null，显示 — 而不是假 0。 */
+function compareCorrelationHtml(r) {
+  const { labels, matrix } = r.correlation;
+  if (!labels.length) return '';
+  const cell = (v) => {
+    if (!Number.isFinite(v)) return `<td style="text-align:center;color:var(--text-muted);" title="该序列没有波动，相关系数无定义">—</td>`;
+    const a = 0.10 + Math.abs(v) * 0.55;
+    const bg = v >= 0 ? `rgba(41,98,255,${a.toFixed(2)})` : `rgba(245,158,11,${a.toFixed(2)})`;
+    return `<td style="text-align:center;background:${bg};color:#fff;" title="${v.toFixed(4)}">${v.toFixed(2)}</td>`;
+  };
+  const k = r.runs.length;
+  let sum = 0, cnt = 0;
+  for (let i = 0; i < k; i++) for (let j = i + 1; j < k; j++) {
+    const v = matrix[i][j];
+    if (Number.isFinite(v)) { sum += v; cnt++; }
+  }
+  const avg = cnt ? sum / cnt : null;
+  const verdict = avg === null ? '策略间的相关性无法计算（有策略在整段里从未开仓）。'
+    : avg >= 0.8 ? '高度同质：这几个策略基本在赌同一件事，叠在一起只等于加大仓位。'
+      : avg >= 0.5 ? '中度相关：有一定分散，但别把「多策略」当成独立风险。'
+        : '相关性较低：互补性较好，值得看等权组合的回撤是否比单策略浅。';
+  return `<div style="margin-top:10px;">
+    <div style="font-size:12px;color:var(--text-white);margin-bottom:4px;">日收益相关性矩阵</div>
+    <div style="overflow:auto;"><table style="border-collapse:collapse;font-size:11px;min-width:360px;">
+      <tr><th style="padding:3px 6px;"></th>${labels.map(l => `<th style="padding:3px 5px;color:var(--text-muted);font-weight:400;">${esc(l)}</th>`).join('')}</tr>
+      ${matrix.map((row, i) => `<tr><td style="padding:3px 6px;color:var(--text-muted);white-space:nowrap;">${esc(labels[i])}</td>${row.map(cell).join('')}</tr>`).join('')}
+    </table></div>
+    <div style="font-size:11px;color:var(--text-muted);margin-top:5px;">
+      蓝=正相关、橙=负相关，颜色越深越强；对角线为 1，— 表示无定义。策略间平均 ${avg === null ? '—' : avg.toFixed(2)}：${verdict}
+    </div></div>`;
 }
 
 /** 参数矩阵热图：一行一列的表格，色深按得分。空格保持空白，不画成 0 分。 */
