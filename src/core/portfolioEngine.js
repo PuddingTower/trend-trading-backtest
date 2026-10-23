@@ -20,24 +20,27 @@
 
 import { DIR } from './backtestEngine.js';
 import { ORDER_KIND, evalExitOrders, evalAddOrders, ratchetStop, makeBracket, pyramidScales } from './orders.js';
+import { roundTick } from '../markets/marketRules.js';
 import { atrRiskSize, notionalSize, volTargetSize, annualizedVol } from './sizing.js';
 import { atr } from '../analysis/common.js';
 
 const round2 = (v) => Math.round(v * 100) / 100;
+/** 只有杠杆品种才有保证金结算/强平；A股现货 marginRate=1，不适用。 */
+const isLeveragedSpec = (spec) => (spec?.marginRate ?? 0.1) < 1 - 1e-9;
 
 export class PortfolioEngine {
   /**
    * @param {Array} entries [{symbol,name,bars,spec,rules,strategy,params,allowShort?}]
    * @param {Object} opts {capital, sizing:'atr'|'notional'|'volTarget', riskPct, atrMult,
    *                       atrLen, targetVolPct, maxMarginPct, maintenanceRatio, slippageTicks,
-   *                       settlement:boolean, stopPct/targetRr?}
+   *                       stopPct/targetRr?}
    */
   constructor(entries, opts = {}) {
     this.entries = (entries || []).filter(e => e && e.bars && e.bars.length > 20 && e.strategy);
     this.o = {
       capital: 1_000_000, sizing: 'notional', riskPct: 0.01, atrMult: 2, atrLen: 14,
       targetVolPct: 0.10, maxMarginPct: 0.6, maintenanceRatio: 0.75, slippageTicks: 1,
-      settlement: false, stopPct: null, targetRr: null, takeProfitFraction: null,
+      stopPct: null, targetRr: null, takeProfitFraction: null,
       reentryCooldownBars: 3, ...opts
     };
     this.pyramid = opts.pyramid && opts.pyramid.maxAdds > 0
@@ -45,10 +48,13 @@ export class PortfolioEngine {
     this.trades = [];
     this.equityCurve = [];
     this.adds = 0;
+    this._settledReal = 0;
+    this._settledProxy = 0;
     this.rejected = { boardLock: 0, boardLockClose: 0, suspended: 0, suspendedClose: 0,
                       cash: 0, margin: 0, sizingZero: 0, marginCalls: 0, reentryBlocked: 0 };
     this.rejects = [];
     this.notices = [];
+    this._pendingLiquidation = false;
   }
 
   get ready() { return this.entries.length > 0; }
@@ -79,6 +85,23 @@ export class PortfolioEngine {
     const p = side === 'buy' ? price + steps : price - steps;
     const dec = String(t).includes('.') ? (String(t).split('.')[1] || '').length : 0;
     return Number(p.toFixed(dec));
+  }
+
+  /** 与单品种引擎同一条成交约束：不穿出当根 high/low，也不穿出涨跌停板。 */
+  _fillPrice(entry, raw, i, side) {
+    const tick = entry.spec.tick || 1;
+    let px = this._slip(raw, side, tick);
+    const bar = entry.bars?.[i];
+    if (!bar) return px;
+    px = side === 'buy' ? Math.min(px, bar.high) : Math.max(px, bar.low);
+    const base = entry.bars[i - 1]?.close;
+    const lim = Number(entry.spec.limitPct);
+    if (entry.rules && base && lim > 0 && !(bar.stalePrevClose && entry.spec.market === 'ashare')) {
+      const up = roundTick(base * (1 + lim), tick);
+      const dn = roundTick(base * (1 - lim), tick);
+      px = side === 'buy' ? Math.min(px, up) : Math.max(px, dn);
+    }
+    return px;
   }
 
   _fee(spec, price, lots, { sell = false, closeToday = false } = {}) {
@@ -217,9 +240,16 @@ export class PortfolioEngine {
     let wasCashNegative = false;
     const positions = new Map(S.map((s, i) => [i, s]));
     const priceOf = (s) => s._lastClose ?? s.bars[0].close;
+    const priceAtOpen = (s, date) => {
+      const i = s.idxOf.get(date);
+      return i !== undefined ? s.bars[i].open : (s._lastClose ?? s.bars[0].close);
+    };
 
     for (let d = 0; d < calendar.length; d++) {
       const date = calendar[d];
+
+      // ---- 0. 昨日收盘挂起的强平，在本日开盘执行（不是昨日收盘成交） ----
+      cash = this._liquidateAtOpen(date, d, cash, positions, priceAtOpen);
 
       for (const s of positions.values()) {
         const i = s.idxOf.get(date);
@@ -228,7 +258,6 @@ export class PortfolioEngine {
         s._lastClose = bar.close;
         s._lastBar = bar;
         const spec = s.spec, rules = s.rules;
-        const tick = spec.tick || 1;
 
         // ---- 1. 出场：条件单先判（止损优先），用本根高低价 ----
         if (s.pos && i > s.pos.entryIdx) {
@@ -250,7 +279,7 @@ export class PortfolioEngine {
             if (hits.length) {
               for (const h of hits) {
                 if (!s.pos) break;
-                const px = this._slip(h.price, s.pos.dir === DIR.LONG ? 'sell' : 'buy', tick);
+                const px = this._fillPrice(s, h.price, i, s.pos.dir === DIR.LONG ? 'sell' : 'buy');
                 const sealRef = h.gap ? bar.open : (s.pos.dir === DIR.LONG ? bar.low : bar.high);
                 const gate = this._closingAllowed(s, px, i, s.pos.dir, sealRef);
                 if (!gate.ok) { this._noteReject(date, s.symbol, gate, h.kind); continue; }
@@ -279,7 +308,7 @@ export class PortfolioEngine {
         if (sig && i > 0) {
           const want = sig.dir ?? 0;
           if (s.pos && want !== s.pos.dir) {
-            const px = this._slip(bar.open, s.pos.dir === DIR.LONG ? 'sell' : 'buy', tick);
+            const px = this._fillPrice(s, bar.open, i, s.pos.dir === DIR.LONG ? 'sell' : 'buy');
             const gate = this._closingAllowed(s, px, i, s.pos.dir, bar.open);
             if (gate.ok) {
               cash = this._close(s, px, i, want === 0 ? 'signal_close' : 'signal_reverse', cash, date);
@@ -300,7 +329,7 @@ export class PortfolioEngine {
               if (!gate.ok) { this.rejects.push({ date, symbol: s.symbol, kind: 'open', reason: gate.reason }); }
               else {
                 const side = want === DIR.LONG ? 'buy' : 'sell';
-                const px = this._slip(bar.open, side, tick);
+                const px = this._fillPrice(s, bar.open, i, side);
                 const prevBar = s.bars[i - 1];
                 const prevClose = prevBar ? prevBar.close : null;
                 // 前收盘失效（停牌太久）时不套用板锁：拿三周前的价算今天的涨跌停价是错的
@@ -345,63 +374,46 @@ export class PortfolioEngine {
         }
       }
 
-      // ---- 3. 当日无负债结算 + 组合层追保/强平 ----
-      const equityBefore = this._equity(cash, positions, priceOf);
-      if (o.settlement) {
-        for (const s of positions.values()) {
-          if (!s.pos || d === 0) continue;
-          const hasSettlement = Number.isFinite(s._lastBar?.settlement) && s._lastBar.settlement > 0;
-          const settle = hasSettlement ? s._lastBar.settlement : s._lastClose;
-          if (settle === undefined) continue;
-          if (hasSettlement) this._settledReal = (this._settledReal || 0) + 1;
-          else this._settledProxy = (this._settledProxy || 0) + 1;
-          const segPnl = (s.pos.dir === DIR.LONG ? settle - s.pos.lastSettle : s.pos.lastSettle - settle) * s.spec.multiplier * s.pos.lots;
-          const newMargin = settle * s.spec.multiplier * (s.spec.marginRate ?? 0.1) * s.pos.lots;
-          const eq = cash + s.pos.margin + segPnl;
-          s.pos.margin = round2(newMargin);
-          s.pos.lastSettle = settle;
-          cash = eq - s.pos.margin;
-        }
+      // ---- 3. 当日无负债结算：期货强制，A股不适用 ----
+      // 结算价优先用交易所结算价（新浪日线带 settlement），缺失才回退收盘价。
+      for (const s of positions.values()) {
+        if (!s.pos || !isLeveragedSpec(s.spec)) continue;
+        const hasSettlement = Number.isFinite(s._lastBar?.settlement) && s._lastBar.settlement > 0;
+        const settle = hasSettlement ? s._lastBar.settlement : s._lastClose;
+        if (settle === undefined) continue;
+        if (hasSettlement) this._settledReal = (this._settledReal || 0) + 1;
+        else this._settledProxy = (this._settledProxy || 0) + 1;
+        const segPnl = (s.pos.dir === DIR.LONG ? settle - s.pos.lastSettle : s.pos.lastSettle - settle) * s.spec.multiplier * s.pos.lots;
+        const newMargin = settle * s.spec.multiplier * (s.spec.marginRate ?? 0.1) * s.pos.lots;
+        const eq = cash + s.pos.margin + segPnl;
+        s.pos.margin = round2(newMargin);
+        s.pos.lastSettle = settle;
+        cash = eq - s.pos.margin;
       }
       const equity = this._equity(cash, positions, priceOf);
-      const used = this._usedMargin(positions);
+      const used = this._usedMargin(positions, true);
       if (used > 0 && equity < used * o.maintenanceRatio) {
-        // 强平顺序：浮动亏损最大者优先 —— 强平的目的是降风险敞口，不是均匀减仓。
-        // 并且要一次一根地平到"回到维持线以内"为止：只平一根往往仍然越线，
-        // 账户会在第二天被同一笔亏损再次打穿，回测就变成「每天强平一次」的假象。
-        let eq = equity, u = used, needDeleverage = true;
-        while (needDeleverage && this._usedMargin(positions) > 0) {
-          const sorted = [...positions.values()].filter(s => s.pos)
-            .sort((a, b) => this._lossSinceEntry(a) - this._lossSinceEntry(b));   // 亏得最狠的排前面
-          if (!sorted.length) break;
-          let didClose = false, closedSymbol = null;
-          for (const victim of sorted) {
-            const di = victim.idxOf.get(date);
-            const bar = di !== undefined ? victim.bars[di] : null;
-            const px = this._slip(bar ? bar.close : victim._lastClose, victim.pos.dir === DIR.LONG ? 'sell' : 'buy', victim.spec.tick || 1);
-            const gate = this._closingAllowed(victim, px, di, victim.pos.dir, bar && bar.close);
-            if (!gate.ok) { this._noteReject(date, victim.symbol, gate, '维持线强平'); continue; }
-            cash = this._close(victim, px, di, 'margin_call', cash, date);
-            // 强平当天不许立刻按同一信号原样重开：交易所对被强平的会员有限制开仓期，
-            // 没有这道闸的话「平仓—重开—再平仓」会主导整段组合曲线，结果只反映撮合顺序而非策略。
-            victim.blockedUntilDay = d + (o.reentryCooldownBars ?? 3);
-            this.rejected.marginCalls++;
-            didClose = true; closedSymbol = victim.symbol;
-            break;                                             // 一次一根，平完重新评估敞口
-          }
-          if (!didClose) {
-            // 所有持仓都被板锁/停牌闷住：这天就是降不下来，只能带着超限敞口过夜。
-            // 报账户级通知并跳出 —— 继续循环会变成死循环，而真实处境就是连续跌停。
-            this.notices.push({ date, kind: 'liquidation_blocked', equity: round2(this._equity(cash, positions, priceOf)),
-                                used: round2(this._usedMargin(positions)), symbols: sorted.map(s => s.symbol) });
-            break;
-          }
-          eq = this._equity(cash, positions, priceOf);
-          u = this._usedMargin(positions);
-          this.notices.push({ date, kind: 'forced_liquidation', symbol: closedSymbol, equity: round2(eq), used: round2(u) });
-          needDeleverage = eq < u * o.maintenanceRatio;
+        // 收盘判定、次日开盘成交。这里只挂单并留痕；真正平仓在下一交易日的 _liquidateAtOpen。
+        this._pendingLiquidation = true;
+        this.notices.push({ date, kind: 'liquidation_pending', equity: round2(equity), used: round2(used) });
+
+        // 今天所有杠杆持仓都被板锁/停牌闷住时，如实报"降不了杠杆、带超限敞口过夜"。
+        // 这不是成交，只是风险状态；下一交易日开盘仍会继续尝试。
+        const victims = [...positions.values()].filter(s => s.pos && isLeveragedSpec(s.spec))
+          .sort((a, b) => this._lossSinceEntry(a) - this._lossSinceEntry(b));
+        const allBlocked = victims.length > 0 && victims.every(v => {
+          const di = v.idxOf.get(date);
+          const bar = di !== undefined ? v.bars[di] : null;
+          const px = this._fillPrice(v, bar ? bar.close : v._lastClose, di, v.pos.dir === DIR.LONG ? 'sell' : 'buy');
+          return !this._closingAllowed(v, px, di, v.pos.dir, bar ? bar.close : v._lastClose).ok;
+        });
+        if (allBlocked) {
+          this.notices.push({
+            date, kind: 'liquidation_blocked', equity: round2(equity), used: round2(used),
+            symbols: victims.map(s => s.symbol)
+          });
         }
-      } else if (cash < 0) {
+      } else if (cash < 0 && used > 0) {
         // 现金为负 = 结算后拿不出钱补足保证金，但权益还撑得住：这是"追加保证金通知"，
         // 不是强平。带 symbol 会让上层误读成某个品种被平了，所以只报账户级字段。
         // 只在"由正转负"那天报一次：追保是一次事件，连续 20 天没补钱不该刷出 20 条通知。
@@ -435,9 +447,7 @@ export class PortfolioEngine {
    * 于是先开的那个品种（哪怕在赚钱）会被首先强平。
    */
   _lossSinceEntry(s) {
-    if (!s.pos) return 0;
-    const price = s._lastClose ?? s.pos.entryPrice;
-    return (s.pos.dir === DIR.LONG ? price - s.pos.entryPrice : s.pos.entryPrice - price) * s.spec.multiplier * s.pos.lots;
+    return this._lossAt(s, s._lastClose ?? (s.pos && s.pos.entryPrice));
   }
 
   /**
@@ -457,7 +467,7 @@ export class PortfolioEngine {
         break;
       }
       const side = pos.dir === DIR.LONG ? 'buy' : 'sell';
-      const px = this._slip(a.price, side, s.spec.tick || 1);
+      const px = this._fillPrice(s, a.price, idx, side);
       if (bar.suspended) {
         this.rejected.suspended++;
         this.rejects.push({ date: bar.date, symbol: s.symbol, kind: 'suspended', reason: '停牌日不可加仓' });
@@ -506,10 +516,75 @@ export class PortfolioEngine {
     return cash;
   }
 
-  _usedMargin(positions) {
+  _lossAt(s, price) {
+    if (!s.pos) return 0;
+    const p = Number.isFinite(price) ? price : s.pos.entryPrice;
+    return (s.pos.dir === DIR.LONG ? p - s.pos.entryPrice : s.pos.entryPrice - p) * s.spec.multiplier * s.pos.lots;
+  }
+
+  _usedMargin(positions, onlyLeveraged = false) {
     let m = 0;
-    for (const s of positions.values()) if (s.pos) m += s.pos.margin;
+    for (const s of positions.values()) {
+      if (!s.pos) continue;
+      if (onlyLeveraged && !isLeveragedSpec(s.spec)) continue;
+      m += s.pos.margin;
+    }
     return m;
+  }
+
+  /**
+   * 次日开盘执行昨日挂起的强平。先看开盘权益是否已回到维持线上（回到就不平），
+   * 再按亏损大小逐个平到维持线以内；封板/停牌出不掉就保留挂单，下一交易日继续。
+   * 不再用"当日收盘价成交"—— 判定价和成交价在同一根，等于假设你能在收盘那一瞬出掉。
+   */
+  _liquidateAtOpen(date, d, cash, positions, priceAtOpen) {
+    if (!this._pendingLiquidation) return cash;
+    const pxOf = (s) => priceAtOpen(s, date);
+    const usedOpen = this._usedMargin(positions, true);
+    if (usedOpen <= 0) { this._pendingLiquidation = false; return cash; }
+    let equity = this._equity(cash, positions, pxOf);
+    if (equity >= usedOpen * this.o.maintenanceRatio) {
+      this.notices.push({ date, kind: 'liquidation_cancelled', equity: round2(equity), used: round2(usedOpen) });
+      this._pendingLiquidation = false;
+      return cash;
+    }
+
+    let blocked = false;
+    while (this._usedMargin(positions, true) > 0) {
+      const sorted = [...positions.values()]
+        .filter(s => s.pos && isLeveragedSpec(s.spec))
+        .sort((a, b) => this._lossAt(a, pxOf(a)) - this._lossAt(b, pxOf(b)));
+      if (!sorted.length) break;
+      let didClose = false, closedSymbol = null;
+      for (const victim of sorted) {
+        const di = victim.idxOf.get(date);
+        const bar = di !== undefined ? victim.bars[di] : null;
+        const ref = bar ? bar.open : (victim._lastClose ?? victim.pos.entryPrice);
+        const px = this._fillPrice(victim, ref, di, victim.pos.dir === DIR.LONG ? 'sell' : 'buy');
+        const gate = this._closingAllowed(victim, px, di, victim.pos.dir, bar ? bar.open : ref);
+        if (!gate.ok) { this._noteReject(date, victim.symbol, gate, '维持线强平'); continue; }
+        cash = this._close(victim, px, di, 'margin_call', cash, date);
+        victim.blockedUntilDay = d + (this.o.reentryCooldownBars ?? 3);
+        this.rejected.marginCalls++;
+        didClose = true;
+        closedSymbol = victim.symbol;
+        break;
+      }
+      if (!didClose) {
+        blocked = true;
+        this.notices.push({
+          date, kind: 'liquidation_blocked', equity: round2(this._equity(cash, positions, pxOf)),
+          used: round2(this._usedMargin(positions, true)), symbols: sorted.map(s => s.symbol)
+        });
+        break;
+      }
+      equity = this._equity(cash, positions, pxOf);
+      const used = this._usedMargin(positions, true);
+      this.notices.push({ date, kind: 'forced_liquidation', symbol: closedSymbol, equity: round2(equity), used: round2(used) });
+      if (equity >= used * this.o.maintenanceRatio) break;
+    }
+    this._pendingLiquidation = blocked;
+    return cash;
   }
 
   /**
@@ -555,13 +630,16 @@ export class PortfolioEngine {
       notices: this.notices, finalEquity: this._endCash ?? last, capital: this.o.capital,
       symbols: this.entries.map(e => e.symbol),
       sizing: { mode: this.o.sizing, riskPct: this.o.riskPct, atrMult: this.o.atrMult, targetVolPct: this.o.targetVolPct },
-      exposure: { maxMarginPct: this.o.maxMarginPct, peakMargin: Math.max(0, ...curve.map(p => p.margin)), settlement: !!this.o.settlement },
+      exposure: {
+        maxMarginPct: this.o.maxMarginPct,
+        peakMargin: Math.max(0, ...curve.map(p => p.margin)),
+        settlement: 'futures-forced',
+        note: '期货/杠杆品种强制逐日盯市；A股现货不结算、不强平'
+      },
       adds: this.adds || 0,
-      note: `共享现金池：${this.o.settlement
-        ? (this._settledReal
-          ? `结算价 ${this._settledReal} 根用交易所价${this._settledProxy ? `、${this._settledProxy} 根缺数据回退收盘价` : ''}`
-          : '结算价用收盘价代理（数据源未提供结算价）')
-        : '不逐日结算，浮动留到平仓'}；`
+      note: `共享现金池：期货强制逐日盯市、收盘判定强平、次日开盘成交；${this._settledReal
+        ? `结算价 ${this._settledReal} 根用交易所价${this._settledProxy ? `、${this._settledProxy} 根缺数据回退收盘价` : ''}`
+        : (this._settledProxy ? '结算价用收盘价代理（数据源未提供结算价）' : '本次无期货结算')}；`
         + '不做跨品种对冲保证金优惠（全额占用，偏保守）；部分平仓与金字塔加仓走同一份条件单判定。'
     };
   }

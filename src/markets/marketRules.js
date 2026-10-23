@@ -126,7 +126,7 @@ export class AShareRules extends MarketRules {
   }
 }
 
-function roundTick(v, tick) {
+export function roundTick(v, tick) {
   if (!tick || tick <= 0) return v;
   const dec = (String(tick).split('.')[1] || '').length;
   return Number((Math.round(v / tick) * tick).toFixed(dec));

@@ -86,7 +86,6 @@ export class BacktestPanel {
       lots: Number(this.root.querySelector('#btLots').value) || 1,
       slippageTicks: Number(this.root.querySelector('#btSlip').value) || 0,
       allowShort: this.root.querySelector('#btAllowShort').checked,
-      settlement: this.root.querySelector('#btSettle')?.checked ?? false,
       maintenanceRatio: (Number(this.root.querySelector('#btMaint')?.value) || 75) / 100,
       breakevenR: Number(this.root.querySelector('#btBe')?.value) || 0,
       timeStopBars: Number(this.root.querySelector('#btTimeStop')?.value) || 0,
@@ -130,11 +129,11 @@ export class BacktestPanel {
         <label style="font-size:11px; color:var(--text-muted); display:flex; align-items:center; gap:4px;"
           title="仅期货有效；A股按 T+1 与仅做多规则处理，勾了也不会开空">
           <input id="btAllowShort" type="checkbox" checked /> 允许做空</label>
+        <span style="font-size:11px; color:var(--text-muted);"
+          title="期货/杠杆品种强制逐日盯市：每个交易日按结算价划转浮盈、重算占用；A股现货无杠杆，不结算、不强平">
+          逐日盯市：<b style="color:var(--text-main);">期货强制 / A股不适用</b></span>
         <label style="font-size:11px; color:var(--text-muted); display:flex; align-items:center; gap:4px;"
-          title="当日无负债结算：每天按收盘价盯市、重算占用保证金，浮亏真的从可用资金里扣。关掉则浮盈浮亏只在平仓时入账（旧口径）。">
-          <input id="btSettle" type="checkbox" /> 逐日盯市结算</label>
-        <label style="font-size:11px; color:var(--text-muted); display:flex; align-items:center; gap:4px;"
-          title="权益跌破「占用保证金 × 该比例」时次日强平">维持比例%
+          title="期货/杠杆品种：权益跌破「占用保证金 × 该比例」即在下一根开盘强平；A股不适用">维持比例%
           <input id="btMaint" class="form-input" type="number" value="75" min="10" max="100" style="width:52px;" /></label>
         <label style="font-size:11px; color:var(--text-muted); display:flex; align-items:center; gap:4px;"
           title="浮盈达到该倍初始风险后，把止损抬到开仓价（保本）。0=不启用；策略没挂初始止损时无法定义 1R，会自动跳过">保本×R
@@ -337,9 +336,8 @@ export class BacktestPanel {
       const eng = new BacktestEngine(useBars, spec, {
         capital: s.capital, sizing: s.sizing, notionalPct: s.notionalPct,
         lots: s.lots, slippageTicks: s.slippageTicks, allowShort: s.allowShort,
-        settlement: { enabled: s.settlement, maintenanceRatio: s.maintenanceRatio },
-        // 关掉逐日盯市时也要吃到界面上那个比例；以前只有结算路径读它，
-        // 非结算的维持线判定就用了一个从没被赋值的字段（?? 0.5 悄悄生效）
+        // 期货/杠杆品种强制逐日盯市；维持比例仍由面板控制，A股现货不适用。
+        settlement: { enabled: true, maintenanceRatio: s.maintenanceRatio },
         maintenanceRatio: s.maintenanceRatio,
         breakeven: s.breakevenR > 0 ? { afterR: s.breakevenR, extraPct: 0 } : null,
         timeStop: s.timeStopBars > 0 ? { bars: s.timeStopBars, requireLoss: true } : null,
@@ -351,7 +349,7 @@ export class BacktestPanel {
         periodsPerYear: this.chart.periodsPerYear || 252, bars: useBars
       });
       res = { ...raw, metrics, bars: useBars, spec, strategy: def.name, strategyId: def.id,
-              params, signals, rejected: raw.rejected, settlementOn: s.settlement };
+              params, signals, rejected: raw.rejected, settlementOn: !!raw.settlement };
     } catch (e) {
       out.innerHTML = `<span style="color:var(--up-color);">回测失败：${esc(e.message)}</span>`;
       console.error(e);
@@ -392,6 +390,11 @@ export class BacktestPanel {
       `<tr><td>${y}</td><td class="${sign(v.ret)}">${pct(v.ret)}</td></tr>`).join('');
     const reasons = Object.entries(m.byReason || {}).map(([k, v]) =>
       `<tr><td>${esc(k)}</td><td>${v.n}</td><td class="${sign(v.pnl)}">${money(v.pnl)}</td></tr>`).join('');
+    const settleSrc = !res.settlement ? '—'
+      : res.settlement.priceSource === 'exchange' ? '交易所结算价'
+      : res.settlement.priceSource === 'vwap' ? '日均价近似'
+      : res.settlement.priceSource === 'mixed' ? '混合来源'
+      : '收盘代理';
 
     this.root.querySelector('#btOut').innerHTML = `
       ${m.ruined ? `<div style="color:var(--up-color); font-weight:700; padding:6px 0;">⚠ 本次回测权益曾归零或转负：年化/Sharpe 无意义，仓位口径过激进，别把它当业绩。</div>` : ''}
@@ -422,8 +425,10 @@ export class BacktestPanel {
         <span>平均持仓 <b>${num(m.avgHoldingBars, 1)} 根</b></span>
         <span>资金不足拒单 <b>${res.rejected.margin}</b></span>
         <span>强平次数 <b>${res.rejected.marginCalls || 0}</b></span>
-        <span>逐日盯市 <b>${res.settlementOn ? '开' : '关'}</b></span>
+        <span>逐日盯市 <b>${res.settlementOn ? '强制' : '不适用'}</b></span>
+        <span>结算价 <b>${settleSrc}</b></span>
         <span>追保通知 <b>${(res.marginNotices || []).length}</b></span>
+        <span>强平被板锁拦截 <b>${(res.liquidationNotices || []).filter(n => n.kind === 'liquidation_blocked').length}</b></span>
         <span>保本止损 <b>${res.riskControls && res.riskControls.breakeven ? res.riskControls.breakeven.afterR + 'R' : '关'}</b></span>
         <span>时间止损 <b>${res.riskControls && res.riskControls.timeStop ? res.riskControls.timeStop.bars + ' 根' : '关'}</b></span>
         <span>时间止损出场 <b>${(res.trades || []).filter(t => t.exitReason === 'time_stop').length}</b> 笔</span>

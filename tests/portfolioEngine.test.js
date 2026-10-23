@@ -132,7 +132,7 @@ test('PortfolioEngine：逐日结算开启后账仍然闭合', () => {
   const sumNet = res.trades.reduce((s, t) => s + t.netPnL, 0);
   assert.near(res.finalEquity, 300000 + sumNet, 0.5,
     '开了当日无负债结算，账也必须闭合（浮盈不许被算两遍）');
-  assert.ok(res.exposure.settlement === true);
+  assert.eq(res.exposure.settlement, 'futures-forced', '期货结算必须强制，不能再被开关关掉');
 });
 
 test('PortfolioEngine：ATR 预算下单笔风险不超设定比例（大波动品种自动少开）', () => {

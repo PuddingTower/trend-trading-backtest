@@ -572,9 +572,9 @@ export class ResearchPanel {
         <label>加仓次数<input id="rsPoolAdds" type="number" value="${v('rsPoolAdds', 0)}" min="0" max="3" style="${INP}width:56px;" title="金字塔加仓次数；0=不加仓。加仓单按突破首仓价 + 步长成交" /></label>
         <label>加仓步长%<input id="rsPoolAddStep" type="number" value="${v('rsPoolAddStep', 2)}" step="0.5" style="${INP}width:62px;" title="第 k 次加仓的突破价 = 首仓价 × (1 + k × 步长)" /></label>
         <label>加仓衰减<input id="rsPoolAddDecay" type="number" value="${v('rsPoolAddDecay', 0.5)}" step="0.1" min="0.05" max="1" style="${INP}width:58px;" title="每次加仓手数 = 首仓 × 衰减^k；0.5 表示逐次减半" /></label>
-        <label>维持比例%<input id="rsPoolMaint" type="number" value="${v('rsPoolMaint', 75)}" style="${INP}width:60px;" title="权益低于「占用保证金 × 该比例」时逐品种强平" /></label>
+        <label>维持比例%<input id="rsPoolMaint" type="number" value="${v('rsPoolMaint', 75)}" style="${INP}width:60px;" title="期货/杠杆：权益低于「占用保证金 × 该比例」时收盘判定、次日开盘强平；A股不适用" /></label>
         <label>强平冷却<input id="rsPoolCooldown" type="number" value="${v('rsPoolCooldown', 3)}" min="0" style="${INP}width:52px;" title="被强平的品种多少根 bar 内不许重开" /></label>
-        <label style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="rsPoolSettle" ${document.getElementById('rsPoolSettle')?.checked !== false ? 'checked' : ''} style="width:auto;" />逐日盯市结算</label>
+        <span title="期货/杠杆品种强制逐日盯市；A股现货无杠杆，不结算、不强平" style="color:var(--text-muted);">逐日盯市：期货强制 / A股不适用</span>
       </div>` : '';
     return `
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px;font-size:12px;">
@@ -677,7 +677,7 @@ export class ResearchPanel {
       ${Object.keys(kinds).length ? `<div style="font-size:11px;margin-top:4px;color:var(--text-muted);">
         拒单分布：${Object.entries(kinds).map(([k, n]) => `${esc(k)} ×${n}`).join('，')}（明细最多存 200 条）</div>` : ''}
       <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">仓位算法 ${esc(p.sizing.mode)}（占比/单笔风险 ${pc(p.sizing.riskPct, 1)}）·
-        总敞口上限 ${pc(p.exposure.maxMarginPct, 0)} · ${p.exposure.settlement ? '逐日盯市结算' : '不结算（浮动留到平仓）'}${p.adds ? ` · 加仓 ${p.adds} 次` : ''}。${esc(p.note)}</div>
+        总敞口上限 ${pc(p.exposure.maxMarginPct, 0)} · 期货强制逐日盯市、收盘判定强平、次日开盘成交；A股不适用${p.adds ? ` · 加仓 ${p.adds} 次` : ''}。${esc(p.note)}</div>
       ${(this.skipped || []).length ? `<div style="color:var(--accent-gold);font-size:12px;margin-top:4px;">⚠ 已跳过 ${this.skipped.length} 个勾选项：${esc(this.skipped.join('、'))}</div>` : ''}
       ${sparklineHtml(eqCurve, '共享池权益曲线')}`;
   }
@@ -709,7 +709,6 @@ export class ResearchPanel {
       } : null,
       maintenanceRatio: num('rsPoolMaint', 75) / 100,
       reentryCooldownBars: num('rsPoolCooldown', 3),
-      settlement: document.getElementById('rsPoolSettle')?.checked !== false,
       slippageTicks: this.engineOpts().slippageTicks
     };
     this.skipped = [];        // 勾了却跑不了的品种必须列出来，不能静默少跑

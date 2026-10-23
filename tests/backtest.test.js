@@ -258,7 +258,7 @@ test('逐日盯市强平：权益跌破维持线必须在下一根开盘平掉�
     mk('d0', 5000, 5010, 4990, 5000),
     mk('d1', 5000, 5010, 4990, 5000),        // 信号
     mk('d2', 5000, 5010, 4990, 5000),        // 开盘成交，保证金 5000*10*0.1*9 = 45000
-    mk('d3', 4625, 4650, 4620, 4625),        // -7.5% → 亏 33750，权益 16250 < 维持线 22500
+    mk('d3', 4900, 4910, 4620, 4625),        // 开盘还在维持线上，盘中/收盘才跌破 → 次根开盘强平
     mk('d4', 4600, 4610, 4590, 4600)         // 应在本根开盘被强平
   ];
   const eng = new BacktestEngine(bars, SPEC, { capital: 50000, lots: 9, slippageTicks: 0 });
@@ -282,7 +282,9 @@ test('逐日盯市优先用交易所结算价，缺失才回退收盘价', () =>
   const out = new BacktestEngine(bars, spec, { capital: 1_000_000, lots: 1, slippageTicks: 0,
     settlement: { enabled: true } }).run([null, { i: 1, dir: DIR.LONG }, null, null, null]);
   assert.eq(out.settlement.realBars, 1, 'd3 有结算价，应走真实结算');
-  assert.eq(out.settlement.proxyBars, 1, 'd4 没给结算价，应回退收盘价并记账');
+  // d2 建仓当日也要结算（以前跳过建仓 bar，等于漏掉一天）；
+  // d4 没给结算价，回退收盘价。所以代理结算共 2 根。
+  assert.eq(out.settlement.proxyBars, 2, 'd2 建仓日 + d4 缺失结算价，都应记为代理');
   assert.near(out.equityCurve[3].equity, 1_000_200, 1e-6, 'd3 应按 120 结算，而不是按收盘 110');
 });
 

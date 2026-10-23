@@ -181,8 +181,9 @@ test('引擎：缺口过长（前收盘已失效）时跳过板锁判定，而�
   bars[2].stalePrevClose = true;
   const rules = { canOpen: () => ({ ok: true }), canFillAt: () => ({ ok: false, reason: '不该被调用' }), tPlus1: false, cost: () => 0 };
   // 信号在 1-03（正常 bar）产生、成交落在复牌首根 2-20：只有那一根的板锁该被跳过
+  // 这条是 A股复牌口径（全额资金），期货长假后仍有板，见 backtest.test.js 的板幅基准测试。
   const sigs = bars.map((b, i) => (i === 1 ? { i, dir: DIR.LONG } : null));
-  const res = new BacktestEngine(bars, { ...SPEC, multiplier: 100 }, { capital: 1e6, lots: 100, rules }).run(sigs);
+  const res = new BacktestEngine(bars, { ...SPEC, multiplier: 100, marginRate: 1 }, { capital: 2e6, lots: 100, rules }).run(sigs);
   assert.ok(res.trades.length >= 1, '板锁判定被跳过，复牌首单应当成交');
   assert.eq(res.trades[0].entryIdx, 2);
   assert.ok(!res.rejects.some(r => r.kind === 'boardLock'), '前收盘价失效时不得用板幅拒单');
@@ -245,13 +246,15 @@ test('逐日盯市：可用资金转负发追保通知，权益跌破维持线�
   assert.ok(res.rejected.marginCalls >= 1);
 });
 
-test('逐日盯市：结算价口径写进返回值，不让使用者以为是真实结算价', () => {
+test('逐日盯市：杠杆品种强制开启，A股现货不适用', () => {
   const bars = trending(10);
   const sigs = bars.map((b, i) => (i === 0 ? { i, dir: DIR.LONG } : null));
-  const on = new BacktestEngine(bars, SPEC, { capital: 100000, lots: 1, settlement: { enabled: true } }).run(sigs);
-  const off = new BacktestEngine(bars, SPEC, { capital: 100000, lots: 1 }).run(sigs);
-  assert.ok(on.settlement && /收盘价代理/.test(on.settlement.note), '必须声明结算价是代理值');
-  assert.eq(off.settlement, null, '没开就是没开，不能给一个默认对象让人以为在跑');
+  // 显式传 enabled:false 也不许关：真实期货账户每天都结算。
+  const on = new BacktestEngine(bars, SPEC, { capital: 100000, lots: 1, settlement: { enabled: false } }).run(sigs);
+  assert.ok(on.settlement && on.settlement.forced === true, '期货必须强制逐日盯市');
+  assert.ok(/收盘价代理/.test(on.settlement.note), '日线无法还原结算价，必须声明是代理值');
+  const stock = new BacktestEngine(bars, { ...SPEC, marginRate: 1 }, { capital: 100000, lots: 1 }).run(sigs);
+  assert.eq(stock.settlement, null, 'A股现货没有保证金结算，不能套期货口径');
 });
 
 // ---------- 账目闭合：单品种引擎的硬验收 ----------
