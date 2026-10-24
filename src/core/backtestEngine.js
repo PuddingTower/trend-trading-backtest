@@ -19,6 +19,7 @@ import { ORDER_KIND, ratchetStop, evalExitOrders, evalAddOrders, makeBracket, py
 import { atr } from '../analysis/common.js';
 import { tradingDayOf } from '../data/dominant.js';
 import { roundTick } from '../markets/marketRules.js';
+import { sqrtImpactPrice, participationCapLots, dailyVolSeries } from './impact.js';
 
 export const DIR = { FLAT: 0, LONG: 1, SHORT: -1 };
 
@@ -54,6 +55,20 @@ export class BacktestEngine {
      * 传了之后：开仓方向限制、涨跌停板锁、T+1、成本模型全部交给规则决定。
      */
     this.rules = opts.rules || null;
+    /**
+     * L2 冲击成本模型（core/impact.js）。默认关闭 —— 关闭时所有成交路径与旧版逐位一致。
+     *   eta/delta         —— ΔP = η·σ·(Q/V)^δ 的两个经验常数
+     *   maxParticipation  —— 单根 bar 最大成交量参与率，超过部分砍手数（容量测试的硬约束）
+     *   volLookback       —— 冲击用的日波动率回看窗（截至前一根，不含当根）
+     * 不传就退回纯固定滑点（L1）：小单摸底用 L1 足够，别让默认值悄悄变贵。
+     */
+    this.impact = opts.impact && Number(opts.impact.eta) > 0
+      ? { eta: Number(opts.impact.eta), delta: Number(opts.impact.delta) > 0 ? Number(opts.impact.delta) : 0.5,
+          maxParticipation: Number(opts.impact.maxParticipation) > 0 ? Number(opts.impact.maxParticipation) : 0.1,
+          volLookback: Math.max(2, Number(opts.impact.volLookback) || 20) }
+      : null;
+    /** 订单量→bar成交量 的单位换算。期货日线 volume 是手（1）；A股是股（一手=100 股）。 */
+    this.qtyPerLot = opts.qtyPerLot ?? (this.rules && typeof this.rules.lotSize === 'function' ? this.rules.lotSize() : 1);
     /**
      * 金字塔加仓（M4）：{ maxAdds, stepPct, decay }
      * 开仓时按 stepPct 铺出若干突破加仓单，每笔规模按 decay 递减。
@@ -131,17 +146,29 @@ export class BacktestEngine {
   }
 
   /**
-   * 滑点后的可成交价。两道上限/下限：
+   * 滑点后的可成交价。上限/下限的层级刻意是：
    *   1) 当根 K 线实际成交区间 —— 记录下来的 high/low 已经包含全部成交，
    *      成交价跑到区间外等于凭空多出一个根本不存在的价格；
-   *   2) 交易所涨跌停板 —— 未封板时可以成交，但不可能成交在板外。
+   *   2) L2 冲击 —— 只在配置了 impact 且给了手数时生效。大单按参与率吃深度，
+   *      成交价**允许**超出当根观测区间：那根 bar 是"没有你这笔单"的世界里的行情，
+   *      你自己的单子本来就会把 range 推开 —— 这正是冲击模型要计的价。
+   *   3) 交易所涨跌停板 —— 无论冲击多大都不可能成交在板外，最后再夹一次。
    * 强平单也走这里，避免"最低只到 92，却按 88 强平"这种假亏。
    */
-  _fillPrice(raw, idx, side) {
+  _fillPrice(raw, idx, side, lots = null) {
     let px = this._slip(raw, side);
     const bar = this.bars[idx];
     if (!bar) return px;
     px = side === 'buy' ? Math.min(px, bar.high) : Math.max(px, bar.low);
+    if (this.impact && Number.isFinite(lots) && lots > 0 && bar.volume > 0 && this._volSeries) {
+      const vol = this._volSeries[idx];
+      if (Number.isFinite(vol)) {
+        const part = (lots * this.qtyPerLot) / bar.volume;
+        const imp = sqrtImpactPrice({ price: px, dailyVol: vol, participation: part,
+                                      eta: this.impact.eta, delta: this.impact.delta });
+        px = side === 'buy' ? px + imp : px - imp;
+      }
+    }
     const base = this._limitBaseFor(idx);
     const lim = Number(this.spec.limitPct);
     if (this.rules && base && lim > 0 && !(bar.stalePrevClose && !this._leveraged)) {
@@ -169,6 +196,8 @@ export class BacktestEngine {
      */
     const needsAtrTrail = signals.some(s => s && Number(s.trailAtr) > 0);
     const atrSeries = needsAtrTrail ? atr(bars, this.atrLen) : null;
+    // 冲击模型需要逐根的"截至前一根"日波动率，一次性预算而不是每次成交现算
+    this._volSeries = this.impact ? dailyVolSeries(bars, this.impact.volLookback) : null;
     this._prepareSettlementCalendar(bars);
 
     let cash = this.capital0;
@@ -205,7 +234,7 @@ export class BacktestEngine {
         const curDir = pos ? pos.dir : DIR.FLAT;
 
         if (pos && wantDir !== curDir) {
-          const px = this._fillPrice(bar.open, i, pos.dir === DIR.LONG ? 'sell' : 'buy');
+          const px = this._fillPrice(bar.open, i, pos.dir === DIR.LONG ? 'sell' : 'buy', pos.lots);
           const gate = this._closingAllowed(px, i, pos.dir, bar.open);
           if (gate.ok) {
             cash = this._closePosition(pos, px, i, wantDir === DIR.FLAT ? 'signal_close' : 'signal_reverse', cash);
@@ -226,7 +255,7 @@ export class BacktestEngine {
             this.rejected.shortDisabled++;
           } else {
             const side = wantDir === DIR.LONG ? 'buy' : 'sell';
-            const px = this._fillPrice(bar.open, i, side);
+            let px = this._fillPrice(bar.open, i, side);
             const prevClose = this._limitBaseFor(i);
 
             // 规则闸门一：该方向能不能开（A股默认仅做多）
@@ -251,14 +280,31 @@ export class BacktestEngine {
             }
             if (openGate.ok && fillGate.ok && !bar.suspended) {
               const marginRate = this.spec.marginRate ?? 0.1;
-              const perLotMargin = px * this.spec.multiplier * marginRate;
-              const lots = this.sizing === 'notional'
+              let perLotMargin = px * this.spec.multiplier * marginRate;
+              let lots = this.sizing === 'notional'
                 ? Math.max(1, Math.floor((cash * this.notionalPct) / (perLotMargin || Infinity)))
                 : this.lots;
+              // 最大参与率上限：单根 bar 吃不掉的单子就该被砍 —— 5000 手砸进 800 手
+              // 成交量的 bar 里，"按同一个价全成"是把流动性当无限的幻想。
+              if (this.impact && this.impact.maxParticipation > 0) {
+                const capLots = participationCapLots({ barVolume: bar.volume, qtyPerLot: this.qtyPerLot,
+                                                       maxParticipation: this.impact.maxParticipation });
+                if (capLots < lots) this.rejected.participationCapped = (this.rejected.participationCapped || 0) + 1;
+                if (capLots <= 0) {
+                  this.rejected.noLiquidity++;     // bar 无量：没有对手盘就不该成交
+                  lots = 0;
+                } else lots = Math.min(lots, capLots);
+              }
+              // 冲击重估：手数定了才知道 Q/V，才知道自己把价格推了多少。
+              // 保证金按冲击后的价重算 —— 占用是用真实成本算的，不是用幻想成本。
+              if (this.impact && lots > 0) {
+                px = this._fillPrice(bar.open, i, side, lots);
+                perLotMargin = px * this.spec.multiplier * marginRate;
+              }
               const margin = perLotMargin * lots;
               const fee = this._fee(px, lots, {});
-              if (cash - margin - fee < 0) {
-                this.rejected.margin++;          // 资金不足就不开仓，而不是强行开进去
+              if (lots <= 0 || cash - margin - fee < 0) {
+                if (lots > 0) this.rejected.margin++;          // 资金不足就不开仓，而不是强行开进去
               } else {
                 cash -= (margin + fee);
                 pos = {
@@ -284,7 +330,7 @@ export class BacktestEngine {
 
       // ---- 2. 时间止损：上一根收盘决定"这笔不动了"，本根开盘执行 ----
       if (pos && this._pendingTimeStop === i - 1) {
-        const px = this._fillPrice(bar.open, i, pos.dir === DIR.LONG ? 'sell' : 'buy');
+        const px = this._fillPrice(bar.open, i, pos.dir === DIR.LONG ? 'sell' : 'buy', pos.lots);
         const gate = this._closingAllowed(px, i, pos.dir, bar.open);
         if (gate.ok) {
           cash = this._closePosition(pos, px, i, 'time_stop', cash);
@@ -604,7 +650,7 @@ export class BacktestEngine {
   }
 
   _tryLiquidate(pos, bar, i, cash, refPrice, day) {
-    const px = this._fillPrice(refPrice, i, pos.dir === DIR.LONG ? 'sell' : 'buy');
+    const px = this._fillPrice(refPrice, i, pos.dir === DIR.LONG ? 'sell' : 'buy', pos.lots);
     const gate = this._closingAllowed(px, i, pos.dir, refPrice);
     if (!gate.ok) {
       // 真实账户就是这样闷在跌停板里：仓位留着，下一根继续试，不是理论上一按就出。
@@ -646,7 +692,8 @@ export class BacktestEngine {
     const bar = this.bars[exit.idx];
     for (const h of exit.hits) {
       if (!pos.lots) break;
-      const px = this._fillPrice(h.price, exit.idx, pos.dir === DIR.LONG ? 'sell' : 'buy');
+      const lotsToClose = Math.min(pos.lots, h.order.qtyLots ?? pos.lots);
+      const px = this._fillPrice(h.price, exit.idx, pos.dir === DIR.LONG ? 'sell' : 'buy', lotsToClose);
       // 跳空穿透按开盘成交 → 锚定价用开盘价；盘中触碰 → 用不利那一侧的极值。
       // 用收盘价倒推"这根到底封没封死"，等于知道结局再决定开局能不能成交。
       const sealRef = h.gap ? bar?.open : (pos.dir === DIR.LONG ? bar?.low : bar?.high);
@@ -655,7 +702,6 @@ export class BacktestEngine {
         this._noteReject(exit.idx, gate, h.kind);     // 委托不下岗，下一根继续判
         continue;
       }
-      const lotsToClose = Math.min(pos.lots, h.order.qtyLots ?? pos.lots);
       cash = this._closePosition(pos, px, exit.idx, h.gap ? `gap_${h.kind}` : h.kind, cash, lotsToClose);
       h.order.qtyLots = 0;                       // 一次性委托：成交过就作废，下一根不再重复触发
       for (const other of (pos.orders || [])) {
@@ -722,7 +768,9 @@ export class BacktestEngine {
         this.rejects.push({ idx, kind: 'tPlus1', reason: 'T+1：当日买入不可当日加仓' });
         break;
       }
-      const px = this._fillPrice(a.price, idx, pos.dir === DIR.LONG ? 'buy' : 'sell');
+      // 加仓手数先于成交价确定（订单上写着），冲击模型需要它算 Q/V
+      const lots = Math.max(1, Math.round(a.order.qtyLots ?? 1));
+      const px = this._fillPrice(a.price, idx, pos.dir === DIR.LONG ? 'buy' : 'sell', lots);
       const prevClose = idx > 0 ? this.bars[idx - 1].close : null;
       const side = pos.dir === DIR.LONG ? 'buy' : 'sell';
       const gate = this.rules ? this.rules.canFillAt(side, px, prevClose, { closing: false }) : { ok: true };
@@ -731,7 +779,6 @@ export class BacktestEngine {
         this.rejects.push({ idx, kind: 'boardLock', reason: gate.reason });
         continue;
       }
-      const lots = Math.max(1, Math.round(a.order.qtyLots ?? 1));
       const marginRate = this.spec.marginRate ?? 0.1;
       const addMargin = px * this.spec.multiplier * marginRate * lots;
       const fee = this._fee(px, lots, {});

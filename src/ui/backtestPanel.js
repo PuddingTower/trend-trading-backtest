@@ -11,6 +11,8 @@ import { computeMetrics, benchmarkCompare } from '../report/metrics.js';
 import { resolveTradeSpec } from '../markets/instrumentSpec.js';
 import { rulesFor } from '../markets/marketRules.js';
 import { annotateGaps, checkAdjustmentContinuity, checkRolloverGaps, checkPriceValidity, repairAdjustmentGaps } from '../markets/dataQuality.js';
+import { fullRiskReport, marginRisk } from '../report/riskMetrics.js';
+import { runStressSuite } from '../report/stressTest.js';
 
 const pct = (v, d = 1) => (v === null || v === undefined || !Number.isFinite(v)) ? '—' : (v * 100).toFixed(d) + '%';
 const num = (v, d = 2) => (v === null || v === undefined || !Number.isFinite(v)) ? '—' : Number(v).toFixed(d);
@@ -89,6 +91,8 @@ export class BacktestPanel {
       maintenanceRatio: (Number(this.root.querySelector('#btMaint')?.value) || 75) / 100,
       breakevenR: Number(this.root.querySelector('#btBe')?.value) || 0,
       timeStopBars: Number(this.root.querySelector('#btTimeStop')?.value) || 0,
+      impactEta: Number(this.root.querySelector('#btImpactEta')?.value) || 0,
+      impactPart: (Number(this.root.querySelector('#btImpactPart')?.value) || 10) / 100,
       repairAdjustment: this.root.querySelector('#btRepair')?.checked ?? false,
       range: this.root.querySelector('#btRange').value
     };
@@ -141,8 +145,15 @@ export class BacktestPanel {
         <label style="font-size:11px; color:var(--text-muted); display:flex; align-items:center; gap:4px;"
           title="持仓超过该根数仍未脱离成本，下一根开盘平仓（趋势不启动就走人）。0=不启用">时间止损(根)
           <input id="btTimeStop" class="form-input" type="number" value="0" min="0" step="1" style="width:48px;" /></label>
+        <label style="font-size:11px; color:var(--text-muted);"
+          title="L2 冲击成本：ΔP = η·σ·(Q/V)^0.5，订单越大、当日波动越大、成交越清淡，冲击越贵。0=关闭（只用固定滑点）">冲击η
+          <input id="btImpactEta" class="form-input" type="number" value="0" min="0" step="0.5" style="width:48px;" /></label>
+        <label style="font-size:11px; color:var(--text-muted);"
+          title="单根 K 线最多吃掉的成交量占比；手数超过即被砍到上限。期货按手数、A股按股数自动换算">参与率%
+          <input id="btImpactPart" class="form-input" type="number" value="10" min="1" max="100" style="width:48px;" /></label>
         <button class="btn btn-primary btn-sm" id="btRun">▶ 运行回测</button>
         <button class="btn btn-sm" id="btCheck" title="只体检数据不跑策略：停牌缺口、复权断崖、换月跳空">🩺 数据体检</button>
+        <button class="btn btn-sm" id="btStress" title="把当前策略原样投放到 2015 股灾、2016 双十一夜盘、2020 疫情缺口、2024 微盘踩踏等历史极端窗口重放">🧨 压力测试</button>
         <label style="font-size:11px; color:var(--text-muted); display:flex; align-items:center; gap:4px;"
           title="A股专用：把超过涨跌停幅度的隔夜跳空按复权因子接回（前复权本来就该这么做）。默认关闭，勾选后体检和回测都会用修正后的序列；成交额/成交量不改。">
           <input id="btRepair" type="checkbox" /> 修复杂复权断崖</label>
@@ -174,6 +185,65 @@ export class BacktestPanel {
     this.root.querySelector('#btClearMarks').addEventListener('click', () => {
       this.chart.backtestMarkers = null; this.chart.requestRender();
     });
+    this.root.querySelector('#btStress').addEventListener('click', () => this.runStress());
+  }
+
+  /**
+   * 黑天鹅压力测试：当前策略 + 当前参数原样投放到预设的历史极端窗口。
+   * 窗口外的数据如实报「数据不覆盖」—— 假装测过比没测更危险。
+   */
+  runStress() {
+    const out = this.root.querySelector('#btOut');
+    const code = this.chart.backtestCode || this.chart.data?.[0]?.symbol;
+    const bars = this.sliceBars(this.state.range);
+    if (!bars || bars.length < 60) {
+      out.innerHTML = `<span style="color:var(--up-color);">K线不足 60 根，先同步数据再压力测试。</span>`;
+      return;
+    }
+    const resolved = resolveTradeSpec(code || 'RB0');
+    if (!resolved.ok) { out.innerHTML = `<span style="color:var(--up-color);">${esc(resolved.reason)}</span>`; return; }
+    const spec = resolved.spec;
+    const { def, params } = this.collectParams();
+    const s = this.state;
+    try {
+      const suite = runStressSuite({
+        bars, spec, strategy: def, params,
+        engineOpts: {
+          capital: s.capital, sizing: s.sizing, notionalPct: s.notionalPct,
+          lots: s.lots, slippageTicks: s.slippageTicks, allowShort: s.allowShort,
+          rules: rulesFor(spec)
+        },
+        market: spec.market === 'aShare' ? 'aShare' : 'futures',
+        periodsPerYear: this.chart.periodsPerYear || 252
+      });
+      const sign = v => (v > 0 ? 'val-up' : v < 0 ? 'val-down' : '');
+      const rows = suite.results.map(r => r.available
+        ? `<tr><td title="${esc(r.why || '')}">${esc(r.name)}</td><td>${esc(r.from)}~${esc(r.to)}</td>
+            <td class="${sign(r.totalReturn)}">${pct(r.totalReturn)}</td>
+            <td class="val-down">${pct(r.maxDDPct)}</td><td>${r.trades}</td>
+            <td>${pct(r.winRate, 0)}</td>
+            <td class="${sign(r.buyHoldReturn)}">${pct(r.buyHoldReturn)}</td>
+            <td>${(r.rejected?.boardLockClose || 0) + (r.rejected?.boardLock || 0)}</td></tr>`
+        : `<tr><td>${esc(r.name)}</td><td colspan="7" style="color:var(--text-muted);">${esc(r.note || '数据不覆盖')}</td></tr>`).join('');
+      const worst = suite.summary.worstScenario;
+      out.innerHTML = `
+        <div style="font-weight:700; padding:6px 0;">🧨 黑天鹅压力测试 — ${esc(spec.name || code)} / ${esc(def.name)}</div>
+        <div style="font-size:11px; color:var(--text-muted); padding:2px 0;">
+          ${suite.summary.available}/${suite.summary.scenarios} 个场景有数据。
+          ${worst ? `最脆弱一幕：<b class="val-down">${esc(worst.name)}（${pct(worst.totalReturn)}）</b>` : ''}
+          ${suite.summary.boardLockCloseTotal ? `；极端窗口内平仓被板锁拦截 <b>${suite.summary.boardLockCloseTotal}</b> 次 —— 这些仓位是"想走走不掉"` : ''}
+        </div>
+        <table class="data-table" style="margin-top:6px;"><thead><tr>
+          <th>场景</th><th>窗口</th><th>策略收益</th><th>最大回撤</th><th>笔数</th><th>胜率</th><th>买入持有</th><th>板锁拒绝</th>
+        </tr></thead><tbody>${rows}</tbody></table>
+        <div style="font-size:11px; color:var(--text-muted); padding:4px 0;">
+          口径：窗口前留 60 根预热指标，业绩只统计窗口内权益；对照组是同窗口买入持有。
+          压力测试是体检不是预测 —— 通过所有场景也不代表未来黑天鹅长这样。
+        </div>`;
+    } catch (e) {
+      out.innerHTML = `<span style="color:var(--up-color);">压力测试失败：${esc(e.message)}</span>`;
+      console.error(e);
+    }
   }
 
   renderParams() {
@@ -341,6 +411,8 @@ export class BacktestPanel {
         maintenanceRatio: s.maintenanceRatio,
         breakeven: s.breakevenR > 0 ? { afterR: s.breakevenR, extraPct: 0 } : null,
         timeStop: s.timeStopBars > 0 ? { bars: s.timeStopBars, requireLoss: true } : null,
+        // L2 冲击成本（默认关闭）。qtyPerLot 由 rules.lotSize() 自动判定：A股 100 股/手、期货 1
+        impact: s.impactEta > 0 ? { eta: s.impactEta, delta: 0.5, maxParticipation: s.impactPart } : null,
         rules
       });
       const raw = eng.run(signals);
@@ -350,6 +422,9 @@ export class BacktestPanel {
       });
       res = { ...raw, metrics, bars: useBars, spec, strategy: def.name, strategyId: def.id,
               params, signals, rejected: raw.rejected, settlementOn: !!raw.settlement };
+      // 事前风险度量（VaR/CVaR 三模态 + 风险度）随回测一次算齐；算不出就给 null，
+      // 报表显示「—」，不假装 0
+      res.risk = fullRiskReport(raw.equityCurve, { periodsPerYear: this.chart.periodsPerYear || 252, sims: 4000, seed: 42 });
     } catch (e) {
       out.innerHTML = `<span style="color:var(--up-color);">回测失败：${esc(e.message)}</span>`;
       console.error(e);
@@ -434,9 +509,11 @@ export class BacktestPanel {
         <span>时间止损出场 <b>${(res.trades || []).filter(t => t.exitReason === 'time_stop').length}</b> 笔</span>
         <span>涨停买不进 <b>${res.rejected.boardLock || 0}</b></span>
         <span>T+1/方向被拒 <b>${(res.rejects || []).filter(x => x.kind === 'tPlus1').length} / ${res.rejected.rules || 0}</b></span>
+        ${res.rejected.participationCapped ? `<span title="L2 冲击模型开启时，单根K线超出最大参与率的手数被砍">参与率砍单 <b>${res.rejected.participationCapped}</b></span>` : ''}
         <span title="用第一笔成交的手数，从区间首根开盘买入并持有到末根，按同样本金折算；不是策略平均仓位，也不是等风险基准">同期持有涨幅 <b class="${sign(cmp.benchReturn)}">${pct(cmp.benchReturn)}</b></span>
         <span title="策略收益率 − 上述「同期持有」收益率，只作粗略对照">超额 <b class="${sign(cmp.alpha)}">${pct(cmp.alpha)}</b></span>
       </div>
+      ${this.riskSection(res)}
       <div style="display:flex; gap:20px; flex-wrap:wrap;">
         <table class="data-table" style="flex:1; min-width:220px;"><thead><tr><th>年份</th><th>收益</th></tr></thead><tbody>${years}</tbody></table>
         <table class="data-table" style="flex:1.4; min-width:260px;"><thead><tr><th>进出场原因</th><th>笔数</th><th>合计盈亏</th></tr></thead><tbody>${reasons}</tbody></table>
@@ -455,6 +532,42 @@ export class BacktestPanel {
           <td>${t.holdingBars}</td><td>${esc(t.exitReason)}</td></tr>`).join('')}
         </tbody></table>
         ${res.trades.length > 60 ? `<div style="font-size:11px; color:var(--text-muted);">仅显示最近 60 笔，共 ${res.trades.length} 笔</div>` : ''}
+      </div>`;
+  }
+
+  /**
+   * 事前风险报告区：三模态 VaR/CVaR + 期货账户风险度。
+   * 与"最大回撤"（事后数字）互补：VaR 回答的是"明天有 1% 的概率亏多少以上"。
+   */
+  riskSection(res) {
+    const risk = res.risk;
+    if (!risk || !risk.var95) return '';
+    const p95 = risk.var95.parametric, h95 = risk.var95.historical, mc95 = risk.var95.monteCarlo;
+    const h99 = risk.var99.historical;
+    const num = (v, d = 2) => (v === null || v === undefined || !Number.isFinite(v)) ? '—' : (v * 100).toFixed(d) + '%';
+    const mg = risk.margin;
+    const mgRow = mg && mg.usable
+      ? `<tr><td>账户风险度（占用/权益）</td><td>${num(mg.avgRiskDeg)}</td><td>${num(mg.maxRiskDeg)}</td>
+          <td colspan="2">${mg.marginCallDays > 0
+            ? `<span style="color:var(--up-color);">追保 ${mg.marginCallDays} 天</span>`
+            : `追保 0 天；最近强平距离 ${num(mg.liquidationGapMin, 0)}`}</td></tr>`
+      : '';
+    return `
+      <div style="margin-top:10px; font-size:12px;">
+        <b style="color:var(--text-muted); font-size:11px;">事前风险（VaR = 单期损失的 95%/99% 分位；三种算法互相校验，差距大说明厚尾超出矩的刻画能力，要信历史法）</b>
+        <table class="data-table" style="margin-top:4px; max-width:720px;">
+          <thead><tr><th>口径</th><th>VaR 95%</th><th>CVaR 95%</th><th>VaR 99%（历史）</th><th>10日 VaR 99%</th></tr></thead>
+          <tbody>
+            <tr><td>参数法（Cornish-Fisher${p95.skew !== null && Number.isFinite(p95.skew) ? `，偏度 ${p95.skew.toFixed(2)} 峰度 ${Number(p95.kurt).toFixed(1)}` : ''}）</td>
+              <td class="val-down">${num(p95.var)}</td><td class="val-down">${num(p95.cvar)}</td>
+              <td>${num(risk.var99.parametric.var)}</td><td>${num(risk.var10d99.parametric.var)}</td></tr>
+            <tr><td>历史模拟</td><td class="val-down">${num(h95.var)}</td><td class="val-down">${num(h95.cvar)}</td>
+              <td class="val-down">${num(h99.var)}</td><td>${num(risk.var10d99.historical.var)}</td></tr>
+            <tr><td>蒙特卡洛（EWMA 滤波 bootstrap）</td><td class="val-down">${num(mc95.var)}</td><td class="val-down">${num(mc95.cvar)}</td>
+              <td>${num(risk.var99.monteCarlo.var)}</td><td>${num(risk.var10d99.monteCarlo.var)}</td></tr>
+            ${mgRow}
+          </tbody>
+        </table>
       </div>`;
   }
 }

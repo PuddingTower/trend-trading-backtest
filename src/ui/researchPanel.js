@@ -10,6 +10,10 @@
 
 import { STRATEGIES, getStrategy } from '../strategy/library.js';
 import { OBJECTIVES, gridRunner, walkForward, neighborhoodScore, runOne } from '../report/optimizer.js';
+import { tpeRunner, plateauRecommendation, paretoFront } from '../report/bayesOptimizer.js';
+import { factorReport, buildFactorPanel } from '../report/factorEval.js';
+import { rsi as rsiFn, roc as rocFn, sma as smaFn, adx as adxFn } from '../strategy/indicators.js';
+import { atr as atrFn } from '../analysis/common.js';
 import { simulatePaths, parameterHeatmap, costStress, DEFAULT_COST_SCENARIOS } from '../report/monteCarlo.js';
 import { runPortfolio } from '../core/portfolio.js';
 import { PortfolioEngine } from '../core/portfolioEngine.js';
@@ -131,6 +135,9 @@ export class ResearchPanel {
       const act = el.dataset.rs;
       if (act === 'tab') { this.tab = el.dataset.tab; this.render(); }
       else if (act === 'runGrid') this.runGrid();
+      else if (act === 'runTpe') this.runTpe();
+      else if (act === 'tpeUse') this.applyRow(Number(el.dataset.idx), this.tpeRows);
+      else if (act === 'facRun') this.runFactor();
       else if (act === 'runWf') this.runWalkForward();
       else if (act === 'runPort') this.runPortfolio();
       else if (act === 'runMc') this.runMonteCarlo();
@@ -206,8 +213,8 @@ export class ResearchPanel {
       return el && el.value !== '' ? el.value : d;
     };
     const capital = keep('rsCapital', 200000), lots = keep('rsLots', 1), slip = keep('rsSlip', 1);
-    const tabs = [['grid', '🎯 参数寻优'], ['wf', '🚪 Walk-Forward'], ['port', '🧺 组合回测'],
-      ['mc', '🎲 蒙特卡洛·成本'], ['scan', '🔍 市场扫描'], ['cmp', '🧪 策略对比'], ['rep', '📊 报表与导出']]
+    const tabs = [['grid', '🎯 参数寻优'], ['tpe', '🧠 TPE贝叶斯'], ['wf', '🚪 Walk-Forward'], ['port', '🧺 组合回测'],
+      ['mc', '🎲 蒙特卡洛·成本'], ['fac', '🧬 因子体检'], ['scan', '🔍 市场扫描'], ['cmp', '🧪 策略对比'], ['rep', '📊 报表与导出']]
       .map(([k, label]) => `<button class="tab-btn ${this.tab === k ? 'active' : ''}" data-rs="tab" data-tab="${k}" style="font-size:12px;">${label}</button>`).join('');
     const head = `
       <div style="display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid var(--border-color);margin-bottom:10px;">${tabs}</div>
@@ -219,11 +226,13 @@ export class ResearchPanel {
         <span style="color:var(--text-muted);">品种 ${esc(this.code)} · ${bars.length} 根 · 周期 ${esc(this.api.chart?.periodLabel || 'daily')}</span>
       </div>`;
     const body = this.tab === 'grid' ? this.gridHtml()
-      : this.tab === 'wf' ? this.wfHtml()
-        : this.tab === 'port' ? this.portHtml()
-          : this.tab === 'mc' ? this.mcHtml()
-            : this.tab === 'scan' ? this.scanHtml()
-              : this.tab === 'cmp' ? this.cmpHtml() : this.reportHtml();
+      : this.tab === 'tpe' ? this.tpeHtml()
+        : this.tab === 'wf' ? this.wfHtml()
+          : this.tab === 'port' ? this.portHtml()
+            : this.tab === 'mc' ? this.mcHtml()
+              : this.tab === 'fac' ? this.facHtml()
+                : this.tab === 'scan' ? this.scanHtml()
+                  : this.tab === 'cmp' ? this.cmpHtml() : this.reportHtml();
     this.root.innerHTML = head + body;
   }
 
@@ -462,12 +471,243 @@ export class ResearchPanel {
     if (host) host.innerHTML = this.progressHtml();
   }
 
-  applyRow(idx) {
-    const row = (this.gridRows || [])[idx];
+  applyRow(idx, list = null) {
+    const row = (list || this.gridRows || [])[idx];
     if (!row) return;
     const strategyId = document.getElementById('rsStrategy')?.value;
-    this.api.toast?.(`已把第 ${row.rank} 名参数交给回测面板`);
+    this.api.toast?.(`已把第 ${row.rank || ''} 名参数交给回测面板`);
     this.api.runBacktestWith?.(strategyId, row.params);
+  }
+
+  // ---------------- TPE 贝叶斯寻优 ----------------
+
+  /** 网格 JSON → TPE 参数空间：数值数组→整数区间，字符串数组→枚举，{lo,hi,log,type}→显式定义。 */
+  parseSpace(text) {
+    const grid = parseGrid(text);
+    if (grid.__error) return { __error: grid.__error };
+    const space = [];
+    for (const [k, v] of Object.entries(grid)) {
+      if (v && typeof v === 'object' && !Array.isArray(v) && Number.isFinite(Number(v.lo))) {
+        space.push({ name: k, type: v.type || 'float', lo: Number(v.lo), hi: Number(v.hi), log: !!v.log });
+      } else if (Array.isArray(v)) {
+        const nums = v.every(x => typeof x === 'number');
+        if (nums) space.push({ name: k, type: 'int', lo: Math.min(...v), hi: Math.max(...v) });
+        else space.push({ name: k, type: 'choice', options: v.map(String) });
+      }
+    }
+    return { space };
+  }
+
+  tpeHtml() {
+    const sid = document.getElementById('rsStrategy')?.value || 'donchianBreak';
+    const defText = JSON.stringify(DEFAULT_GRIDS[sid] || {});
+    const prev = this.tpeCtx && this.tpeCtx.strategyId === sid ? null : defText;
+    const r = this.tpe;
+    const rows = (r?.ranked || []).slice(0, 15).map((t, i) => `
+      <tr>
+        <td>${i + 1}</td>
+        <td style="text-align:left;">${esc(Object.entries(t.params).map(([k, v]) => `${k}=${v}`).join(' '))}</td>
+        <td class="${t.score >= 0 ? 'val-up' : 'val-down'}">${nf(t.score)}</td>
+        <td>${t.trades}</td>
+        <td>${t.pruned ? '<span style="color:var(--text-muted);" title="预演被中位数剪掉，未跑全量">已剪枝</span>' : '全量'}</td>
+        <td>${t.plateauScore !== undefined ? nf(t.plateauScore) : '—'}</td>
+        <td><button class="btn btn-sm" style="${BTN}padding:3px 8px;" data-rs="tpeUse" data-idx="${i}">用这组</button></td>
+      </tr>`).join('');
+    return `
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px;">
+        TPE 把「好参数出现在哪」的分布学出来再采样，连续参数不用撒网格。分阶段剪枝：
+        预演成绩低于已完成预演中位数的参数直接放弃，省下的算力换更多试验数。
+      </div>
+      ${this.strategySelect('rsStrategy')}
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0;font-size:12px;">
+        <label>目标
+          <select id="rsTpeObj" style="${INP}">${Object.entries(OBJECTIVES).map(([k, o]) =>
+            `<option value="${k}" ${k === (this.tpeObj || 'sharpe') ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}</select></label>
+        <label>试验数<input id="rsTpeTrials" type="number" value="${esc(this.tpeTrials || 60)}" min="12" max="500" style="${INP}width:64px;" /></label>
+        <label title="预演剪枝：前 40% 数据预演低于中位数即放弃。关闭则全部跑满"><input id="rsTpePrune" type="checkbox" ${this.tpePrune === false ? '' : 'checked'} /> 预演剪枝</label>
+        <label>种子<input id="rsTpeSeed" type="number" value="${esc(this.tpeSeed || 7)}" style="${INP}width:64px;" /></label>
+        <button class="btn btn-sm" style="${BTN_HI}" data-rs="runTpe">▶ 开始 TPE 寻优</button>
+        ${this.busy ? `<button class="btn btn-sm" style="${BTN}" data-rs="stop">■ 停止</button>` : ''}
+        <span data-rs="progressHost">${this.progressHtml()}</span>
+      </div>
+      <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">
+        参数空间（网格写法会被展开成整数区间；要连续/对数采样就写对象：
+        <code>{"trailAtr":{"lo":0.5,"hi":4,"type":"float","log":true}}</code>）
+      </div>
+      <textarea id="rsTpeSpace" rows="3" style="${INP}width:100%;font-family:monospace;">${esc(prev ?? (document.getElementById('rsTpeSpace')?.value || defText))}</textarea>
+      ${r ? `
+        <div style="margin-top:8px;font-size:12px;">
+          <b>最优（按目标分）：</b>${esc(Object.entries(r.best?.params || {}).map(([k, v]) => `${k}=${v}`).join(' '))}
+          <span class="val-up">${nf(r.best?.score)}</span>
+          · 全量评估 ${r.evaluated} 次 / 剪枝 ${r.pruned} 次（省 ${r.savings}% 算力）
+        </div>
+        ${this.tpePlateau ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
+          ${this.tpePlateau.recommended ? `参数平原推荐：<b style="color:var(--accent-gold);">${esc(Object.entries(this.tpePlateau.recommended.params).map(([k, v]) => `${k}=${v}`).join(' '))}</b>（平原分 ${nf(this.tpePlateau.recommended.plateauScore)}）` : ''}
+          ${this.tpePlateau.note ? ` — ${esc(this.tpePlateau.note)}` : ''}
+        </div>` : ''}
+        ${this.tpePareto ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
+          帕累托拐点（Sharpe 大 & 回撤小 的均衡点）：${this.tpePareto.knee
+            ? `<b>${esc(Object.entries(this.tpePareto.knee.params).map(([k, v]) => `${k}=${v}`).join(' '))}</b>` : '—'}
+          ，前沿共 ${this.tpePareto.front.length} 个非支配参数组
+        </div>` : ''}
+        ${rows ? `<div style="margin-top:6px;max-height:260px;overflow:auto;"><table class="data-table"><thead><tr>
+          <th>#</th><th>参数</th><th>目标分</th><th>笔数</th><th>状态</th><th>平原分</th><th></th>
+        </tr></thead><tbody>${rows}</tbody></table></div>` : ''}` : ''}`;
+  }
+
+  runTpe() {
+    const bars = this.bars;
+    const sp = this.specFor(this.code);
+    const strategy = getStrategy(document.getElementById('rsStrategy')?.value || 'donchianBreak');
+    if (!bars || bars.length < 120 || !sp) { this.api.toast?.('先加载一个品种的数据（至少 120 根）'); return; }
+    const { space, __error } = this.parseSpace(document.getElementById('rsTpeSpace')?.value || '');
+    if (__error) { this.api.toast?.(__error); return; }
+    if (!space.length) { this.api.toast?.('参数空间是空的'); return; }
+    this.tpeObj = document.getElementById('rsTpeObj')?.value || 'sharpe';
+    this.tpeTrials = Number(document.getElementById('rsTpeTrials')?.value) || 60;
+    this.tpePrune = document.getElementById('rsTpePrune')?.checked !== false;
+    this.tpeSeed = Number(document.getElementById('rsTpeSeed')?.value) || 7;
+    const objective = this.tpeObj, engineOpts = this.engineOpts();
+    const periodsPerYear = this.api.chart?.periodsPerYear || 252;
+    const runner = tpeRunner({
+      bars, spec: sp.spec, strategy, space,
+      baseParams: { ...strategy.params }, objective, engineOpts, periodsPerYear,
+      nTrials: this.tpeTrials, startup: Math.min(12, Math.floor(this.tpeTrials / 5)),
+      seed: this.tpeSeed, prune: this.tpePrune
+    });
+    this.tpe = null; this.tpeRows = null; this.tpePlateau = null; this.tpePareto = null;
+    this.busy = 'TPE 寻优中'; this.progress = { done: 0, total: runner.total };
+    this.stopping = false;
+    const step = () => {
+      if (this.stopping) { this.busy = '已停止'; this.progress = null; this.render(); return; }
+      runner.step(4);
+      this.progress = { done: runner.progressed, total: runner.total };
+      this.refreshProgress();
+      if (!runner.done()) setTimeout(step, 0);
+      else {
+        const ranked = runner.finish();
+        this.tpe = ranked;
+        this.tpeRows = ranked.ranked;
+        this.tpePlateau = plateauRecommendation(ranked.ranked.filter(t => !t.pruned), space, { k: 6 });
+        this.tpePareto = paretoFront(ranked.ranked.filter(t => !t.pruned && t.metrics),
+          { keys: ['sharpe'], minKeys: ['maxDDPct'] });
+        this.tpeCtx = { bars, strategyId: strategy.id, space };
+        this.busy = ''; this.progress = null;
+        this.render();
+      }
+    };
+    setTimeout(step, 0);
+  }
+
+  // ---------------- 因子体检 ----------------
+
+  /** 可选因子：全部只用 OHLCV 可得的信息，与策略库同一套指标实现。 */
+  FACTOR_DEFS = {
+    mom20: { name: '20日动量', fn: (bars, i) => (i >= 20 && bars[i - 20].close > 0 ? bars[i].close / bars[i - 20].close - 1 : null) },
+    maDev: { name: '20日均线偏离率', fn: (bars, i) => {
+      if (i < 19) return null;
+      const ma = smaFn(bars.slice(0, i + 1).map(b => b.close), 20);
+      const v = ma[ma.length - 1];
+      return Number.isFinite(v) && v > 0 ? bars[i].close / v - 1 : null;
+    } },
+    rsi: { name: 'RSI(14)', fn: (bars, i) => {
+      if (i < 15) return null;
+      const v = rsiFn(bars.slice(0, i + 1).map(b => b.close), 14);
+      return v[v.length - 1];
+    } },
+    adx: { name: 'ADX(14)', fn: (bars, i) => {
+      if (i < 30) return null;
+      const v = adxFn(bars.slice(0, i + 1), 14);
+      return v && v[v.length - 1] ? v[v.length - 1].adx : null;
+    } },
+    atrPct: { name: 'ATR率(14)', fn: (bars, i) => {
+      if (i < 20) return null;
+      const v = atrFn(bars.slice(0, i + 1), 14);
+      const a = v[v.length - 1];
+      return Number.isFinite(a) && bars[i].close > 0 ? a / bars[i].close : null;
+    } },
+    roc5: { name: '5日ROC', fn: (bars, i) => (i >= 5 ? rocFn(bars.slice(0, i + 1).map(b => b.close), 5).pop() : null) },
+    volZ: { name: '量比(5/20)', fn: (bars, i) => {
+      if (i < 20) return null;
+      const v5 = smaFn(bars.slice(i - 4, i + 1).map(b => b.volume || 0), 5).pop();
+      const v20 = smaFn(bars.slice(0, i + 1).map(b => b.volume || 0), 20).pop();
+      return Number.isFinite(v20) && v20 > 0 ? v5 / v20 : null;
+    } }
+  };
+
+  facHtml() {
+    const cur = this.facFactor || 'mom20';
+    const factorOpts = Object.entries(this.FACTOR_DEFS).map(([k, f]) =>
+      `<option value="${k}" ${k === cur ? 'selected' : ''}>${esc(f.name)}</option>`).join('');
+    const rep = this.facReport;
+    const layerRows = rep?.layers?.layers?.map(l => `
+      <tr><td>Q${l.q + 1}${l.q === 0 ? '（最低）' : l.q === rep.layers.layers.length - 1 ? '（最高）' : ''}</td>
+        <td class="${l.totalReturn >= 0 ? 'val-up' : 'val-down'}">${pc(l.totalReturn)}</td>
+        <td>${nf(l.sharpe, 2)}</td></tr>`).join('');
+    const decayRows = (rep?.decay || []).map(d => `
+      <tr><td>${d.horizon}</td><td class="${(d.meanIC || 0) >= 0 ? 'val-up' : 'val-down'}">${nf(d.meanIC, 4)}</td>
+        <td>${nf(d.ir, 3)}</td></tr>`).join('');
+    return `
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px;">
+        因子体检回答"这个信号有没有预测力"：IC（因子值与未来收益的截面相关）、ICIR（IC 均值÷标准差，
+        &gt;0.5 才值得做）、分层回测（按因子排序切 5 层，看是否单调）。数据来自自选池（需 ≥4 个品种已同步）。
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0;font-size:12px;">
+        <label>因子<select id="rsFacFactor" style="${INP}">${factorOpts}</select></label>
+        <label>前瞻期(根)<input id="rsFacHorizon" type="number" value="${esc(this.facHorizon || 1)}" min="1" max="20" style="${INP}width:56px;" /></label>
+        <label>分层数<input id="rsFacQ" type="number" value="${esc(this.facQ || 5)}" min="2" max="10" style="${INP}width:52px;" /></label>
+        <button class="btn btn-sm" style="${BTN_HI}" data-rs="facRun">▶ 跑因子体检</button>
+        ${this.busy ? `<span style="color:var(--text-muted);">${esc(this.busy)}</span>` : ''}
+      </div>
+      ${rep ? `
+        ${rep.error ? `<div style="color:var(--up-color);">${esc(rep.error)}</div>` : `
+        <div style="display:flex;gap:20px;flex-wrap:wrap;">
+          <table class="data-table" style="min-width:300px;"><thead><tr><th>指标</th><th>值</th></tr></thead><tbody>
+            <tr><td>IC（Pearson）均值</td><td class="${(rep.pearson.mean || 0) >= 0 ? 'val-up' : 'val-down'}">${nf(rep.pearson.mean, 4)}</td></tr>
+            <tr><td>RankIC（Spearman）均值</td><td class="${(rep.rank.mean || 0) >= 0 ? 'val-up' : 'val-down'}">${nf(rep.rank.mean, 4)}</td></tr>
+            <tr><td>RankIC 的 ICIR</td><td>${nf(rep.rank.ir, 3)}</td></tr>
+            <tr><td>t 统计量</td><td>${nf(rep.rank.tStat, 2)}</td></tr>
+            <tr><td>IC &gt; 0 占比</td><td>${pc(rep.rank.positivePct, 0)}</td></tr>
+            <tr><td>有效截面 / 跳过</td><td>${rep.rank.n} / ${rep.skippedCrossSections}</td></tr>
+          </tbody></table>
+          <table class="data-table" style="min-width:260px;"><thead><tr><th>前瞻期</th><th>RankIC 均值</th><th>ICIR</th></tr></thead><tbody>${decayRows}</tbody></table>
+          <table class="data-table" style="min-width:220px;"><thead><tr><th>分层</th><th>累计收益</th><th>Sharpe</th></tr></thead><tbody>${layerRows}</tbody></table>
+        </div>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">
+          多空价差（最高层−最低层）累计 ${pc(rep.layers?.longShort?.totalSpread, 1)}，Sharpe ${nf(rep.layers?.longShort?.sharpe, 2)}。
+          分层为研究口径（每期等权再平衡、不含成本）。${esc(rep.pearson.note || '')}
+          ${rep.rank.mean !== null && Math.abs(rep.rank.mean) < 0.02 ? '——这因子基本没有预测力，别往下走了。' : ''}
+        </div>`}` : ''}`;
+  }
+
+  async runFactor() {
+    const items = this.api.watchlistItems?.() || [];
+    if (items.length < 4) { this.api.toast?.('自选池至少要 4 个品种才能做截面分析'); return; }
+    this.facFactor = document.getElementById('rsFacFactor')?.value || 'mom20';
+    this.facHorizon = Number(document.getElementById('rsFacHorizon')?.value) || 1;
+    this.facQ = Number(document.getElementById('rsFacQ')?.value) || 5;
+    const def = this.FACTOR_DEFS[this.facFactor];
+    if (!def) return;
+    this.busy = '因子体检 0/' + items.length;
+    this.render();
+    const barsList = [], skipped = [];
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      this.busy = `因子体检 ${i + 1}/${items.length} · ${it.openCode || it.symbol}`;
+      this.refreshProgress();
+      const bars = await this.api.loadBarsFor?.(it);
+      if (!bars || bars.length < 80) { skipped.push(it.openCode || it.symbol); continue; }
+      barsList.push({ symbol: it.openCode || it.symbol, bars });
+    }
+    this.busy = '';
+    if (barsList.length < 4) {
+      this.facReport = { error: `只有 ${barsList.length} 个品种有足够数据（${skipped.join('、') || '无跳过'}），至少要 4 个` };
+      this.render();
+      return;
+    }
+    const panel = buildFactorPanel(barsList, def.fn);
+    this.facReport = factorReport(panel, { horizon: this.facHorizon, quantiles: this.facQ });
+    this.render();
   }
 
   // ---------------- Walk-Forward ----------------
