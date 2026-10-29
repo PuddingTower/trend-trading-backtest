@@ -83,9 +83,9 @@
     <div class="nav-center">
       <span class="replay-status-badge" id="replayBarIndexBadge">进度: 120 / 260</span>
       <select id="startOffset" class="mini-select" aria-label="回测起点" title="回测起点：只载入该时间之后的数据，切换后重载当前品种并重置账户">
-        <option value="0" selected>全部数据</option>
+        <option value="0">全部数据</option>
         <option value="0.5">近6个月</option>
-        <option value="1">近1年</option>
+        <option value="1" selected>近1年</option>
         <option value="2">近2年</option>
         <option value="3">近3年</option>
         <option value="custom">自定义…</option>
@@ -100,6 +100,7 @@
         <option value="100">极速(0.1s)</option>
       </select>
       <button class="btn btn-sm" id="btnShowAllBars" title="显示全部K线">⏩ 全部</button>
+      <button class="btn btn-sm" id="btnToggleAnchor" aria-pressed="false" title="K线末端居中：最新K线固定在图表中央，推进/播放时视角自动跟随">🎯 K线末端居中: 关</button>
     </div>
 
     <!-- Right Quick Actions -->
@@ -140,7 +141,6 @@
       <span class="toolbar-title" id="grpAssist">辅助</span>
       <button class="tool-btn" id="btnToggleMagnet" aria-pressed="false" title="自动吸附到最近K线的高/低/开/收 (M)">🧲 磁吸: 关</button>
       <button class="tool-btn active" id="btnToggleTradePaths" aria-pressed="true" title="在K线图上显示多空平仓连线与盈亏统计">📍 交易连线: 开</button>
-      <button class="tool-btn" id="btnToggleAnchor" aria-pressed="false" title="最新K线固定在图表中央，推进/播放时视角自动跟随">🎯 居中: 关</button>
       <button class="tool-btn active" id="btnToggleLogScale" aria-pressed="true" title="Y 轴对数刻度：等距像素=等率涨跌，百分比止损/回撤/通道宽度才量得准。默认开启，切线性只为对照">📏 对数轴: 开</button>
       <input type="color" id="drawColorPicker" value="#f59e0b" class="swatch" aria-label="画线颜色" title="画线颜色" />
       <select id="drawLineWidth" class="mini-select" aria-label="画线粗细">
@@ -3504,7 +3504,11 @@
               cut.setUTCMonth(cut.getUTCMonth() - Math.round(years * 12));
               const cutStr = cut.toISOString().slice(0, 10);
               const sliced = bars.filter(b => String(b.date).slice(0, 10) >= cutStr);
-              if (sliced.length >= 30) view = sliced;    // 切完太窄会没图可看，回退全量
+              if (sliced.length >= 2) {
+                // 回测面板要求 ≥60 根；周线/月线一年只有 52/12 根，按根数补足到 60
+                // （只往前多取几天/几周，不等于退回全历史）。
+                view = (sliced.length >= 60 || bars.length <= 60) ? sliced : bars.slice(bars.length - 60);
+              }
             }
           }
         }
@@ -3828,7 +3832,7 @@
         anchorBtn.addEventListener('click', () => {
           const on = !this.chartModule.centerLatest;
           this.chartModule.centerLatest = on;
-          anchorBtn.textContent = on ? '🎯 居中: 开' : '🎯 居中: 关';
+          anchorBtn.textContent = on ? '🎯 K线末端居中: 开' : '🎯 K线末端居中: 关';
           anchorBtn.classList.toggle('active', on);
           anchorBtn.setAttribute('aria-pressed', String(on));
           this.chartModule.scrollOffset = 0;
