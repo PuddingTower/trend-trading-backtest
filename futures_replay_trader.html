@@ -88,6 +88,7 @@
         <option value="1">近1年</option>
         <option value="2">近2年</option>
         <option value="3">近3年</option>
+        <option value="custom">自定义…</option>
       </select>
       <button class="btn btn-sm" id="btnReplayReset" title="重置回测到初始位置">⏮ 重置</button>
       <button class="btn btn-sm btn-primary" id="btnReplayStep" title="单步推进下一根 K 线 · 快捷键: 空格 或 F">⏭ 单步</button>
@@ -108,6 +109,17 @@
       <button class="btn btn-sm" id="btnResetAccount">🔄 清空回测</button>
     </div>
   </header>
+
+  <!-- 自定义回测区间：选「自定义区间…」后出现。单独一行，避免和顶部导航抢宽度。
+       起止都含，只按 YYYY-MM-DD 前缀切片；改完日期立即重载并重置回测进度。 -->
+  <div id="customRangeWrap" class="custom-range-bar" style="display:none;">
+    <span class="custom-range-label">回测区间</span>
+    <input type="date" id="customRangeFrom" class="mini-select" aria-label="回测起始日期" title="回测起始日期（含当天）" />
+    <span class="custom-range-sep" aria-hidden="true">→</span>
+    <input type="date" id="customRangeTo" class="mini-select" aria-label="回测结束日期" title="回测结束日期（含当天）" />
+    <span class="custom-range-hint">已加载 K 线的起止日期；两端都包含</span>
+    <button class="btn btn-sm" id="customRangeApply" title="按当前起止日期重新切片">应用区间</button>
+  </div>
 
   <!-- Drawing & Measurement Toolbar -->
   <div class="toolbar">
@@ -824,7 +836,7 @@
     import { BarStore, barKey, upgradeLegacyKey, cacheBars } from './src/data/barStore.js';
     import { fetchBars, fetchSinaJSONP, resolveSymbol } from './src/data/sources.js';
     import { attachDefaultMAs, calcMA } from './src/data/indicators.js';
-    import { resolveBars, periodsPerYear, periodLabel, periodSpacingOk } from './src/data/periods.js';
+    import { resolveBars, periodsPerYear, periodLabel, periodSpacingOk, sliceBarsByDate } from './src/data/periods.js';
     import { parseCSV, barsToCSV, tradesToCSV, downloadText, SAMPLE_CSV } from './src/data/csvIO.js';
     import { parseSymbol, classifyAShare, MARKETS } from './src/markets/symbolMeta.js';
     import { getFuturesSpec } from './src/markets/contractSpecs.js';
@@ -3446,6 +3458,23 @@
         return bits.join('；');
       }
 
+      /**
+       * 自定义区间的输入框跟随当前数据：min/max 限在真实首末日期，没填过就默认整段。
+       * 只按 YYYY-MM-DD 比较；60m/4h 的 date 带钟点也能用，Safari 也不会因为
+       * `new Date('2026-10-14 10:30')` 变成 Invalid Date 而把区间切空。
+       */
+      syncCustomRangeInputs(bars) {
+        const fromEl = document.getElementById('customRangeFrom');
+        const toEl = document.getElementById('customRangeTo');
+        if (!fromEl || !toEl || !bars || !bars.length) return;
+        const first = String(bars[0].date).slice(0, 10);
+        const last = String(bars[bars.length - 1].date).slice(0, 10);
+        fromEl.min = first; fromEl.max = last;
+        toEl.min = first; toEl.max = last;
+        if (!fromEl.value) fromEl.value = first;
+        if (!toEl.value) toEl.value = last;
+      }
+
       applyDataToChart(bars, symbol, toastMsg, code) {
         this._loadedBars = bars;                       // 全量留存，切换起点时免重新拉取
         // 代码跟数据走：研究面板/回测面板都读 backtestCode 去查合约规格，
@@ -3454,18 +3483,29 @@
           this.chartModule.backtestCode = code;
           this.chartModule.backtestMarkers = null;
         }
-        const years = parseFloat(document.getElementById('startOffset').value) || 0;
+        const offsetEl = document.getElementById('startOffset');
+        const mode = offsetEl ? offsetEl.value : '0';
         let view = bars;
-        if (years > 0 && bars.length > 0) {
-          // 只按字符串切：60m/4h 的 date 是 '2026-10-14 10:30' 这种形状，
-          // Safari（iPad）下 new Date() 直接给 Invalid Date，起点选择会整个失效。
-          const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(bars[bars.length - 1].date));
-          if (m) {
-            const cut = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
-            cut.setUTCMonth(cut.getUTCMonth() - Math.round(years * 12));
-            const cutStr = cut.toISOString().slice(0, 10);
-            const sliced = bars.filter(b => String(b.date).slice(0, 10) >= cutStr);
-            if (sliced.length >= 30) view = sliced;    // 切完太窄会没图可看，回退全量
+        if (mode === 'custom' && bars.length > 0) {
+          this.syncCustomRangeInputs(bars);
+          const from = document.getElementById('customRangeFrom')?.value || '';
+          const to = document.getElementById('customRangeTo')?.value || '';
+          const sliced = sliceBarsByDate(bars, from, to);
+          if (sliced.length >= 2) view = sliced;
+          else this.showToast('自定义区间内不足 2 根 K 线，已保留全部数据');
+        } else if (mode !== 'custom') {
+          const years = parseFloat(mode) || 0;
+          if (years > 0 && bars.length > 0) {
+            // 只按字符串切：60m/4h 的 date 是 '2026-10-14 10:30' 这种形状，
+            // Safari（iPad）下 new Date() 直接给 Invalid Date，起点选择会整个失效。
+            const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(bars[bars.length - 1].date));
+            if (m) {
+              const cut = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+              cut.setUTCMonth(cut.getUTCMonth() - Math.round(years * 12));
+              const cutStr = cut.toISOString().slice(0, 10);
+              const sliced = bars.filter(b => String(b.date).slice(0, 10) >= cutStr);
+              if (sliced.length >= 30) view = sliced;    // 切完太窄会没图可看，回退全量
+            }
           }
         }
         this.chartModule.setData(view);
@@ -3752,14 +3792,36 @@
         document.getElementById('btnReplayStep').addEventListener('click', () => this.stepForward());
         document.getElementById('btnReplayReset').addEventListener('click', () => this.resetReplay());
 
-        // 回测起点：从留存的全量数据里重新切片，无需重新联网拉取
-        document.getElementById('startOffset').addEventListener('change', () => {
-          if (this._loadedBars && this._loadedBars.length) {
-            const code = this.chartModule.backtestCode || this.currentSymbol;
-            this.applyDataToChart(this._loadedBars, this.currentSymbol, undefined, code);
-            this.showToast('已按新起点重新载入，回测进度已重置');
+        // 回测起点：从留存的全量数据里重新切片，无需重新联网拉取。
+        // 「自定义区间」用两个原生 date 输入框（值就是 YYYY-MM-DD），起止都含。
+        const startOffsetEl = document.getElementById('startOffset');
+        const customWrap = document.getElementById('customRangeWrap');
+        customWrap.style.display = startOffsetEl.value === 'custom' ? 'flex' : 'none';
+        const applyStartOffset = () => {
+          if (!this._loadedBars || !this._loadedBars.length) return;
+          const code = this.chartModule.backtestCode || this.currentSymbol;
+          this.applyDataToChart(this._loadedBars, this.currentSymbol, undefined, code);
+          this.showToast('已按新起点重新载入，回测进度已重置');
+        };
+        startOffsetEl.addEventListener('change', () => {
+          const custom = startOffsetEl.value === 'custom';
+          customWrap.style.display = custom ? 'flex' : 'none';
+          if (custom && this._loadedBars && this._loadedBars.length) {
+            this.syncCustomRangeInputs(this._loadedBars);
           }
+          applyStartOffset();
         });
+        const applyCustomRange = () => {
+          if (startOffsetEl.value !== 'custom') return;
+          const from = document.getElementById('customRangeFrom').value;
+          const to = document.getElementById('customRangeTo').value;
+          if (from && to && from > to) { this.showToast('起始日期不能晚于结束日期'); return; }
+          applyStartOffset();
+        };
+        for (const id of ['customRangeFrom', 'customRangeTo']) {
+          document.getElementById(id).addEventListener('change', applyCustomRange);
+        }
+        document.getElementById('customRangeApply').addEventListener('click', applyCustomRange);
 
         // 最新K线居中锚定
         const anchorBtn = document.getElementById('btnToggleAnchor');

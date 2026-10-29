@@ -16,7 +16,7 @@ import { test, assert } from './harness.js';
 import { aggregateIntraday, tradingDayOf } from '../src/data/dominant.js';
 import { normalizeSinaRow, normalizeSinaDate, sortByDate } from '../src/data/indicators.js';
 import { AGG_BASE, PERIODS_PER_YEAR, periodsPerYear, periodLabel } from '../src/data/periods.js';
-import { periodSpacingOk } from "../src/data/periods.js";
+import { periodSpacingOk, sliceBarsByDate } from "../src/data/periods.js";
 import { annotateGaps } from '../src/markets/dataQuality.js';
 import { PortfolioEngine } from '../src/core/portfolioEngine.js';
 
@@ -239,6 +239,23 @@ test('periodSpacingOk 能认出"被静默降级成日线的周线缓存"', () =>
   assert.ok(periodSpacingOk(monthlyBars, 'monthly'), '真月线要放行');
   assert.ok(periodSpacingOk(dailyBars, 'daily'), 'daily 不在这条判据里，一律放行');
   assert.ok(periodSpacingOk(dailyBars.slice(0, 5), 'weekly'), '样本太少判不出来时别误伤');
+});
+
+test('sliceBarsByDate：按 YYYY-MM-DD 前后缀切片，起止都含且不碰 Date', () => {
+  const bars = [
+    { date: '2024-01-02' },
+    { date: '2024-06-30 10:30' },   // 60m/4h：带钟点也必须能比
+    { date: '2024-12-31' },
+    { date: '2025-01-02' }
+  ];
+  assert.deep(sliceBarsByDate(bars, '2024-06-30', '2024-12-31').map(b => b.date),
+    ['2024-06-30 10:30', '2024-12-31'], '起止都含，且只比较日期前缀');
+  assert.deep(sliceBarsByDate(bars, '2024-02-01', '').map(b => b.date),
+    ['2024-06-30 10:30', '2024-12-31', '2025-01-02'], '止端留空 = 不设上限');
+  assert.deep(sliceBarsByDate(bars, '', '2024-06-30').map(b => b.date),
+    ['2024-01-02', '2024-06-30 10:30'], '起端留空 = 不设下限');
+  assert.eq(sliceBarsByDate(bars, '2025-01-01', '2024-01-01').length, 0, '起止反了给空数组，不猜用户意图');
+  assert.eq(sliceBarsByDate([], '2024-01-01', '2024-12-31').length, 0, '空输入不抛错');
 });
 
 test('新浪通道拒绝非 daily/60m 周期，不再拿日线顶替', () => {

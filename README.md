@@ -195,6 +195,7 @@ Walk-Forward / 组合回测（分仓独立 与 **共享保证金池**两种口�
 
 ```
 futures_replay_trader.html   主页面（正在按绞杀者模式逐步拆出，仍含图表/画线/引擎）
+trendline_algorithms.html    划线/趋势线算法科普页（分形枢轴、ZigZag、OLS/Hough/分位回归、通道、未来函数）
 run_local_server.py          静态托管 + 行情代理 + OCR
 src/
   markets/     交易所表、期货合约规格、双市场代码解析、交易规格解析、数据质量体检与复权修复、内置交易日历、市场扫描器
@@ -208,7 +209,7 @@ src/
   validation/  前视探针：前缀一致性 + 未来不变性，因果性的机器门禁（不靠 review 兜底）
   ui/          叠加层渲染器、回测面板、自选池面板、研究面板、日志面板
 tools/         夹具抓取、交易日历生成、回测跑批、上游接口实测脚本
-tests/         零依赖单测骨架 + 383 条用例（夹具齐全时全部通过；缺夹具的按设计 skip）；migration-probe.html 验证 IndexedDB 迁移
+tests/         零依赖单测骨架 + 384 条用例（夹具齐全时全部通过；缺夹具的按设计 skip）；migration-probe.html 验证 IndexedDB 迁移
 ```
 
 ---
@@ -300,6 +301,9 @@ tests/         零依赖单测骨架 + 383 条用例（夹具齐全时全部通�
 - **周线/月线分桶**不解析 `new Date("YYYY-MM-DD HH:MM")`：iPad/Safari 对它返回 Invalid Date，
   60m 数据上切周线枢轴会全体归进同一个坏 key。**「回测起点」切片以前就栽在这里** ——
   同一形状的 date 让 `isNaN` 判真，起点选择在平板上等于没这个功能；现在只按字符串比 `YYYY-MM-DD`。
+- **回测起点支持自定义日期区间**：下拉框选「自定义…」后出现起止两个原生日期框，
+  按 `YYYY-MM-DD` 前缀切片（起止都含），无需重新联网；「近 N 年」仍保留作快捷选项。
+  切片逻辑在 `sliceBarsByDate` 里，60m/4h 带钟点的 date 同样可用。
 - **持仓止损/止盈胶囊读的是当前线价，不是建线那一刻的止损%**：拖动只改 `p1.price`，
   而 `tagPct` 是按下单时的止损% 烘进去的常数 —— 于是线拖到哪都写着 `-9.0%`，看着像线坏了、
   其实撮合用的是拖后的价。现在一律用 `levelPct(price, refPrice, dir)` 现算，空头自动翻号，

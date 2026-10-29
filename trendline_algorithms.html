@@ -1,0 +1,1141 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>划线与趋势线算法 · 从枢轴点到通道 · 趋势交易研究手账</title>
+<meta name="description" content="趋势交易里常见的自动划线算法科普：分形枢轴、ZigZag、两点连线、最小二乘、RANSAC、Hough 变换、分位数回归、凸包、通道与突破回踩，以及未来函数风险。" />
+<meta name="theme-color" content="#f4efe4" />
+<link rel="canonical" href="https://puddingtower.github.io/trend-trading-backtest/trendline_algorithms.html" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..800&family=JetBrains+Mono:wght@400;500;700&family=Schibsted+Grotesk:wght@400;500;700&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --paper: #f4efe4;
+    --paper-2: #ece4d3;
+    --paper-3: #e4dac6;
+    --ink: #1d1b16;
+    --ink-soft: #575043;
+    --ink-faint: #6b6354;
+    --rule: #d6cbb5;
+    --rule-strong: #b9ac93;
+    --teal: #0d5b52;
+    --teal-ink: #0a4a43;
+    --teal-wash: #d7e6e0;
+    --brass: #b9822a;
+    --brass-wash: #f2e2c4;
+    --up: #1b6f45;
+    --down: #b23a2c;
+    --term: #12151c;
+    --term-2: #191d26;
+    --term-line: #2b313d;
+    --term-ink: #e2e5ec;
+    --term-soft: #99a1b3;
+    --maxw: 1180px;
+    --rad: 14px;
+    --shadow: 0 1px 2px rgba(29,27,22,.06), 0 12px 30px -18px rgba(29,27,22,.35);
+    --font-display: "Bricolage Grotesque", "Archivo", "Helvetica Neue", system-ui, sans-serif;
+    --font-ui: "Schibsted Grotesk", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+  body {
+    margin: 0; background: var(--paper); color: var(--ink);
+    font-family: var(--font-ui); font-size: 17px; line-height: 1.75;
+    -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+    overflow-x: hidden;
+  }
+  ::selection { background: var(--teal); color: #fff; }
+  :focus-visible { outline: 2px solid var(--teal); outline-offset: 3px; border-radius: 4px; }
+  a { color: var(--teal-ink); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+  a:hover { text-decoration-thickness: 2px; }
+  /* 不使用系统滚动条默认色：页面是“纸面手账”，滚动条也算界面的一部分 */
+  * { scrollbar-color: var(--rule-strong) transparent; scrollbar-width: thin; }
+  ::-webkit-scrollbar { width: 11px; height: 11px; }
+  ::-webkit-scrollbar-thumb { background: var(--rule-strong); border-radius: 8px; border: 3px solid var(--paper); }
+  ::-webkit-scrollbar-track { background: transparent; }
+
+  .wrap { width: min(100% - 40px, var(--maxw)); margin-inline: auto; }
+  @media (max-width: 640px) { .wrap { width: calc(100% - 28px); } }
+  .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+  /* Top bar — 与落地页同一套骨架 */
+  .topbar { position: sticky; top: 0; z-index: 30; background: var(--paper); border-bottom: 1px solid var(--rule); }
+  .topbar-inner { display: flex; align-items: center; gap: 22px; height: 62px; }
+  .brand { display: flex; align-items: baseline; gap: 10px; text-decoration: none; color: var(--ink); }
+  .brand .mark-bolt {
+    display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: 8px;
+    background: var(--ink); color: var(--paper); font-size: 15px; transform: translateY(4px);
+  }
+  .brand b { font-family: var(--font-display); font-weight: 800; letter-spacing: -.02em; font-size: 19px; }
+  .brand small { font-family: var(--font-mono); font-size: 11px; color: var(--ink-faint); letter-spacing: .02em; }
+  .topnav { display: flex; gap: 18px; margin-left: auto; }
+  .topnav a { color: var(--ink-soft); text-decoration: none; font-size: 14.5px; font-weight: 500; padding: 6px 2px; }
+  .topnav a:hover { color: var(--ink); }
+  @media (max-width: 980px) { .topnav { display: none; } }
+  .btn {
+    --bg: var(--teal); --fg: #fff; --bd: var(--teal);
+    display: inline-flex; align-items: center; gap: 9px;
+    font-family: var(--font-ui); font-weight: 600; font-size: 15px; line-height: 1;
+    padding: 13px 20px; border-radius: 11px; border: 1px solid var(--bd);
+    background: var(--bg); color: var(--fg); text-decoration: none; cursor: pointer;
+    transition: transform .15s cubic-bezier(.2,.7,.3,1), background .15s, box-shadow .15s;
+  }
+  .btn:hover { transform: translateY(-1px); box-shadow: 0 8px 20px -10px rgba(13,91,82,.55); }
+  .btn:active { transform: translateY(0); box-shadow: none; }
+  .btn.ghost { --bg: transparent; --fg: var(--ink); --bd: var(--rule-strong); }
+  .btn.ghost:hover { --bg: var(--paper-2); box-shadow: none; }
+  .btn.sm { padding: 10px 15px; font-size: 14px; border-radius: 9px; }
+  .btn .arrow { transition: transform .18s ease; }
+  .btn:hover .arrow { transform: translateX(3px); }
+
+  /* Hero */
+  .hero { padding: 64px 0 34px; border-bottom: 1px solid var(--rule); }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-family: var(--font-mono); font-size: 12px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--teal-ink); background: var(--teal-wash); border: 1px solid rgba(13,91,82,.18);
+    padding: 6px 11px; border-radius: 999px; margin-bottom: 20px;
+  }
+  h1 {
+    font-family: var(--font-display); font-weight: 800; letter-spacing: -.035em;
+    font-size: clamp(34px, 5.4vw, 64px); line-height: 1.03; margin: 0 0 18px; max-width: 15ch;
+  }
+  h1 em { font-style: normal; color: var(--teal); }
+  .lede { font-size: clamp(17px, 1.6vw, 20px); color: var(--ink-soft); max-width: 62ch; margin: 0 0 26px; }
+  .hero-grid { display: grid; grid-template-columns: 1.15fr .85fr; gap: 38px; align-items: center; }
+  @media (max-width: 900px) { .hero-grid { grid-template-columns: 1fr; } }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 28px; }
+  .chip {
+    font-family: var(--font-mono); font-size: 12px; color: var(--ink-soft);
+    border: 1px solid var(--rule-strong); background: var(--paper-2);
+    padding: 5px 10px; border-radius: 999px;
+  }
+  .hero-actions { display: flex; flex-wrap: wrap; gap: 12px; }
+  .hero-fig {
+    background: var(--term); border-radius: var(--rad); padding: 14px;
+    box-shadow: var(--shadow); border: 1px solid var(--term-line);
+  }
+  .hero-fig svg { display: block; width: 100%; height: auto; }
+  .hero-fig figcaption {
+    font-family: var(--font-mono); font-size: 11px; color: var(--term-soft);
+    padding: 9px 4px 0; letter-spacing: .02em;
+  }
+
+  /* Layout */
+  main section { padding: 62px 0; border-bottom: 1px solid var(--rule); }
+  .section-head { display: grid; grid-template-columns: 120px 1fr; gap: 26px; margin-bottom: 30px; align-items: start; }
+  @media (max-width: 760px) { .section-head { grid-template-columns: 1fr; gap: 10px; } }
+  .sec-no {
+    font-family: var(--font-mono); font-size: 12px; color: var(--brass);
+    letter-spacing: .12em; text-transform: uppercase; padding-top: 9px;
+  }
+  h2 {
+    font-family: var(--font-display); font-weight: 800; letter-spacing: -.025em;
+    font-size: clamp(26px, 3.2vw, 38px); line-height: 1.1; margin: 0 0 12px;
+  }
+  .sub { color: var(--ink-soft); max-width: 76ch; margin: 0; font-size: 16.5px; }
+  h3 { font-family: var(--font-display); font-size: 21px; letter-spacing: -.01em; margin: 34px 0 10px; }
+  h4 { font-size: 16px; margin: 22px 0 6px; }
+  p { margin: 0 0 14px; }
+  ul, ol { margin: 0 0 16px; padding-left: 22px; }
+  li { margin: 5px 0; }
+  strong { color: var(--ink); }
+  .muted { color: var(--ink-faint); }
+  .small { font-size: 14px; }
+
+  .prose { max-width: 82ch; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
+  @media (max-width: 860px) { .cols { grid-template-columns: 1fr; } }
+
+  /* Cards */
+  .card {
+    background: var(--paper-2); border: 1px solid var(--rule); border-radius: var(--rad);
+    padding: 22px 24px; box-shadow: 0 1px 0 rgba(255,255,255,.5) inset;
+  }
+  .card h4 { margin-top: 0; }
+  .card p:last-child, .card ul:last-child { margin-bottom: 0; }
+  .card-num {
+    font-family: var(--font-mono); font-size: 11px; letter-spacing: .1em;
+    color: var(--brass); text-transform: uppercase; margin-bottom: 8px;
+  }
+  .callout {
+    border-left: 3px solid var(--brass); background: var(--brass-wash);
+    border-radius: 0 10px 10px 0; padding: 16px 20px; margin: 22px 0;
+  }
+  .callout p:last-child { margin-bottom: 0; }
+  .callout.warn { border-left-color: var(--down); background: #f4ded9; }
+  .callout.ok { border-left-color: var(--teal); background: var(--teal-wash); }
+
+  .tldr { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 26px; }
+  @media (max-width: 860px) { .tldr { grid-template-columns: 1fr; } }
+  .tldr .card { padding: 18px 20px; }
+  .tldr b { display: block; font-family: var(--font-display); font-size: 17px; margin-bottom: 4px; }
+
+  /* Formula */
+  .formula {
+    font-family: var(--font-mono); font-size: 13.5px; line-height: 1.9;
+    background: var(--term); color: var(--term-ink); border-radius: 10px;
+    padding: 16px 18px; overflow-x: auto; margin: 14px 0 18px;
+    border: 1px solid var(--term-line);
+  }
+  .formula em { color: #e8b04b; font-style: normal; }
+  code:not(pre code) {
+    font-family: var(--font-mono); font-size: .86em;
+    background: var(--paper-3); border: 1px solid var(--rule);
+    padding: 1px 5px; border-radius: 5px;
+  }
+
+  /* Tables */
+  .tablewrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: 12px; background: var(--paper-2); margin: 18px 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 14.5px; min-width: 640px; }
+  th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th {
+    font-family: var(--font-mono); font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--ink-faint); background: var(--paper-3); white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  td.num, th.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .tag {
+    display: inline-block; font-family: var(--font-mono); font-size: 11px;
+    padding: 2px 7px; border-radius: 999px; border: 1px solid var(--rule-strong);
+    color: var(--ink-soft); background: var(--paper);
+  }
+  .tag.teal { color: var(--teal-ink); background: var(--teal-wash); border-color: rgba(13,91,82,.22); }
+  .tag.brass { color: #7a5315; background: var(--brass-wash); border-color: rgba(185,130,42,.3); }
+  .tag.red { color: #8a2b20; background: #f4ded9; border-color: rgba(178,58,44,.28); }
+
+  /* Diagrams */
+  figure.diagram {
+    margin: 22px 0; background: var(--paper-2); border: 1px solid var(--rule);
+    border-radius: var(--rad); padding: 16px;
+  }
+  figure.diagram svg { display: block; width: 100%; height: auto; }
+  figure.diagram figcaption { font-size: 13px; color: var(--ink-faint); padding: 10px 4px 0; }
+  .diagram-dark { background: var(--term); border-color: var(--term-line); }
+  .diagram-dark figcaption { color: var(--term-soft); }
+
+  /* Algorithm list */
+  .algo {
+    display: grid; grid-template-columns: 190px 1fr; gap: 18px;
+    padding: 18px 0; border-top: 1px solid var(--rule);
+  }
+  .algo:first-of-type { border-top: 0; }
+  @media (max-width: 760px) { .algo { grid-template-columns: 1fr; gap: 6px; } }
+  .algo-name { font-family: var(--font-display); font-weight: 700; font-size: 18px; }
+  .algo-name span { display: block; font-family: var(--font-mono); font-weight: 400; font-size: 11px; color: var(--ink-faint); margin-top: 2px; }
+
+  /* Sources */
+  .sources { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 26px; padding: 0; list-style: none; }
+  @media (max-width: 860px) { .sources { grid-template-columns: 1fr; } }
+  .sources li { padding: 11px 0; border-bottom: 1px solid var(--rule); }
+  .sources .src-title { font-weight: 600; }
+  .sources .src-why { display: block; font-size: 13px; color: var(--ink-faint); }
+
+  footer { padding: 38px 0 54px; }
+  .foot-inner { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; justify-content: space-between; }
+  .foot-l { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; font-size: 13px; color: var(--ink-faint); }
+  .foot-l a { color: var(--ink-faint); }
+  .note-final { font-size: 13.5px; color: var(--ink-faint); max-width: 80ch; }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wrap topbar-inner">
+    <a class="brand" href="index.html" aria-label="返回趋势交易回测系统首页">
+      <span class="mark-bolt" aria-hidden="true">⚡</span>
+      <b>TREND&nbsp;REPLAY</b>
+      <small>划线算法</small>
+    </a>
+    <nav class="topnav" aria-label="本页导航">
+      <a href="#points">候选点</a>
+      <a href="#lines">趋势线</a>
+      <a href="#math">硬数学</a>
+      <a href="#levels">水平位</a>
+      <a href="#channels">通道</a>
+      <a href="#signals">突破回踩</a>
+      <a href="#lookahead">未来函数</a>
+      <a href="#project">本项目</a>
+    </nav>
+    <a class="btn sm" href="futures_replay_trader.html">打开终端 <span class="arrow" aria-hidden="true">→</span></a>
+  </div>
+</header>
+
+<main>
+  <section class="hero" id="top">
+    <div class="wrap hero-grid">
+      <div>
+        <span class="eyebrow">Research note · 2026-10-29</span>
+        <h1>划线不是玄学，<br />只是把<em>主观动作</em>拆成可计算的步骤。</h1>
+        <p class="lede">
+          同一张图，十个人能画出十条趋势线。自动划线工具要解决的不是“画得更好看”，
+          而是把<strong>选点、拟合、容差、失效</strong>四件事写成可复现的规则 ——
+          这样它才能进入回测，而不是只停留在截图上。
+        </p>
+        <div class="chips" aria-label="本页涉及的算法">
+          <span class="chip">分形枢轴</span>
+          <span class="chip">ZigZag</span>
+          <span class="chip">两点连线</span>
+          <span class="chip">最小二乘 OLS</span>
+          <span class="chip">RANSAC</span>
+          <span class="chip">Hough 变换</span>
+          <span class="chip">分位数回归</span>
+          <span class="chip">凸包</span>
+          <span class="chip">通道 / 突破回踩</span>
+        </div>
+        <div class="hero-actions">
+          <a class="btn" href="#points">从候选点开始 <span class="arrow" aria-hidden="true">→</span></a>
+          <a class="btn ghost" href="#project">看本项目怎么用</a>
+        </div>
+      </div>
+      <figure class="hero-fig">
+        <svg viewBox="0 0 620 380" role="img" aria-label="示意图：K 线、两个摆动低点连成的上升支撑线，以及平移得到的平行通道">
+          <defs>
+            <linearGradient id="chan" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="#3fb27f" stop-opacity=".18" />
+              <stop offset="1" stop-color="#3fb27f" stop-opacity=".02" />
+            </linearGradient>
+          </defs>
+          <rect width="620" height="380" fill="#12151c" />
+          <!-- grid -->
+          <g stroke="#2b313d" stroke-width="1">
+            <path d="M40 40H590M40 100H590M40 160H590M40 220H590M40 280H590M40 340H590" />
+            <path d="M40 40V340M110 40V340M180 40V340M250 40V340M320 40V340M390 40V340M460 40V340M530 40V340" />
+          </g>
+          <!-- channel band -->
+          <path d="M60 300 L540 90 L540 170 L60 348 Z" fill="url(#chan)" />
+          <!-- candles -->
+          <g>
+            <g stroke="#d2564a" fill="#d2564a">
+              <path d="M72 250V300M98 236V286M124 260V318M150 244V300M176 214V270" stroke-width="1.2" fill="none"/>
+              <rect x="66" y="262" width="12" height="28" /><rect x="92" y="248" width="12" height="30" />
+              <rect x="118" y="272" width="12" height="34" /><rect x="144" y="256" width="12" height="34" />
+              <rect x="170" y="226" width="12" height="32" />
+            </g>
+            <g stroke="#3fb27f" fill="#3fb27f">
+              <path d="M202 200V262M228 188V246M254 206V262M280 170V230M306 158V218M332 136V196" stroke-width="1.2" fill="none"/>
+              <rect x="196" y="212" width="12" height="38" /><rect x="222" y="200" width="12" height="34" />
+              <rect x="248" y="218" width="12" height="32" /><rect x="274" y="182" width="12" height="38" />
+              <rect x="300" y="170" width="12" height="36" /><rect x="326" y="148" width="12" height="38" />
+            </g>
+            <g stroke="#d2564a" fill="#d2564a">
+              <path d="M358 168V230M384 150V214M410 168V226" stroke-width="1.2" fill="none"/>
+              <rect x="352" y="180" width="12" height="38" /><rect x="378" y="162" width="12" height="40" />
+              <rect x="404" y="180" width="12" height="34" />
+            </g>
+            <g stroke="#3fb27f" fill="#3fb27f">
+              <path d="M436 126V190M462 112V176M488 96V156M514 82V142" stroke-width="1.2" fill="none"/>
+              <rect x="430" y="138" width="12" height="40" /><rect x="456" y="124" width="12" height="38" />
+              <rect x="482" y="108" width="12" height="36" /><rect x="508" y="94" width="12" height="38" />
+            </g>
+          </g>
+          <!-- support line -->
+          <path d="M56 310 L548 96" stroke="#e8b04b" stroke-width="2.4" />
+          <!-- parallel edge -->
+          <path d="M56 350 L548 168" stroke="#e8b04b" stroke-width="1.4" stroke-dasharray="6 5" opacity=".8" />
+          <!-- touches -->
+          <g fill="#12151c" stroke="#e8b04b" stroke-width="2.4">
+            <circle cx="124" cy="290" r="4.6" />
+            <circle cx="254" cy="240" r="4.6" />
+            <circle cx="410" cy="186" r="4.6" />
+          </g>
+          <g fill="#99a1b3" font-family="JetBrains Mono, monospace" font-size="11">
+            <text x="44" y="26">支撑线：3 次触碰 + 容差带</text>
+            <text x="404" y="366">通道宽度 = 平行边到主线的距离</text>
+          </g>
+          <text x="126" y="330" fill="#e8b04b" font-family="JetBrains Mono, monospace" font-size="10">touch 1</text>
+          <text x="256" y="282" fill="#e8b04b" font-family="JetBrains Mono, monospace" font-size="10">touch 2</text>
+          <text x="412" y="232" fill="#e8b04b" font-family="JetBrains Mono, monospace" font-size="10">touch 3</text>
+        </svg>
+        <figcaption>示意：算法不“理解”趋势，只是在候选点里找一条被最多点尊重、且不被价格频繁穿越的直线。</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section id="tldr">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="sec-no">TL;DR</div>
+        <div>
+          <h2>先记住这三个结论</h2>
+          <p class="sub">后面的所有算法，都是在为这三句话补细节。</p>
+        </div>
+      </div>
+      <div class="tldr">
+        <div class="card">
+          <span class="card-num">01</span>
+          <b>划线 = 选点 + 拟合 + 容差</b>
+          <p class="small">先决定哪些 K 线算“点”，再决定用哪几个点连线，最后用 ATR 或百分比决定“多接近才算碰到”。三步里任何一步换口径，画出来的线就不同。</p>
+        </div>
+        <div class="card">
+          <span class="card-num">02</span>
+          <b>“碰得多”不等于“有效”</b>
+          <p class="small">一条线可以被价格反复触碰，也可以被反复穿越。质量分必须同时奖励触碰、跨度和贴合度，并惩罚穿越，否则会选出一条噪音线。</p>
+        </div>
+        <div class="card">
+          <span class="card-num">03</span>
+          <b>确认时间必须晚于拐点</b>
+          <p class="small">拐点只有等右侧足够多的 K 线走完才能确认。用拐点当天去下单，等于把未来数据带进回测 —— 这是自动划线最常见的翻车方式。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="points">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="sec-no">01 / 地基</div>
+        <div>
+          <h2>把 K 线变成“点”</h2>
+          <p class="sub">
+            趋势线不是直接画在收盘价上的。几乎所有算法都先把价格序列压缩成少量候选拐点，
+            再在这些点上做文章。候选点的定义，决定了后面所有结果。
+          </p>
+        </div>
+      </div>
+
+      <div class="cols">
+        <div>
+          <h3>1.1 分形枢轴：左右各看 N 根</h3>
+          <p>
+            一个高点如果比左侧 N 根和右侧 N 根的 high 都高，就被记为 <strong>pivot high</strong>；
+            低点同理。这是行情软件里 “Pivot High/Low” 最常用的定义，也是本项目
+            <code>highLowPivots</code> 的口径：默认左右各 5 根。
+          </p>
+          <p>
+            关键在<strong>右侧</strong>：第 i 根的高点，要等第 i+N 根走完才能确认。
+            所以每个点都要同时记录两个索引：<code>idx</code>（极值所在）和
+            <code>confirmedAtIdx = idx + N</code>（可用的时间）。任何交易信号都必须挂在后者上。
+          </p>
+          <div class="callout">
+            <p><strong>为什么不用“相等也算”的宽松写法？</strong>如果允许 <code>&gt;=</code>，盘整区里一排等高 K 线会全部成为枢轴，候选点数量爆炸；严格大于更接近“这个位置确实突出”的本意。</p>
+          </div>
+        </div>
+        <div>
+          <h3>1.2 ZigZag：用回撤幅度定义拐点</h3>
+          <p>
+            ZigZag 不要求局部极值，而是跟踪趋势方向：价格从高点回撤超过 <code>pct</code>（例如 3%），
+            才把之前的高点确认为拐点；反弹超过 <code>pct</code>，才确认低点。
+          </p>
+          <p>
+            它比固定窗口更适应不同波动率，但 <code>pct</code> 本身是主观的：
+            3% 在螺纹钢日线上是正常波动，在茅台日线上可能几天都触发不了一次。
+          </p>
+          <p class="small muted">
+            本项目 <code>swingPoints</code> 同时返回 <code>idx</code> 与 <code>confirmedAt</code>：
+            拐点在价格上成立，和它在时间上可用，不是同一根 bar。
+          </p>
+        </div>
+      </div>
+
+      <figure class="diagram">
+        <svg viewBox="0 0 960 250" role="img" aria-label="示意图：高点在第 4 根，左右各 3 根确认，因此到第 7 根才可用">
+          <rect width="960" height="250" fill="#ece4d3" rx="8" />
+          <g stroke="#d6cbb5" stroke-width="1">
+            <path d="M60 200H910M60 150H910M60 100H910M60 50H910" />
+          </g>
+          <!-- candles -->
+          <g stroke="#575043" fill="#575043">
+            <path d="M100 160V200M180 150V190M260 120V170M340 70V120M420 130V180M500 110V160M580 90V140M660 120V170M740 100V150M820 80V130" stroke-width="1.2" fill="none"/>
+            <rect x="94" y="172" width="12" height="22" /><rect x="174" y="160" width="12" height="24" />
+            <rect x="254" y="132" width="12" height="30" /><rect x="334" y="82" width="12" height="30" />
+            <rect x="414" y="142" width="12" height="30" /><rect x="494" y="120" width="12" height="30" />
+            <rect x="574" y="102" width="12" height="30" /><rect x="654" y="132" width="12" height="30" />
+            <rect x="734" y="110" width="12" height="30" /><rect x="814" y="92" width="12" height="30" />
+          </g>
+          <!-- pivot marker -->
+          <circle cx="340" cy="70" r="7" fill="none" stroke="#b23a2c" stroke-width="2.5" />
+          <text x="352" y="66" font-family="JetBrains Mono, monospace" font-size="13" fill="#b23a2c">pivot idx = 4</text>
+          <!-- confirmation -->
+          <path d="M424 70V226" stroke="#b23a2c" stroke-width="1.4" stroke-dasharray="4 4" />
+          <circle cx="424" cy="70" r="6" fill="#b23a2c" />
+          <text x="436" y="222" font-family="JetBrains Mono, monospace" font-size="13" fill="#b23a2c">confirmedAt = 7（右侧 3 根走完）</text>
+          <!-- right window bracket -->
+          <path d="M352 40H418" stroke="#0d5b52" stroke-width="1.4" />
+          <path d="M352 35V45M418 35V45" stroke="#0d5b52" stroke-width="1.4" />
+          <text x="330" y="30" font-family="JetBrains Mono, monospace" font-size="12" fill="#0d5b52">right = 3</text>
+          <g fill="#6b6354" font-family="JetBrains Mono, monospace" font-size="11">
+            <text x="60" y="238">同一段行情：极值位置与可用时间相差 right 根，这个差就是确认延迟</text>
+          </g>
+        </svg>
+        <figcaption>未来函数往往不是“读了未来的价格”，而是把拐点时间误当成可用时间。差值通常只有几根，但足以让回测结果系统性变好。</figcaption>
+      </figure>
+
+      <h3>1.3 经典枢轴点：用上一期的 H / L / C 算下一期</h3>
+      <p>
+        这类“Pivot Points”不是摆动点，而是根据上一日（或上一周、上一月）的最高、最低、收盘价，
+        算出下一期的若干固定价位。它们的关键纪律是：<strong>只能用已收盘的上一期数据</strong>，
+        并且只能画在下一期开始之后。
+      </p>
+      <div class="formula">
+        P = (H + L + C) / 3<br />
+        R1 = 2P − L &nbsp;&nbsp; S1 = 2P − H<br />
+        R2 = P + (H − L) &nbsp;&nbsp; S2 = P − (H − L)<br />
+        R3 = H + 2(P − L) &nbsp;&nbsp; S3 = L − 2(H − P)
+      </div>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th>口径</th><th>中枢 P</th><th>扩展方式</th><th>适用场景</th></tr></thead>
+          <tbody>
+            <tr><td>Standard</td><td class="num">(H+L+C)/3</td><td>等距 R1–R3 / S1–S3</td><td>最通用的日内/隔夜参考位</td></tr>
+            <tr><td>Fibonacci</td><td class="num">(H+L+C)/3</td><td>0.382 / 0.618 / 1.0 × 振幅</td><td>把枢轴与黄金分割结合</td></tr>
+            <tr><td>Camarilla</td><td class="num">C</td><td>1.1 × 振幅 ÷ 12、6、4、2</td><td>短线反转/剥头皮，R3–R4 常作极端位</td></tr>
+            <tr><td>Woodie</td><td class="num">(H+L+2C)/4</td><td>与 Standard 同构，中枢更偏收盘价</td><td>收盘价权重更高的市场</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="small muted">
+        本项目 <code>src/analysis/pivots.js</code> 只实现这四种。Demark 口径在各家软件里分支不一致，
+        没有把握写对就不放 —— 划线工具宁可少一个口径，也不要多一个“看起来像”的错口径。
+      </p>
+    </div>
+  </section>
+
+  <section id="lines">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="sec-no">02 / 趋势线</div>
+        <div>
+          <h2>两个点连一条线，难的是选哪两个点</h2>
+          <p class="sub">
+            人眼会自动忽略噪音、挑“看起来重要”的拐点。算法没有这种直觉，
+            所以它通常要枚举大量组合，再用一套评分把“像趋势线”的候选留下。
+          </p>
+        </div>
+      </div>
+
+      <h3>2.1 最直接的做法：两两组合 + 触碰计数</h3>
+      <p>
+        给定一组枢轴点，对所有点对 <code>(i, j)</code> 连线，统计有多少个点到这条线的距离
+        小于容差 <code>tol</code>。触点数达到 <code>minTouches</code>（常见 2 或 3）才算候选。
+        早期实现甚至会对全部 K 线做三重循环，复杂度 <code>O(N³)</code>；先压成枢轴点后，
+        候选点数通常只有几十个，暴力枚举就够用了。
+      </p>
+      <div class="formula">
+        触碰判定：|P<sub>k</sub> − line(x<sub>k</sub>)| ≤ tol<br />
+        tol = 0.5 × ATR<sub>14</sub>（常见起点）或固定百分比<br />
+        候选线：touchCount ≥ minTouches，且两点之间不出现与方向相反的严重穿越
+      </div>
+
+      <h3>2.2 拟合：两点定线，还是所有点一起定线</h3>
+      <p>
+        只管两个锚点的线，对第三个点是否贴合没有约束。更稳的做法是：先用两个点生成候选，
+        把所有“落在容差内”的点当作 inlier，再对 inlier 做一次<strong>最小二乘</strong>重新拟合。
+        这样线的斜率由所有触点共同决定，而不是被某两个点“绑架”。
+      </p>
+      <div class="formula">
+        slope = (n·Σxy − Σx·Σy) / (n·Σx² − (Σx)²)<br />
+        intercept = (Σy − slope·Σx) / n
+      </div>
+      <p>
+        重拟合后要再数一次 inlier：有些点会掉出容差，有些新点会进来。通常迭代一两次就稳定。
+        这一步是 “两点线” 和 “统计线” 的分水岭。
+      </p>
+
+      <figure class="diagram diagram-dark">
+        <svg viewBox="0 0 960 300" role="img" aria-label="示意图：三个枢轴点落在容差带内，最小二乘拟合线穿过它们">
+          <rect width="960" height="300" fill="#12151c" rx="8" />
+          <g stroke="#2b313d" stroke-width="1">
+            <path d="M60 60H910M60 120H910M60 180H910M60 240H910" />
+          </g>
+          <!-- tolerance band -->
+          <path d="M80 232 L880 72 L880 112 L80 272 Z" fill="#3fb27f" opacity=".12" />
+          <!-- fit line -->
+          <path d="M80 252 L880 92" stroke="#e8b04b" stroke-width="2.5" />
+          <!-- pivots -->
+          <g fill="#12151c" stroke="#3fb27f" stroke-width="2.5">
+            <circle cx="210" cy="214" r="7" />
+            <circle cx="470" cy="156" r="7" />
+            <circle cx="740" cy="108" r="7" />
+          </g>
+          <!-- off-band pivot -->
+          <circle cx="600" cy="196" r="6" fill="none" stroke="#d2564a" stroke-width="2" />
+          <text x="614" y="202" font-family="JetBrains Mono, monospace" font-size="12" fill="#d2564a">超出容差 = outlier，不参与拟合</text>
+          <!-- touch labels -->
+          <g fill="#3fb27f" font-family="JetBrains Mono, monospace" font-size="12">
+            <text x="186" y="240">touch 1</text>
+            <text x="446" y="182">touch 2</text>
+            <text x="716" y="134">touch 3</text>
+          </g>
+          <text x="80" y="36" fill="#99a1b3" font-family="JetBrains Mono, monospace" font-size="12">绿色带 = ±tol；黄线 = 对 3 个 inlier 做 OLS 后的结果</text>
+        </svg>
+        <figcaption>容差带不是“误差”，而是定义的一部分：它把“几乎碰到”也纳入证据，同时让轻微毛刺不至于毁掉整条线。</figcaption>
+      </figure>
+
+      <h3>2.3 评分与去重：只留最强的一条</h3>
+      <p>
+        候选线会很多，而且彼此高度相似。社区实现里比较完整的一套评分是
+        TradingView 生态中的 “Auto Trendlines” 口径：
+      </p>
+      <div class="formula">
+        score = touches × span × extreme_bonus × recency_bonus × fit_factor × violation_penalty<br /><br />
+        fit_factor &nbsp;&nbsp;&nbsp;&nbsp;= 1 / (1 + avg_residual / tol)　（越贴合越高）<br />
+        violation_penalty = 1 / (1 + violation% / 5)　　　（穿越越多越低）<br />
+        recency_bonus 从 1.0（最新点就在当前）线性衰减到 0.2（最新点在回看边缘）
+      </div>
+      <ul>
+        <li><strong>touches × span</strong>：既奖励“碰得多”，也奖励“管得久”。</li>
+        <li><strong>extreme_bonus</strong>：从最极端的高/低点出发的线更可能是主趋势线。</li>
+        <li><strong>violation_penalty</strong>：价格频繁穿过的线，斜率再漂亮也不可信。</li>
+        <li><strong>greedy non-overlap</strong>：按分数从高到低选，每个枢轴最多贡献给一条线，避免画出三条几乎重合的线。</li>
+      </ul>
+      <p>
+        另一种去重方式是按 <code>(斜率, 线的最新价格)</code> 做二维聚类，
+        把“同一条走廊里的不同画法”合并，只保留组内最高分。两种做法目标一致：
+        <strong>图上的线越少，信息密度越高</strong>。
+      </p>
+
+      <div class="callout warn">
+        <p><strong>线不是越多越好。</strong>一张图上超过 5 条自动趋势线，读者会开始“看到自己想看到的线”。多数实现默认每个方向只留 1–3 条，这是有意的信息压缩。</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="math">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="sec-no">03 / 硬数学</div>
+        <div>
+          <h2>比“两点连线”更稳的四种方法</h2>
+          <p class="sub">
+            当噪音、影线、异常值很多时，纯粹的“两点定线”会非常脆弱。下面四种方法各自解决一类问题。
+          </p>
+        </div>
+      </div>
+
+      <div class="algo">
+        <div class="algo-name">最小二乘 OLS<span>Least squares</span></div>
+        <div>
+          <p>
+            对一组点找一条使纵向残差平方和最小的直线。它不要求线严格穿过任何两个点，
+            因此对单个异常点的敏感度低于“两点定线”。缺点是：普通最小二乘对离群值仍然敏感，
+            而且默认残差在两侧对称，不会主动把线推到所有点之外。
+          </p>
+          <p class="small muted">适合：触点较多、噪音相对均匀的候选线重拟合。</p>
+        </div>
+      </div>
+
+      <div class="algo">
+        <div class="algo-name">RANSAC<span>Random Sample Consensus</span></div>
+        <div>
+          <p>
+            反复随机抽两个点连线，统计有多少点落在容差内（inlier），保留 inlier 最多的一组，
+            再用全部 inlier 重拟合。它对“少数异常点 + 大量正常点”的结构非常稳。
+          </p>
+          <p>
+            枢轴点通常只有几十个，所以很多实现干脆<strong>枚举所有点对</strong>，
+            这等于一个确定性的 RANSAC：不用随机种子，结果可复现。
+          </p>
+          <p class="small muted">社区实现：pytrendline 的穷举扫描、TrendEdge 的 scipy 峰值 + RANSAC 拟合。</p>
+        </div>
+      </div>
+
+      <div class="algo">
+        <div class="algo-name">Hough 变换<span>参数空间投票</span></div>
+        <div>
+          <p>
+            把每个价格点映射到参数空间里的一条正弦曲线：
+            <code>ρ = x·cosθ + y·sinθ</code>。许多点对应的曲线会在某个 <code>(θ, ρ)</code> 处相交，
+            交点票数越高，就越可能是一条真实存在的直线。
+          </p>
+          <p>
+            优点是<strong>不依赖“先选两个锚点”</strong>，能一次把所有候选线找出来；
+            缺点是参数离散化很关键，而且容易在密集点区域产出大量近似线，
+            所以工程上要加权重、合并相近直线、限制候选数量。
+          </p>
+          <p class="small muted">学术参考：Jitpakdee &amp; Pravithana 的 Hough 趋势线生成方法；trendln 也提供 Hough 模式。</p>
+        </div>
+      </div>
+
+      <div class="algo">
+        <div class="algo-name">分位数回归<span>Quantile regression</span></div>
+        <div>
+          <p>
+            普通回归拟合“条件均值”，分位数回归拟合条件分位数。取 <code>τ = 0.9</code> 拟合高点序列，
+            得到的线倾向于把所有点包在下方，适合做压力线；取 <code>τ = 0.1</code> 拟合低点序列，
+            适合做支撑线。
+          </p>
+          <p>
+            它不需要先选出“哪两个点”，而是让整组极值共同决定位置，
+            因此比“最外侧两点连线”更稳，也更不容易被单根长影线带偏。
+          </p>
+          <p class="small muted">国内券商研报里常见口径：120 日回溯、5 日局部高低点、压力线 τ=0.9、支撑线 τ=0.1。</p>
+        </div>
+      </div>
+
+      <div class="algo">
+        <div class="algo-name">凸包<span>Convex hull</span></div>
+        <div>
+          <p>
+            对高点序列求上凸包、对低点序列求下凸包，得到的折线是“所有点都在一侧”的
+            <strong>最严格包络</strong>。Andrew 单调链算法在点已按时间排序时是线性的。
+          </p>
+          <p>
+            优点是数学上绝对不穿越价格；缺点是震荡行情里会碎成很多短边，
+            看起来像一堆无关的线段。它更适合作为“主包络参考”，而不是主要信号线。
+          </p>
+          <p class="small muted">社区实现：pine-scripts 的 Auto Trendlines 把凸包做成可选叠加层。</p>
+        </div>
+      </div>
+
+      <figure class="diagram">
+        <svg viewBox="0 0 960 300" role="img" aria-label="示意图：三个价格点在 Hough 参数空间中对应三条正弦曲线，交点处票数最高">
+          <rect width="960" height="300" fill="#ece4d3" rx="8" />
+          <g stroke="#d6cbb5" stroke-width="1">
+            <path d="M70 250H900M70 200H900M70 150H900M70 100H900M70 50H900" />
+            <path d="M70 40V250M250 40V250M430 40V250M610 40V250M790 40V250" />
+          </g>
+          <path d="M70 170 C 210 60, 330 260, 470 150 S 690 70, 900 190" fill="none" stroke="#0d5b52" stroke-width="1.8" opacity=".75" />
+          <path d="M70 190 C 220 280, 350 90, 500 210 S 720 120, 900 150" fill="none" stroke="#b9822a" stroke-width="1.8" opacity=".75" />
+          <path d="M70 140 C 240 240, 360 150, 510 120 S 700 190, 900 110" fill="none" stroke="#b23a2c" stroke-width="1.8" opacity=".7" />
+          <circle cx="476" cy="150" r="9" fill="none" stroke="#0d5b52" stroke-width="3" />
+          <circle cx="476" cy="150" r="3.5" fill="#0d5b52" />
+          <text x="494" y="140" font-family="JetBrains Mono, monospace" font-size="12" fill="#0d5b52">交点 = 高票数直线 (θ, ρ)</text>
+          <g fill="#6b6354" font-family="JetBrains Mono, monospace" font-size="12">
+            <text x="70" y="282">θ（角度）</text>
+            <text x="28" y="150" transform="rotate(-90 28 150)">ρ（到原点距离）</text>
+            <text x="70" y="30">每个价格点 → 参数空间里的一条正弦曲线</text>
+          </g>
+        </svg>
+        <figcaption>Hough 的思路是“让点投票”，而不是“让算法选点”。代价是投票空间的分辨率会直接影响结果。</figcaption>
+      </figure>
+
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th>方法</th><th>输入</th><th>复杂度</th><th>强项</th><th>弱点</th></tr></thead>
+          <tbody>
+            <tr><td>两点枚举 + 触碰计数</td><td>枢轴点</td><td class="num">O(N²) 候选</td><td>直观、可解释、易加业务过滤</td><td>锚点选择敏感</td></tr>
+            <tr><td>OLS 重拟合</td><td>候选 inlier</td><td class="num">O(N)</td><td>结果稳定、闭式解</td><td>仍受离群值影响</td></tr>
+            <tr><td>RANSAC / 确定性枚举</td><td>枢轴点 / 全部点</td><td class="num">O(N²)–O(N³)</td><td>抗离群值</td><td>参数多、结果依赖容差</td></tr>
+            <tr><td>Hough 变换</td><td>全部点</td><td class="num">O(N·θ bins)</td><td>不依赖锚点、一次找多条</td><td>离散化敏感、候选爆炸</td></tr>
+            <tr><td>分位数回归</td><td>高点/低点序列</td><td class="num">迭代求解</td><td>天然包络、抗影线</td><td>τ 需要选、解释成本高</td></tr>
+            <tr><td>凸包</td><td>极值序列</td><td class="num">O(N log N)</td><td>严格不穿越</td><td>震荡中碎片化</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section id="levels">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="sec-no">04 / 水平位</div>
+        <div>
+          <h2>水平支撑阻力：聚簇往往比连线更稳</h2>
+          <p class="sub">
+            趋势线回答“沿着这个斜率，哪里是边界”；水平位回答“这个价格附近，历史上被尊重过几次”。
+            后者对趋势方向的假设更少，因此在震荡和转折里更常用。
+          </p>
+        </div>
+      </div>
+
+      <div class="cols">
+        <div>
+          <h3>4.1 把相近的枢轴合并成一个价位</h3>
+          <p>
+            先找 pivot high / low，再把彼此距离小于 <code>pctbound</code>（例如 0.2%–5%，
+            视周期和品种而定）的点聚成一簇。簇内点数就是 <strong>触碰次数</strong>，
+            簇的中心价（均值或中位数）就是这条水平位。
+          </p>
+          <p>
+            常见实现有两种：按相对距离顺序扫描合并，或用层次聚类
+            （AgglomerativeClustering）一次性分组。前者的结果依赖扫描顺序，
+            后者更稳定但需要指定距离阈值。
+          </p>
+        </div>
+        <div>
+          <h3>4.2 强度不只等于触碰次数</h3>
+          <ul>
+            <li><strong>触碰次数</strong>：最直观，但老价位会天然占优。</li>
+            <li><strong>新鲜度</strong>：越久没被触碰的位，参考价值越低。</li>
+            <li><strong>触碰时的量能</strong>：放量触碰后收回，通常比缩量擦一下更有意义。</li>
+            <li><strong>是否已被收盘穿越</strong>：被收盘价有效突破的位，应从“支撑/阻力”降级为历史位。</li>
+          </ul>
+          <p class="small muted">
+            本项目 <code>highLowPivots</code> 会给每条线算 <code>brokenAtIdx</code>：
+            线在首次被收盘价穿越的那根截止，而不是一路拖到图的最右边。
+          </p>
+        </div>
+      </div>
+
+      <figure class="diagram">
+        <svg viewBox="0 0 960 260" role="img" aria-label="示意图：三条水平位，触碰次数分别为 3、2、1；最下方一条已被收盘价跌破">
+          <rect width="960" height="260" fill="#ece4d3" rx="8" />
+          <g stroke="#d6cbb5" stroke-width="1">
+            <path d="M60 210H920M60 150H920M60 90H920M60 30H920" />
+          </g>
+          <!-- resistance -->
+          <path d="M70 80H760" stroke="#b23a2c" stroke-width="2" stroke-dasharray="7 5" />
+          <text x="770" y="84" font-family="JetBrains Mono, monospace" font-size="12" fill="#b23a2c">R：3 次触碰，仍 active</text>
+          <circle cx="190" cy="80" r="5" fill="#b23a2c" /><circle cx="430" cy="80" r="5" fill="#b23a2c" /><circle cx="700" cy="80" r="5" fill="#b23a2c" />
+          <!-- mid level -->
+          <path d="M70 150H920" stroke="#b9822a" stroke-width="1.6" stroke-dasharray="5 5" />
+          <text x="770" y="144" font-family="JetBrains Mono, monospace" font-size="12" fill="#8a641f">S：2 次触碰</text>
+          <circle cx="300" cy="150" r="5" fill="#b9822a" /><circle cx="610" cy="150" r="5" fill="#b9822a" />
+          <!-- broken support -->
+          <path d="M70 200H540" stroke="#6b6354" stroke-width="1.6" stroke-dasharray="4 4" />
+          <path d="M540 200H880" stroke="#6b6354" stroke-width="1.6" stroke-dasharray="4 4" opacity=".35" />
+          <text x="550" y="220" font-family="JetBrains Mono, monospace" font-size="12" fill="#6b6354">brokenAtIdx：收盘跌破后截止</text>
+          <circle cx="220" cy="200" r="5" fill="#6b6354" /><circle cx="500" cy="200" r="5" fill="#6b6354" />
+          <!-- fake candle path -->
+          <path d="M80 120 L150 100 L210 82 L270 118 L330 140 L390 120 L450 82 L510 150 L570 162 L630 150 L690 88 L750 130 L810 158 L870 180"
+                fill="none" stroke="#575043" stroke-width="1.6" opacity=".55" />
+          <g fill="#6b6354" font-family="JetBrains Mono, monospace" font-size="12">
+            <text x="70" y="246">同一套枢轴，既可用于连线，也可聚成水平位；区别在于是否允许斜率</text>
+          </g>
+        </svg>
+        <figcaption>水平位是“斜率为 0 的趋势线”。当行情没有清晰斜率时，先找水平位通常比硬画趋势线更诚实。</figcaption>
+      </figure>
+
+      <h3>4.3 从“线”到“区”：供需区与订单块</h3>
+      <p>
+        真实市场里支撑阻力很少是一条精确到小数点的线，更像一个带宽度、会失效的区间。
+        供需区的常见定义是：一段窄幅整理（base）之后，出现一根明显脱离的 K 线。
+        本项目用 ATR 把“窄幅”和“脱离”量化：
+      </p>
+      <div class="formula">
+        base　：1–3 根连续 bar，每根 (high − low) ≤ 0.6 × ATR14<br />
+        departure：随后 3 根内，收盘价离开 base 边界 ≥ 1.2 × ATR14<br />
+        失效　：收盘价反向穿越 base 的另一侧 → broken，色带截止在穿越那根
+      </div>
+      <p>
+        这类区间比单根水平线更贴近“订单在这里成交过”的直觉，但也更容易过拟合门槛。
+        所以参数要用同一个品种的历史数据校准，而不是从别人的截图里抄。
+      </p>
+    </div>
+  </section>
+
+  <section id="channels">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="sec-no">05 / 通道</div>
+        <div>
+          <h2>通道：把一条线变成两条线</h2>
+          <p class="sub">
+            趋势线给出一个边界；把边界平移或按波动率扩展，就得到通道。
+            通道的价值在于同时表达“方向”和“正常波动范围”。
+          </p>
+        </div>
+      </div>
+
+      <div class="cols">
+        <div>
+          <h3>5.1 平行通道</h3>
+          <p>
+            最常见做法：先拟合主趋势线，再统计价格到这条线的最大偏离（或某个分位数偏离），
+            在另一侧画一条平行边。通道宽度可以用价格差、百分比或 ATR 倍数表示。
+          </p>
+          <p>
+            TradingView 社区的自动趋势线指标会为每条线加一个“触碰区域”：
+            以线的两个锚点处的 ATR 均值为基础，取一半作为容差带。
+            这解释了为什么同一条线在不同波动率环境下看起来“宽度不同”。
+          </p>
+        </div>
+        <div>
+          <h3>5.2 三类经典通道</h3>
+          <ul>
+            <li><strong>Donchian</strong>：过去 N 根的最高 high 与最低 low。海龟交易法的突破通道。</li>
+            <li><strong>Keltner</strong>：EMA ± k × ATR。比布林带更抗跳空。</li>
+            <li><strong>Bollinger</strong>：均线 ± k × 标准差。衡量波动率扩张/收缩。</li>
+          </ul>
+          <p class="small muted">
+            本项目的 <code>donchianBreak</code> 策略就是 Donchian 通道突破；
+            <code>dualThrust</code> 用前 N 日振幅构造上下轨；<code>trendRegime</code> 则把均线/ADX 与放量突破组合。
+          </p>
+        </div>
+      </div>
+
+      <div class="callout ok">
+        <p><strong>通道状态比单条线更有信息量：</strong>上下轨同时上移 = 上升通道；同时下移 = 下降通道；上轨下移、下轨上移 = 收敛（挤压，常对应突破前夜）；上轨上移、下轨下移 = 扩张（波动率放大）。</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="signals">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="sec-no">06 / 信号</div>
+        <div>
+          <h2>突破与回踩：把线变成可回测的事件</h2>
+          <p class="sub">
+            线画出来只是第一步。要让划线进入回测，必须定义“什么时候算突破”“什么时候算确认”，
+            并且把成交时间定在信号之后。
+          </p>
+        </div>
+      </div>
+
+      <div class="cols">
+        <div>
+          <h3>突破的三种常见定义</h3>
+          <ol>
+            <li><strong>单根收盘穿越</strong>：收盘价超过线 + 容差。最快，也最容易假突破。</li>
+            <li><strong>连续 N 根收盘</strong>：TradingView 自动趋势线的默认是连续 3 根收盘落在另一侧。更稳，但入场更晚。</li>
+            <li><strong>幅度 + 量能</strong>：穿越幅度 ≥ k×ATR，且成交量 ≥ 均量 × 倍数。过滤掉无量假破。</li>
+          </ol>
+          <p class="small muted">
+            本项目回测统一采用“信号在第 i 根产生，成交在第 i+1 根开盘”，不提供“当根成交”开关。
+          </p>
+        </div>
+        <div>
+          <h3>回踩确认</h3>
+          <p>
+            突破后价格回到线附近，但没有收盘跌回另一侧，然后再次离开 —— 这才算回踩确认。
+            工程上通常要求：回踩距离 ≤ 容差（如 0.5 ATR），且收回的那根收盘仍在突破方向。
+          </p>
+          <p>
+            回踩确认能显著降低假突破，但会牺牲一部分行情。它适合“宁可少做，不要做错”的趋势系统，
+            不适合追求极早期入场的系统。
+          </p>
+        </div>
+      </div>
+
+      <div class="formula">
+        突破信号（做多示例）：close &gt; line + tol　且　close − line ≥ k × ATR　且　volume ≥ avgVol × m<br />
+        回踩确认：价格回到 line ± tol 区间，但 close 未跌破 line − tol<br />
+        失效：close 跌回 line 的另一侧超过 tol，或连续 N 根收在线下
+      </div>
+    </div>
+  </section>
+
+  <section id="lookahead">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="sec-no">07 / 风险</div>
+        <div>
+          <h2>未来函数：自动划线最容易翻车的地方</h2>
+          <p class="sub">
+            一条线在事后看总是“刚刚好”。真正的问题是：在当时的那个时间点，这条线能被画出来吗？
+          </p>
+        </div>
+      </div>
+
+      <div class="cols">
+        <div>
+          <h3>7.1 三种典型泄露</h3>
+          <ul>
+            <li><strong>拐点时间错位</strong>：用 <code>idx</code> 而不是 <code>confirmedAt</code> 下单。拐点当天根本不知道它是拐点。</li>
+            <li><strong>重绘（repainting）</strong>：新 K 线出现后，历史线被改掉。看图很准，实盘不可复现。</li>
+            <li><strong>全样本拟合</strong>：用整段数据算出的分位数/均值/通道宽度，再拿去解释早期行情。指标“知道”了未来。</li>
+          </ul>
+        </div>
+        <div>
+          <h3>7.2 五问自检清单</h3>
+          <ol>
+            <li>这条线在 t 时刻的值，是否只依赖 t 及之前的数据？</li>
+            <li>枢轴点的右侧窗口，是否已经完整走完？</li>
+            <li>新增一根 K 线后，历史线段会不会移动或消失？</li>
+            <li>通道宽度/分位阈值，是用滚动窗口还是全样本算的？</li>
+            <li>信号产生的下一根开盘价，是否真的可成交（涨跌停/停牌/流动性）？</li>
+          </ol>
+          <p class="small muted">
+            本项目的分析层只接收“已揭示”的 bar 切片；<code>src/validation/leakProbe.js</code>
+            用前缀一致性与未来不变性做机器门禁，而不是靠代码 review 兜底。
+          </p>
+        </div>
+      </div>
+
+      <div class="callout warn">
+        <p><strong>“回测很漂亮”不是算法有效的证据。</strong>自动划线参数多、自由度大，极容易在样本内找到一条“神线”。至少要在样本外、不同品种、不同成本假设下都能站住，才值得继续研究。</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="params">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="sec-no">08 / 参数</div>
+        <div>
+          <h2>参数速查：从哪些旋钮开始调</h2>
+          <p class="sub">下面是一组“能跑起来”的起点，不是最优值。真正该做的，是在自己的品种和周期上做敏感性分析。</p>
+        </div>
+      </div>
+
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th>参数</th><th>常见起点</th><th>调大意味着</th><th>调小意味着</th></tr></thead>
+          <tbody>
+            <tr><td>枢轴左右窗口 left / right</td><td class="num">日线 5 / 5；日内 3 / 3</td><td>点更少、更“大级别”，确认更慢</td><td>点更多、更敏感，也更容易被噪音干扰</td></tr>
+            <tr><td>ZigZag 回撤阈值 pct</td><td class="num">日线 2%–4%</td><td>只保留大波段拐点</td><td>拐点密集，连线容易碎</td></tr>
+            <tr><td>触碰容差 tol</td><td class="num">0.5 × ATR14</td><td>更容易“碰到”，但线可能变模糊</td><td>要求更精确，候选线变少</td></tr>
+            <tr><td>最少触点数 minTouches</td><td class="num">3（短窗口可 2）</td><td>线更少、更严格</td><td>线更多，噪音也更多</td></tr>
+            <tr><td>回看长度 lookback</td><td class="num">120–250 根</td><td>更重视长期结构</td><td>更贴近近期行情，但稳定性下降</td></tr>
+            <tr><td>每方向最多线数</td><td class="num">1–3 条</td><td>信息更全，也更拥挤</td><td>图更干净，但可能漏掉次要结构</td></tr>
+            <tr><td>水平位合并阈值</td><td class="num">0.2%–0.5%（日线）</td><td>更多枢轴被合并，位更少更粗</td><td>位更细，但可能把同一价位拆成多条</td></tr>
+            <tr><td>突破确认根数</td><td class="num">2–3 根收盘</td><td>假突破更少，入场更晚</td><td>更早入场，也更容易被打脸</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="small muted">
+        一个实用原则：<strong>先固定容差和最少触点数，再调回看长度</strong>。
+        前者决定“什么叫一条线”，后者决定“看多远”。反过来调，会同时改变两件事，无法判断结果变化来自哪里。
+      </p>
+    </div>
+  </section>
+
+  <section id="project">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="sec-no">09 / 本项目</div>
+        <div>
+          <h2>这些算法在本项目里落在哪</h2>
+          <p class="sub">
+            本项目的划线分两层：手动工具负责“你自己画”，分析叠加层负责“按规则自动算”。
+            两层共用同一套图表坐标系，但自动层只吃已揭示的 K 线。
+          </p>
+        </div>
+      </div>
+
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th>能力</th><th>入口</th><th>口径要点</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>手动划线</td>
+              <td>终端工具条：水平线 / 线段 / 射线 / 测量尺 / 盈亏比</td>
+              <td>磁吸到最近 K 线的高/低/开/收；测量尺给点数、涨跌幅与周期数</td>
+            </tr>
+            <tr>
+              <td>经典枢轴点</td>
+              <td><code>src/analysis/pivots.js</code></td>
+              <td>Standard / Fibonacci / Camarilla / Woodie；上一期 HLC 只画在下一期</td>
+            </tr>
+            <tr>
+              <td>分形摆动高低点</td>
+              <td><code>highLowPivots</code></td>
+              <td>左右各 N 根；同价位 0.2% 内合并并累计触碰次数；收盘穿越即 <code>brokenAtIdx</code></td>
+            </tr>
+            <tr>
+              <td>ZigZag 摆动点</td>
+              <td><code>swingPoints</code>（<code>src/analysis/common.js</code>）</td>
+              <td>相对回撤阈值；返回 <code>idx</code> 与 <code>confirmedAt</code>，两者不混用</td>
+            </tr>
+            <tr>
+              <td>供需区 / Wyckoff</td>
+              <td><code>src/analysis/zones.js</code></td>
+              <td>ATR 定义 base 与脱离；spring / upthrust / SOS / SOW 只做可核验的部分</td>
+            </tr>
+            <tr>
+              <td>动态支撑阻力</td>
+              <td><code>src/analysis/supertrend.js</code></td>
+              <td>Wilder 递推，final band 不允许往回缩</td>
+            </tr>
+            <tr>
+              <td>成交量分布</td>
+              <td><code>src/analysis/volumeProfile.js</code></td>
+              <td>POC / 价值区；uniform 分箱，不用单点 typical price 法</td>
+            </tr>
+            <tr>
+              <td>形态识别</td>
+              <td><code>src/analysis/patterns.js</code></td>
+              <td>基于摆动点的头肩/双顶等几何规则；每个形态带 <code>confirmedAtIdx</code></td>
+            </tr>
+            <tr>
+              <td>通道突破策略</td>
+              <td><code>src/strategy/library.js</code></td>
+              <td>Donchian / Dual Thrust / 趋势区间过滤 / N 字量价；信号次日开盘成交</td>
+            </tr>
+            <tr>
+              <td>前视门禁</td>
+              <td><code>src/validation/leakProbe.js</code></td>
+              <td>前缀一致性 + 未来不变性；机器判定，不依赖人工 review</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout ok">
+        <p>
+          想直接体验：打开终端后，在图表上方的「辅助」区切叠加层，或在工具条里手动画线；
+          自动回测页签里的 Donchian / Dual Thrust 策略，本质就是本章讲的通道突破。
+        </p>
+      </div>
+
+      <div class="hero-actions" style="margin-top:26px;">
+        <a class="btn" href="futures_replay_trader.html">打开回测终端 <span class="arrow" aria-hidden="true">→</span></a>
+        <a class="btn ghost" href="index.html">返回首页</a>
+      </div>
+    </div>
+  </section>
+
+  <section id="sources">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="sec-no">10 / 来源</div>
+        <div>
+          <h2>调研来源与延伸阅读</h2>
+          <p class="sub">
+            本页的算法口径来自以下公开资料与开源实现（调研于 2026-10-29）。
+            外部链接可能更新；具体默认参数以各项目文档为准。
+          </p>
+        </div>
+      </div>
+
+      <ul class="sources">
+        <li>
+          <a class="src-title" href="https://cn.tradingview.com/support/solutions/43000741165/" rel="noopener">TradingView：自动趋势线（官方说明）</a>
+          <span class="src-why">枢轴 25/25 与 5/5、ATR 过滤、触碰区域、延伸长度与突破根数的完整口径。</span>
+        </li>
+        <li>
+          <a class="src-title" href="https://www.tradingview.com/script/Iy5iWTCR-Auto-TrendLines-and-Support-Resistance-Ultimate-Trendoscope/" rel="noopener">Trendoscope：Auto TrendLines &amp; Support Resistance</a>
+          <span class="src-why">社区里较完整的自动趋势线实现，强调触碰权重、角度与线质量。</span>
+        </li>
+        <li>
+          <a class="src-title" href="https://www.tradingview.com/script/dqAWIbfG-Neural-Engine-Adaptive-Trendline-Detection-System-Algoativi/" rel="noopener">Neural Engine：Adaptive Trendline Detection</a>
+          <span class="src-why">多时间尺度锚点 + 斜率优化 + 触碰评分，只保留一条支撑与一条阻力。</span>
+        </li>
+        <li>
+          <a class="src-title" href="https://casoon.github.io/pine-scripts/docs/market-structure/auto-trendlines/" rel="noopener">pine-scripts：Auto Trendlines 文档</a>
+          <span class="src-why">点对枚举、OLS 重拟合、ATR 容差、复合评分、贪心去重与凸包的工程细节。</span>
+        </li>
+        <li>
+          <a class="src-title" href="https://github.com/ednunezg/pytrendline" rel="noopener">pytrendline</a>
+          <span class="src-why">基于枢轴的两点扫描与评分，文档明确说明最坏复杂度 O(N³) 及去重聚类。</span>
+        </li>
+        <li>
+          <a class="src-title" href="https://github.com/GregoryMorse/trendln" rel="noopener">trendln</a>
+          <span class="src-why">局部极值、OLS 趋势线、Hough 模式与水平位聚簇的 Python 实现。</span>
+        </li>
+        <li>
+          <a class="src-title" href="https://meacse.org/IJCAR/archives/128.pdf" rel="noopener">Hough 变换生成趋势线（论文）</a>
+          <span class="src-why">把趋势线检测写成参数空间投票问题，并讨论候选线合并。</span>
+        </li>
+        <li>
+          <a class="src-title" href="http://pdf.dfcfw.com/pdf/H3_AP201812271279802490_1.pdf" rel="noopener">压力线与支撑线的识别算法及突破策略</a>
+          <span class="src-why">国内研报口径：120 日回溯、5 日局部极值、分位数回归构造包络线。</span>
+        </li>
+        <li>
+          <a class="src-title" href="https://www.mql5.com/zh/articles/19077" rel="noopener">MQL5：最小二乘法拟合趋势线 EA</a>
+          <span class="src-why">从拐点识别到最小二乘拟合、再到触碰触发的完整工程示例。</span>
+        </li>
+        <li>
+          <a class="src-title" href="https://medium.com/data-science/algorithmically-drawing-trend-lines-on-a-stock-chart-414ed66d0055" rel="noopener">Algorithmically drawing Trend Lines</a>
+          <span class="src-why">重缩放、拐点检测、Hough 变换、过滤的入门流程。</span>
+        </li>
+      </ul>
+
+      <p class="note-final" style="margin-top:26px;">
+        本页只讨论“如何把划线写成可复现的算法”，不构成任何交易建议。
+        自动画出的线是视觉压缩工具，不是预测器；任何信号都必须经过样本外回测与成本检验。
+      </p>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap foot-inner">
+    <div class="foot-l">
+      <span>© 2026 PuddingTower</span>
+      <a href="https://github.com/PuddingTower/trend-trading-backtest" rel="noopener">GitHub</a>
+      <a href="https://github.com/PuddingTower/trend-trading-backtest/blob/master/LICENSE" rel="noopener">MIT License</a>
+      <span>仅供学习复盘 · 不构成投资建议</span>
+    </div>
+    <a class="btn" href="futures_replay_trader.html">打开回测终端 <span class="arrow" aria-hidden="true">→</span></a>
+  </div>
+</footer>
+
+</body>
+</html>

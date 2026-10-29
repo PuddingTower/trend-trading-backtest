@@ -50,6 +50,23 @@ export function periodSpacingOk(bars, period) {
 }
 
 /**
+ * 按日期字符串切 bar（起止都含）。只比较 `YYYY-MM-DD` 前缀，不构造 Date：
+ * 60m/4h 的 date 带钟点，Safari 对 `new Date('2026-10-14 10:30')` 直接给 Invalid Date，
+ * 拿 Date 做比较会让整段区间静默变成空数组。
+ * 任一端为空表示该端不设限；起止反了返回空数组，由调用方决定提示还是放弃。
+ */
+export function sliceBarsByDate(bars, from, to) {
+  if (!Array.isArray(bars) || !bars.length) return [];
+  const lo = from ? String(from).slice(0, 10) : '';
+  const hi = to ? String(to).slice(0, 10) : '';
+  if (lo && hi && lo > hi) return [];
+  return bars.filter(b => {
+    const d = String(b.date).slice(0, 10);
+    return (!lo || d >= lo) && (!hi || d <= hi);
+  });
+}
+
+/**
  * 取某个周期的真实 bar。上游没有的口径一律从更细的真实周期现算，绝不拿别的周期顶替。
  * 周/月线相反：上游 klt=102/103 是有的，先问上游，取不到才用日线自己合。
  *

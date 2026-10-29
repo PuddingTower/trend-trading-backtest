@@ -361,7 +361,9 @@ input:focus {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: var(--md-space-2);
+  row-gap: 4px;
   padding: 6px var(--md-space-3);
   flex-shrink: 0;
   box-shadow: var(--md-elev-2);
@@ -379,6 +381,7 @@ input:focus {
   align-items: center;
   gap: var(--md-space-2);
   flex-shrink: 0;
+  margin-left: auto;
 }
 
 .brand {
@@ -728,6 +731,28 @@ input:focus {
 }
 .mini-select:hover {
   border-color: var(--md-sys-color-outline);
+}
+
+/* 自定义回测区间：独立一行，避免和顶部导航抢宽度 */
+.custom-range-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--md-space-2);
+  padding: 6px var(--md-space-3);
+  background: var(--md-sys-color-surface-container-high);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  font-size: var(--md-type-label-sm);
+  color: var(--md-sys-color-on-surface-variant);
+}
+.custom-range-label { font-weight: var(--md-weight-semibold); color: var(--md-sys-color-on-surface); }
+.custom-range-sep { color: var(--md-sys-color-on-surface-variant); }
+.custom-range-hint { color: var(--md-sys-color-on-surface-variant); opacity: .8; }
+.custom-range-bar input[type="date"] {
+  flex: 0 0 auto;
+  width: 142px;
+  height: var(--md-control-h-sm);
+  font-variant-numeric: tabular-nums;
 }
 .swatch {
   width: 28px;
@@ -1712,3 +1737,8 @@ kbd {
   padding: 0 var(--md-space-1);
 }
 .data-error-close:hover { color: var(--md-sys-color-on-surface); }
+
+/* 窄屏：复盘控制簇允许换行，避免“重置/单步”被压成半个字 */
+@media (max-width: 700px) {
+  .nav-center { flex-wrap: wrap; justify-content: flex-start; }
+}
