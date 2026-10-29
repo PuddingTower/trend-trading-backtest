@@ -5,6 +5,7 @@
    ========================================================================== */
 
 :root {
+  color-scheme: dark;
   /* --- Color roles: M3 dark scheme, blue seed ------------------------- */
   --md-sys-color-primary: #a4c8ff;
   --md-sys-color-on-primary: #002e5b;
@@ -181,6 +182,7 @@ body {
   font-size: var(--md-type-body-md);
   line-height: 1.5;
   height: 100vh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -248,6 +250,25 @@ textarea,
 ::-webkit-scrollbar-thumb:hover {
   background: var(--md-sys-color-outline);
   background-clip: content-box;
+}
+
+/* Browser surfaces: selection, caret, placeholder, native form accents, link
+   underline. These ship with defaults that belong to no design system; theming
+   them from the palette is the cheapest signal that the page was built. */
+::selection {
+  background: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
+}
+:root {
+  caret-color: var(--md-sys-color-primary);
+  accent-color: var(--md-sys-color-primary);
+}
+::placeholder {
+  color: var(--md-sys-color-on-surface-variant);
+  opacity: 1;
+}
+a {
+  text-underline-offset: 3px;
 }
 
 /* ==========================================================================

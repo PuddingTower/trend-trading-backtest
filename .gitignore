@@ -20,3 +20,6 @@ Desktop.ini
 # （公开仓库不再生成时再分发上游抓取数据）
 fixtures/
 tools/backtest_result.json
+
+# Impeccable 设计流程产物（评审截图 / 测试台 / 中间文件），不入库
+.impeccable/
