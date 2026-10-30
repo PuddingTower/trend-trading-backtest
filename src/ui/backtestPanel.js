@@ -7,7 +7,7 @@
 
 import { STRATEGIES } from '../strategy/library.js';
 import { BacktestEngine } from '../core/backtestEngine.js';
-import { addRule, getRuleEntry, listRuleEntries, parseRuleJson, resolveStrategyValue, strategyValue } from '../strategy/ruleRegistry.js';
+import { addRule, getRuleEntry, isDefaultRule, listRuleEntries, parseRuleJson, resolveStrategyValue, strategyValue } from '../strategy/ruleRegistry.js';
 import { normalizeRule } from '../strategy/ruleSchema.js';
 import { computeMetrics, benchmarkCompare } from '../report/metrics.js';
 import { downloadText } from '../data/csvIO.js';
@@ -111,7 +111,7 @@ export class BacktestPanel {
     const builtIn = STRATEGIES.map(s => ({ value: s.id, label: s.name, title: STRATEGY_DESC[s.id] || '' }));
     const custom = listRuleEntries().map(entry => ({
       value: strategyValue(entry),
-      label: `${entry.name}（自定义 r${entry.revision}）`,
+      label: `${entry.name}（${isDefaultRule(entry.id) ? '默认规则' : '自定义'} r${entry.revision}）`,
       title: entry.doc.description || '导入的 JSON 策略规则'
     }));
     return [...builtIn, ...custom].map(option =>

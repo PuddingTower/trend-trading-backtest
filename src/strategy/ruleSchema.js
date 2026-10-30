@@ -19,7 +19,7 @@ const RISK_FIELDS = new Set(['stop', 'target', 'trail']);
 const MAX_RULE_NODES = 2048;
 const MAX_RULE_DEPTH = 64;
 const BAR_FIELDS = new Set(['date', 'open', 'high', 'low', 'close', 'volume']);
-const PARAMETER_FIELDS = new Set(['type', 'default', 'min', 'max', 'enum', 'label', 'description']);
+const PARAMETER_FIELDS = new Set(['type', 'default', 'min', 'max', 'step', 'enum', 'label', 'description']);
 
 function error(code, path, message) {
   return { code, path, message };

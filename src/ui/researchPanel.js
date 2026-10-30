@@ -9,7 +9,7 @@
  */
 
 import { STRATEGIES, getStrategy } from '../strategy/library.js';
-import { getRuleEntry, listRuleEntries, resolveStrategyValue, strategyValue } from '../strategy/ruleRegistry.js';
+import { getRuleEntry, isDefaultRule, listRuleEntries, resolveStrategyValue, strategyValue } from '../strategy/ruleRegistry.js';
 import { resolveOptimizerStrategy } from '../report/optimizeStrategy.js';
 import { OBJECTIVES, gridRunner, walkForward, neighborhoodScore, runOne } from '../report/optimizer.js';
 import { tpeRunner, plateauRecommendation, paretoFront } from '../report/bayesOptimizer.js';
@@ -243,7 +243,7 @@ export class ResearchPanel {
       ...STRATEGIES.map(s => ({ value: s.id, label: s.name })),
       ...listRuleEntries().map(entry => ({
         value: strategyValue(entry),
-        label: `${entry.name}（自定义 r${entry.revision}）`
+        label: `${entry.name}（${isDefaultRule(entry.id) ? '默认规则' : '自定义'} r${entry.revision}）`
       }))
     ];
   }

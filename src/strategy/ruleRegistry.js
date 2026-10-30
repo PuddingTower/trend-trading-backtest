@@ -7,6 +7,7 @@
 import { compileRule } from './ruleStrategy.js';
 import { normalizeRule, ruleHash, validateRule } from './ruleSchema.js';
 import { getStrategy } from './library.js';
+import { DEFAULT_RULES, DEFAULT_RULE_IDS } from './defaultRules.js';
 
 const entries = new Map();
 const MAX_RULE_TEXT_BYTES = 256_000;
@@ -59,6 +60,10 @@ export function removeRuleEntry(id) {
 
 export const strategyValue = (entry) => `custom:${entry.id}`;
 
+export function isDefaultRule(id) {
+  return DEFAULT_RULE_IDS.has(id);
+}
+
 export function resolveStrategyValue(value) {
   if (!value) return null;
   if (value.startsWith('custom:')) {
@@ -66,3 +71,7 @@ export function resolveStrategyValue(value) {
   }
   return getStrategy(value);
 }
+
+// 默认规则随注册表一起加载：回测面板每次启动都能直接选到，不必先导入文件。
+// 校验失败必须在这里炸出来，而不是让界面静默少两条策略。
+for (const rule of DEFAULT_RULES) addRule(rule);

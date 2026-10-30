@@ -1,0 +1,320 @@
+{
+  "schemaVersion": 1,
+  "kind": "rules",
+  "id": "intraday_ema_band_both",
+  "name": "1H EMA趋势带(期货多空)",
+  "revision": 1,
+  "description": "60分钟趋势带多空：收盘高于慢线 1% 且快线在慢线上方才做多，低于慢线 1% 且快线在慢线下方才做空；回到趋势带内或 ATR 移动止损离场，不设固定止盈。仅用于期货等可做空品种。研究样本约 5–12 个月（各品种覆盖不同），默认参数不是实盘建议。",
+  "parameters": {
+    "fast": {
+      "type": "integer",
+      "default": 20,
+      "min": 2,
+      "max": 200,
+      "label": "快线",
+      "description": "EMA 快线；必须小于慢线"
+    },
+    "slow": {
+      "type": "integer",
+      "default": 89,
+      "min": 10,
+      "max": 400,
+      "label": "慢线",
+      "description": "EMA 慢线；趋势带围绕它展开"
+    },
+    "band": {
+      "type": "number",
+      "default": 0.01,
+      "min": 0,
+      "max": 0.5,
+      "label": "趋势带%",
+      "description": "收盘离开慢线至少这个比例才算趋势；回到带内即中性区"
+    },
+    "atrLen": {
+      "type": "integer",
+      "default": 14,
+      "min": 2,
+      "max": 100,
+      "label": "ATR周期",
+      "description": "止损与移动止损都按它计算"
+    },
+    "stopAtr": {
+      "type": "number",
+      "default": 3,
+      "min": 0.5,
+      "max": 10,
+      "label": "初始止损(ATR倍)",
+      "description": "入场时挂在收盘价外侧的初始止损"
+    },
+    "trailAtr": {
+      "type": "number",
+      "default": 6,
+      "min": 0.5,
+      "max": 12,
+      "label": "移动止损(ATR倍)",
+      "description": "从持仓期极值回撤 N 倍 ATR 收紧；只紧不松"
+    },
+    "trailLook": {
+      "type": "integer",
+      "default": 40,
+      "min": 2,
+      "max": 100,
+      "label": "移动止损回看",
+      "description": "移动止损参考的极值回看根数"
+    }
+  },
+  "requires": {
+    "fields": [
+      "open",
+      "high",
+      "low",
+      "close",
+      "volume"
+    ]
+  },
+  "series": {
+    "fast": {
+      "op": "ema",
+      "source": {
+        "field": "close"
+      },
+      "period": {
+        "param": "fast"
+      }
+    },
+    "slow": {
+      "op": "ema",
+      "source": {
+        "field": "close"
+      },
+      "period": {
+        "param": "slow"
+      }
+    },
+    "atr": {
+      "op": "atr",
+      "period": {
+        "param": "atrLen"
+      }
+    },
+    "hh": {
+      "op": "priorHigh",
+      "source": {
+        "field": "high"
+      },
+      "period": {
+        "param": "trailLook"
+      }
+    },
+    "ll": {
+      "op": "priorLow",
+      "source": {
+        "field": "low"
+      },
+      "period": {
+        "param": "trailLook"
+      }
+    }
+  },
+  "rules": [
+    {
+      "when": {
+        "op": "and",
+        "conditions": [
+          {
+            "op": "greaterThan",
+            "left": {
+              "field": "close"
+            },
+            "right": {
+              "op": "multiply",
+              "left": {
+                "series": "slow"
+              },
+              "right": {
+                "op": "add",
+                "left": {
+                  "const": 1
+                },
+                "right": {
+                  "param": "band"
+                }
+              }
+            }
+          },
+          {
+            "op": "greaterThan",
+            "left": {
+              "series": "fast"
+            },
+            "right": {
+              "series": "slow"
+            }
+          }
+        ]
+      },
+      "do": {
+        "action": "long",
+        "reason": "站上趋势带且快慢线多头排列",
+        "risk": {
+          "stop": {
+            "op": "subtract",
+            "left": {
+              "field": "close"
+            },
+            "right": {
+              "op": "multiply",
+              "left": {
+                "param": "stopAtr"
+              },
+              "right": {
+                "series": "atr"
+              }
+            }
+          },
+          "trail": {
+            "op": "subtract",
+            "left": {
+              "series": "hh"
+            },
+            "right": {
+              "op": "multiply",
+              "left": {
+                "param": "trailAtr"
+              },
+              "right": {
+                "series": "atr"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "when": {
+        "op": "and",
+        "conditions": [
+          {
+            "op": "lessThan",
+            "left": {
+              "field": "close"
+            },
+            "right": {
+              "op": "multiply",
+              "left": {
+                "series": "slow"
+              },
+              "right": {
+                "op": "subtract",
+                "left": {
+                  "const": 1
+                },
+                "right": {
+                  "param": "band"
+                }
+              }
+            }
+          },
+          {
+            "op": "lessThan",
+            "left": {
+              "series": "fast"
+            },
+            "right": {
+              "series": "slow"
+            }
+          }
+        ]
+      },
+      "do": {
+        "action": "short",
+        "reason": "跌破趋势带且快慢线空头排列",
+        "risk": {
+          "stop": {
+            "op": "add",
+            "left": {
+              "field": "close"
+            },
+            "right": {
+              "op": "multiply",
+              "left": {
+                "param": "stopAtr"
+              },
+              "right": {
+                "series": "atr"
+              }
+            }
+          },
+          "trail": {
+            "op": "add",
+            "left": {
+              "series": "ll"
+            },
+            "right": {
+              "op": "multiply",
+              "left": {
+                "param": "trailAtr"
+              },
+              "right": {
+                "series": "atr"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "when": {
+        "op": "and",
+        "conditions": [
+          {
+            "op": "greaterThan",
+            "left": {
+              "field": "close"
+            },
+            "right": {
+              "op": "multiply",
+              "left": {
+                "series": "slow"
+              },
+              "right": {
+                "op": "subtract",
+                "left": {
+                  "const": 1
+                },
+                "right": {
+                  "param": "band"
+                }
+              }
+            }
+          },
+          {
+            "op": "lessThan",
+            "left": {
+              "field": "close"
+            },
+            "right": {
+              "op": "multiply",
+              "left": {
+                "series": "slow"
+              },
+              "right": {
+                "op": "add",
+                "left": {
+                  "const": 1
+                },
+                "right": {
+                  "param": "band"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "do": {
+        "action": "close",
+        "reason": "回到中性趋势带，趋势不明确"
+      }
+    }
+  ]
+}
