@@ -1,6 +1,8 @@
 import { test, assert } from './harness.js';
 import { compileRule } from '../src/strategy/ruleStrategy.js';
-import { normalizeRule, validateRule } from '../src/strategy/ruleSchema.js';
+import { normalizeRule, ruleHash, validateRule } from '../src/strategy/ruleSchema.js';
+import { resolveOptimizerStrategy } from '../src/report/optimizeStrategy.js';
+import { compareStrategies } from '../src/report/strategyCompare.js';
 import { addRule, getRuleEntry, listRuleEntries, parseRuleJson, resolveStrategyValue, strategyValue } from '../src/strategy/ruleRegistry.js';
 
 const mk = (date, close) => ({ date, open: close, high: close, low: close, close, volume: 100 });
@@ -398,6 +400,7 @@ test('规则注册表可解析 JSON、校验并编译导入规则', () => {
 
   assert.eq(entry.id, 'registered_demo');
   assert.eq(entry.doc.name, '已注册规则');
+  assert.ok(/^[a-f0-9]{16}$/.test(entry.hash));
   assert.eq(listRuleEntries().some((item) => item.id === entry.id), true);
   assert.eq(getRuleEntry(entry.id).strategy.signals([mk('2024-01-01', 100)])[0].dir, 1);
   assert.eq(parseRuleJson('{"schemaVersion":1,"kind":"unknown"}').errors[0].code, 'UNSUPPORTED_KIND');
@@ -418,5 +421,136 @@ test('自定义规则选项值可与内置策略 ID 隔离解析', () => {
   const entry = addRule(rule);
   assert.eq(strategyValue(entry), 'custom:option_demo');
   assert.eq(resolveStrategyValue('custom:option_demo').id, 'option_demo');
-  assert.eq(resolveStrategyValue('maCross'), null);
+  assert.eq(resolveStrategyValue('maCross').id, 'maCross');
+});
+
+test('寻优 Worker 可从纯数据规则文档重建策略', () => {
+  const rule = {
+    schemaVersion: 1,
+    kind: 'rules',
+    id: 'worker_demo',
+    name: 'Worker 规则',
+    revision: 1,
+    parameters: { threshold: { type: 'number', default: 100, min: 1, max: 10000 } },
+    requires: { fields: ['open', 'high', 'low', 'close', 'volume'] },
+    series: {},
+    rules: [{
+      when: { op: 'greaterThan', left: { field: 'close' }, right: { param: 'threshold' } },
+      do: { action: 'long', reason: '超过阈值' }
+    }]
+  };
+  const strategy = resolveOptimizerStrategy({ ruleDoc: rule });
+  const signals = strategy.signals([mk('2024-01-01', 120)], { threshold: 100 });
+  assert.deep(signals, [{ i: 0, dir: 1, reason: '超过阈值' }]);
+  assert.eq(resolveOptimizerStrategy({ strategyId: 'maCross' }).id, 'maCross');
+  assert.eq(resolveOptimizerStrategy({ strategyId: 'ghost' }), null);
+});
+
+test('策略对比可直接使用纯数据规则文档作为参与项', () => {
+  const bars = [90, 100, 110].map((close, index) => mk(`2024-01-0${index + 1}`, close));
+  const ruleDoc = {
+    schemaVersion: 1,
+    kind: 'rules',
+    id: 'compare_rule',
+    name: '对比规则',
+    revision: 1,
+    parameters: { threshold: { type: 'number', default: 80, min: 1, max: 10000 } },
+    requires: { fields: ['open', 'high', 'low', 'close', 'volume'] },
+    series: {},
+    rules: [{
+      when: { op: 'greaterThan', left: { field: 'close' }, right: { param: 'threshold' } },
+      do: { action: 'long', reason: '高于阈值' }
+    }]
+  };
+  const result = compareStrategies({
+    bars,
+    spec: { market: 'futures', multiplier: 10, tick: 1, marginRate: 0.1, fee: { mode: 'fixed', value: 4 } },
+    entries: [{ id: 'compare_rule', ruleDoc }, 'maCross'],
+    engineOpts: { capital: 200000, lots: 1 },
+    includeBenchmark: false
+  });
+
+  assert.eq(result.error, undefined);
+  assert.eq(result.runs.length, 2);
+  assert.eq(result.runs[0].name, '对比规则');
+  assert.eq(result.runs[1].name, '双均线交叉');
+});
+
+test('规则声明的行情字段缺失时直接拒绝计算，不静默空跑', () => {
+  const rule = {
+    schemaVersion: 1,
+    kind: 'rules',
+    id: 'requires_demo',
+    name: '字段要求',
+    revision: 1,
+    parameters: {},
+    requires: { fields: ['open', 'high', 'low', 'close', 'volume'] },
+    series: {},
+    rules: [{ when: { op: 'greaterThan', left: { field: 'close' }, right: { const: 0 } }, do: { action: 'long' } }]
+  };
+  const strategy = compileRule(rule);
+  assert.throws(
+    () => strategy.signals([{ date: '2024-01-01', open: 1, high: 2, low: 0.5, close: 1 }]),
+    'REQUIRED_FIELD_MISSING',
+    '缺少成交量时必须明确拒绝，而不是把所有条件算成 false'
+  );
+});
+
+test('规则条件树超过复杂度上限时拒绝导入', () => {
+  let condition = { op: 'greaterThan', left: { const: 1 }, right: { const: 0 } };
+  for (let i = 0; i < 120; i++) condition = { op: 'and', conditions: [condition] };
+  const errors = validateRule({
+    schemaVersion: 1,
+    kind: 'rules',
+    id: 'deep_rule',
+    name: '过深规则',
+    revision: 1,
+    parameters: {},
+    requires: { fields: ['open', 'high', 'low', 'close', 'volume'] },
+    series: {},
+    rules: [{ when: condition, do: { action: 'noop' } }]
+  });
+  assert.ok(errors.some(e => e.code === 'RULE_TOO_COMPLEX'), `应拒绝 120 层嵌套，实际 ${JSON.stringify(errors)}`);
+});
+
+test('规则内容哈希只认规范化后的内容', () => {
+  const first = {
+    revision: 1,
+    params: { fast: 2 },
+    schemaVersion: 1,
+    kind: 'builtin',
+    id: 'hash_demo',
+    name: '哈希示例'
+  };
+  const reordered = {
+    schemaVersion: 1,
+    kind: 'builtin',
+    id: 'hash_demo',
+    name: '哈希示例',
+    revision: 1,
+    params: { fast: 2 }
+  };
+  const changed = { ...reordered, params: { fast: 10 } };
+
+  assert.ok(/^[a-f0-9]{16}$/.test(ruleHash(first)));
+  assert.eq(ruleHash(first), ruleHash(reordered));
+  assert.ok(ruleHash(first) !== ruleHash(changed));
+});
+
+test('编译后的策略携带规则格式版本和内容哈希', () => {
+  const doc = {
+    schemaVersion: 1,
+    kind: 'builtin',
+    id: 'maCross',
+    revision: 4,
+    params: { fast: 8 }
+  };
+  const strategy = compileRule(doc);
+  assert.eq(strategy.schemaVersion, 1);
+  assert.eq(strategy.contentHash, ruleHash(doc));
+});
+
+test('超过体积上限的规则文本不进入 JSON 解析', () => {
+  const result = parseRuleJson('[' + '1'.repeat(300_000) + ']');
+  assert.eq(result.errors[0].code, 'RULE_FILE_TOO_LARGE');
 });

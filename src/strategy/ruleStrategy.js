@@ -6,7 +6,7 @@
 
 import { sma, ema, rsi, atr, priorExtreme } from './indicators.js';
 import { getStrategy } from './library.js';
-import { validateRule } from './ruleSchema.js';
+import { normalizeRule, ruleHash, validateRule } from './ruleSchema.js';
 
 const ACTION_DIR = { long: 1, short: -1, close: 0 };
 
@@ -27,6 +27,15 @@ const ARITHMETIC = {
 };
 
 const CROSS_OPS = new Set(['crossUp', 'crossDown']);
+
+function ensureRequiredFields(fields, bars, ruleId) {
+  for (const [index, bar] of bars.entries()) {
+    for (const field of fields || []) {
+      const valid = field === 'date' ? typeof bar?.date === 'string' && bar.date.length > 0 : Number.isFinite(Number(bar?.[field]));
+      if (!valid) throw new Error(`REQUIRED_FIELD_MISSING: 策略 ${ruleId} 需要 ${field}，第 ${index + 1} 根 K 线缺失或非法`);
+    }
+  }
+}
 
 function defaultParams(parameters = {}) {
   return Object.fromEntries(Object.entries(parameters).map(([key, definition]) => [key, definition.default]));
@@ -109,6 +118,8 @@ export function compileRule(rule) {
     return {
       id: rule.id,
       name: base.name,
+      schemaVersion: 1,
+      contentHash: ruleHash(rule),
       params: { ...base.params, ...(rule.params || {}) },
       signals(bars, overrides = {}) {
         return base.signals(bars, { ...this.params, ...overrides });
@@ -121,10 +132,13 @@ export function compileRule(rule) {
     id: rule.id,
     name: rule.name,
     description: rule.description || '',
+    schemaVersion: 1,
+    contentHash: ruleHash(rule),
     params: defaultParams(rule.parameters),
     parameters: rule.parameters || {},
     signals(bars, overrides = {}) {
       const params = { ...this.params, ...overrides };
+      ensureRequiredFields(rule.requires?.fields, bars, rule.id);
       const series = buildSeries(rule.series, bars, params);
       return bars.map((bar, i) => {
         for (const conditionRule of rule.rules || []) {

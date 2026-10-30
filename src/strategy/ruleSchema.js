@@ -16,6 +16,8 @@ const PARAMETER_TYPES = new Set(['integer', 'number', 'boolean', 'string']);
 const ACTIONS = new Set(['long', 'short', 'close', 'noop']);
 const ACTION_FIELDS = new Set(['action', 'reason', 'risk']);
 const RISK_FIELDS = new Set(['stop', 'target', 'trail']);
+const MAX_RULE_NODES = 2048;
+const MAX_RULE_DEPTH = 64;
 const BAR_FIELDS = new Set(['date', 'open', 'high', 'low', 'close', 'volume']);
 const PARAMETER_FIELDS = new Set(['type', 'default', 'min', 'max', 'enum', 'label', 'description']);
 
@@ -25,6 +27,20 @@ function error(code, path, message) {
 
 function isRecord(value) {
   return value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function jsonComplexity(value, depth = 0, seen = new WeakSet()) {
+  if (!value || typeof value !== 'object') return { nodes: 1, maxDepth: depth };
+  if (seen.has(value)) return { nodes: Number.POSITIVE_INFINITY, maxDepth: depth };
+  seen.add(value);
+  let nodes = 1, maxDepth = depth;
+  const children = Array.isArray(value) ? value : Object.values(value);
+  for (const child of children) {
+    const result = jsonComplexity(child, depth + 1, seen);
+    nodes += result.nodes;
+    maxDepth = Math.max(maxDepth, result.maxDepth);
+  }
+  return { nodes, maxDepth };
 }
 
 function validateParameters(parameters, path, errors) {
@@ -184,6 +200,11 @@ export function validateRule(rule) {
     if (!ALLOWED_FIELDS.has(field)) errors.push(error('UNKNOWN_FIELD', `$.${field}`, `未知顶层字段 ${field}`));
   }
   if (errors.length) return errors;
+  const complexity = jsonComplexity(rule);
+  if (complexity.nodes > MAX_RULE_NODES || complexity.maxDepth > MAX_RULE_DEPTH) {
+    errors.push(error('RULE_TOO_COMPLEX', '$.rules', `规则文档最多 ${MAX_RULE_NODES} 个节点、嵌套深度不超过 ${MAX_RULE_DEPTH} 层`));
+    return errors;
+  }
   if (rule.kind === 'rules') validateRulesKind(rule, errors);
   return errors;
 }
@@ -217,4 +238,24 @@ export function normalizeRule(rule) {
     series: { ...(rule.series || {}) },
     rules: [...(rule.rules || [])]
   };
+}
+
+function canonicalize(value) {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (isRecord(value)) return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, child]) => [key, canonicalize(child)]));
+  return value;
+}
+
+function fnv1a(text, offset) {
+  let hash = offset >>> 0;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, '0');
+}
+
+export function ruleHash(rule) {
+  const canonical = JSON.stringify(canonicalize(normalizeRule(rule)));
+  return fnv1a(canonical, 0x811c9dc5) + fnv1a(canonical, 0x01000193);
 }

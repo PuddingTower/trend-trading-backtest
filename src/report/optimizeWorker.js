@@ -5,14 +5,14 @@
  * 主线程靠这个才不会在 200 组参数 × 5 年日线时冻住 —— 冻住的页面上 iPad 会直接
  * 把它当成卡死杀掉。
  *
- * 注意：Worker 收不到函数（结构化克隆会丢掉），所以传的是 **策略 id**，
- * 由这里从 STRATEGIES 注册表里取。品种数据直接传 bar 数组。
+ * 注意：Worker 收不到函数（结构化克隆会丢掉），所以内置策略传策略 id；自定义策略
+ * 传版本化 JSON 规则文档，由 Worker 用同一编译器重建。品种数据直接传 bar 数组。
  * 任何 Worker 不支持 / module worker 不可用的环境，上层会退回主线程分块跑，
  * 所以这里的逻辑必须和 gridRunner / walkForward 完全同源（只 import，不复制）。
  */
 
 import { gridRunner, walkForward } from './optimizer.js';
-import { getStrategy } from '../strategy/library.js';
+import { resolveOptimizerStrategy } from './optimizeStrategy.js';
 import { rulesFor } from '../markets/marketRules.js';
 
 /**
@@ -29,7 +29,7 @@ function optsWithRules(msg) {
 self.onmessage = (e) => {
   const msg = e.data || {};
   try {
-    const strategy = getStrategy(msg.strategyId);
+    const strategy = resolveOptimizerStrategy(msg);
     if (!strategy) return self.postMessage({ type: 'error', error: `未知策略 ${msg.strategyId}` });
     const engineOpts = optsWithRules(msg);
 

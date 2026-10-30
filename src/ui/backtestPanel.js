@@ -511,7 +511,8 @@ export class BacktestPanel {
         periodsPerYear: this.chart.periodsPerYear || 252, bars: useBars
       });
       res = { ...raw, metrics, bars: useBars, spec, strategy: def.name, strategyId: def.id,
-              params, signals, rejected: raw.rejected, settlementOn: !!raw.settlement };
+              params, signals, rejected: raw.rejected, settlementOn: !!raw.settlement,
+              ruleSchemaVersion: def.schemaVersion || null, strategyContentHash: def.contentHash || null };
       // 事前风险度量（VaR/CVaR 三模态 + 风险度）随回测一次算齐；算不出就给 null，
       // 报表显示「—」，不假装 0
       res.risk = fullRiskReport(raw.equityCurve, { periodsPerYear: this.chart.periodsPerYear || 252, sims: 4000, seed: 42 });
@@ -579,7 +580,7 @@ export class BacktestPanel {
       </div>
       <div style="display:flex; gap:24px; flex-wrap:wrap; font-size:11px; color:var(--text-muted); padding:4px 0;">
         <span>品种 <b style="color:var(--text-main);">${esc(res.spec.name || '')} / ${esc(resolved.parsed.contractCode || resolved.parsed.code || '')}</b></span>
-        <span>策略 <b style="color:var(--text-main);">${esc(res.strategy)}</b></span>
+        <span>策略 <b style="color:var(--text-main);">${esc(res.strategy)}</b>${res.strategyContentHash ? ` <span title="规则内容哈希：规则一改，哈希必变">#${esc(res.strategyContentHash)}</span>` : ''}</span>
         <span>参数 <b>${esc(Object.entries(res.params).map(([k, v]) =>
           `${paramLabel(k)}=${typeof v === 'boolean' ? (v ? '开' : '关') : paramValueLabel(k, v)}`).join('，'))}</b></span>
         <span>说明 <b style="color:var(--text-main); font-weight:400;">${esc(STRATEGY_DESC[res.strategyId] || '')}</b></span>

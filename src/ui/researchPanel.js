@@ -9,6 +9,8 @@
  */
 
 import { STRATEGIES, getStrategy } from '../strategy/library.js';
+import { getRuleEntry, listRuleEntries, resolveStrategyValue, strategyValue } from '../strategy/ruleRegistry.js';
+import { resolveOptimizerStrategy } from '../report/optimizeStrategy.js';
 import { OBJECTIVES, gridRunner, walkForward, neighborhoodScore, runOne } from '../report/optimizer.js';
 import { tpeRunner, plateauRecommendation, paretoFront } from '../report/bayesOptimizer.js';
 import { factorReport, buildFactorPanel } from '../report/factorEval.js';
@@ -236,17 +238,49 @@ export class ResearchPanel {
     this.root.innerHTML = head + body;
   }
 
-  strategySelect(id) {
+  strategyOptions() {
+    return [
+      ...STRATEGIES.map(s => ({ value: s.id, label: s.name })),
+      ...listRuleEntries().map(entry => ({
+        value: strategyValue(entry),
+        label: `${entry.name}（自定义 r${entry.revision}）`
+      }))
+    ];
+  }
+
+  strategyFromValue(value) {
+    return resolveStrategyValue(value);
+  }
+
+  defaultGridFor(value) {
+    if (DEFAULT_GRIDS[value]) return DEFAULT_GRIDS[value];
+    const strategy = this.strategyFromValue(value);
+    if (!strategy?.parameters) return {};
+    return Object.fromEntries(Object.entries(strategy.parameters)
+      .filter(([, definition]) => definition.type === 'integer' || definition.type === 'number')
+      .map(([key, definition]) => [key, [definition.default]]));
+  }
+
+  ruleDocForValue(value) {
+    return value.startsWith('custom:') ? getRuleEntry(value.slice('custom:'.length))?.doc || null : null;
+  }
+
+  builtInStrategySelect(id) {
     const cur = document.getElementById(id)?.value || 'donchianBreak';
     return `<select id="${id}" style="${INP}">` + STRATEGIES.map(s => `<option value="${s.id}" ${s.id === cur ? 'selected' : ''}>${esc(s.name)}</option>`).join('') + '</select>';
   }
 
+  strategySelect(id) {
+    const cur = document.getElementById(id)?.value || 'donchianBreak';
+    return `<select id="${id}" style="${INP}">` + this.strategyOptions().map(s => `<option value="${s.value}" ${s.value === cur ? 'selected' : ''}>${esc(s.label)}</option>`).join('') + '</select>';
+  }
+
   gridHtml() {
     const sid = document.getElementById('rsStrategy')?.value || 'donchianBreak';
-    const def = getStrategy(sid);
+    const def = this.strategyFromValue(sid);
     const el = document.getElementById('rsGrid');
-    const defText = JSON.stringify(DEFAULT_GRIDS[sid] || {});
-    const prevDefText = this._gridSid ? JSON.stringify(DEFAULT_GRIDS[this._gridSid] || {}) : null;
+    const defText = JSON.stringify(this.defaultGridFor(sid));
+    const prevDefText = this._gridSid ? JSON.stringify(this.defaultGridFor(this._gridSid)) : null;
     // 换策略时网格要不要跟着换？只看一件事：文本框里还是不是"上一个策略的默认网格"。
     // 是 → 说明用户没动过，留着旧键名（entry/exit）会让新策略把无关参数当成网格，
     //       24 组跑出来的其实是同一个默认参数，热图全是平的；
@@ -345,13 +379,12 @@ export class ResearchPanel {
     if (bars.length < 60) { this.api.toast?.('K 线不足'); return; }
     const sp = this.specFor(this.code);
     if (!sp) { this.api.toast?.('当前品种无法解析规格'); return; }
-    const strategyId = document.getElementById('rsStrategy').value;
-    const strategy = getStrategy(strategyId);
+    const selectedStrategy = document.getElementById('rsStrategy').value;
+    const strategy = this.strategyFromValue(selectedStrategy);
+    const ruleDoc = this.ruleDocForValue(selectedStrategy);
     const grids = parseGrid(document.getElementById('rsGrid').value);
     if (grids.__error) { this.api.toast?.(`参数网格有问题：${grids.__error}`); return; }
     if (!Object.keys(grids).length) { this.api.toast?.('网格是空的：写成 entry: 20,40,55 或 {"entry":[20,40,55]}'); return; }
-    // 网格里出现策略参数表没有的键 = 这一整轮在重复跑同一组默认参数（成绩全是平的）。
-    // 以前只能靠用户自己发现，现在当场拦住并说清是哪几个键。
     const unknown = Object.keys(grids).filter(k => !(k in strategy.params));
     if (unknown.length) {
       this.api.toast?.(`网格键 ${unknown.join('、')} 不属于「${strategy.name}」，请换成该策略自己的参数`);
@@ -365,7 +398,6 @@ export class ResearchPanel {
     this.busy = '寻优中';
     this.progress = { done: 0, total: 1 };
     this.gridRows = null;
-    // Worker 起不来时要能原地退回主线程，所以先把这一轮的入参存一份
     this._mainArgs = { bars, sp, strategy, grids, objective, engineOpts };
 
     const w = this.worker();
@@ -375,16 +407,14 @@ export class ResearchPanel {
         if (m.type === 'progress') { this.progress = { done: Math.min(m.done, m.total), total: m.total }; this.refreshProgress(); }
         else if (m.type === 'result') {
           this.busy = ''; this.progress = null;
-          // 直接用 Worker 算好的名次表。把它拿回主线程重算一遍等于白开 Worker。
           this.gridRows = m.rows;
-          this.gridCtx = { bars, sp, strategyId, grids, objective, engineOpts };
+          this.gridCtx = { bars, sp, selectedStrategy, strategy, grids, objective, engineOpts };
           this.render();
         } else if (m.type === 'error') { this.busy = ''; this.api.toast?.(`Worker：${m.error}`); this.render(); }
       };
       w.addEventListener('message', this._workerHandler);
-      // engineOpts 里带的是普通数据；rules 由 Worker 自己用 rulesFor(spec) 造 ——
-      // 类实例过不了结构化克隆，传过去会变成没有方法的外壳。
-      w.postMessage({ job: 'grid', bars, spec: sp.spec, strategyId, baseParams: { ...strategy.params }, grids, objective, engineOpts, periodsPerYear: this.api.chart?.periodsPerYear || 252 });
+      // 内置策略传 id；自定义规则传可克隆的 JSON 文档，由 Worker 用同一编译器重建。
+      w.postMessage({ job: 'grid', bars, spec: sp.spec, strategyId: ruleDoc ? null : selectedStrategy, ruleDoc: ruleDoc || undefined, baseParams: { ...strategy.params }, grids, objective, engineOpts, periodsPerYear: this.api.chart?.periodsPerYear || 252 });
       return;
     }
     this.runOnMainThread({ bars, sp, strategy, grids, objective, engineOpts });
@@ -399,7 +429,7 @@ export class ResearchPanel {
     const row = (this.gridRows || [])[idx];
     const ctx = this.gridCtx;
     if (!row || !ctx) return;
-    const strategy = getStrategy(ctx.strategyId);
+    const strategy = ctx.strategy || this.strategyFromValue(ctx.selectedStrategy);
     const grids = Object.fromEntries(Object.entries(ctx.grids).map(([k, v]) => [k, v]));
     const nb = neighborhoodScore({
       bars: ctx.bars, spec: ctx.sp.spec, strategy, best: row.params, grids,
@@ -458,7 +488,7 @@ export class ResearchPanel {
       if (!runner.done()) setTimeout(step, 0);
       else {
         this.gridRows = runner.finish();
-        this.gridCtx = { bars, sp, strategyId: strategy.id, grids, objective, engineOpts };
+        this.gridCtx = { bars, sp, selectedStrategy: document.getElementById('rsStrategy')?.value || strategy.id, strategy, grids, objective, engineOpts };
         this.busy = ''; this.progress = null;
         this.render();
       }
@@ -500,8 +530,8 @@ export class ResearchPanel {
 
   tpeHtml() {
     const sid = document.getElementById('rsStrategy')?.value || 'donchianBreak';
-    const defText = JSON.stringify(DEFAULT_GRIDS[sid] || {});
-    const prev = this.tpeCtx && this.tpeCtx.strategyId === sid ? null : defText;
+    const defText = JSON.stringify(this.defaultGridFor(sid));
+    const prev = this.tpeCtx && this.tpeCtx.selectedStrategy === sid ? null : defText;
     const r = this.tpe;
     const rows = (r?.ranked || []).slice(0, 15).map((t, i) => `
       <tr>
@@ -558,7 +588,7 @@ export class ResearchPanel {
   runTpe() {
     const bars = this.bars;
     const sp = this.specFor(this.code);
-    const strategy = getStrategy(document.getElementById('rsStrategy')?.value || 'donchianBreak');
+    const strategy = this.strategyFromValue(document.getElementById('rsStrategy')?.value || 'donchianBreak');
     if (!bars || bars.length < 120 || !sp) { this.api.toast?.('先加载一个品种的数据（至少 120 根）'); return; }
     const { space, __error } = this.parseSpace(document.getElementById('rsTpeSpace')?.value || '');
     if (__error) { this.api.toast?.(__error); return; }
@@ -591,7 +621,7 @@ export class ResearchPanel {
         this.tpePlateau = plateauRecommendation(ranked.ranked.filter(t => !t.pruned), space, { k: 6 });
         this.tpePareto = paretoFront(ranked.ranked.filter(t => !t.pruned && t.metrics),
           { keys: ['sharpe'], minKeys: ['maxDDPct'] });
-        this.tpeCtx = { bars, strategyId: strategy.id, space };
+        this.tpeCtx = { bars, selectedStrategy: document.getElementById('rsStrategy')?.value || strategy.id, strategy, space };
         this.busy = ''; this.progress = null;
         this.render();
       }
@@ -713,7 +743,7 @@ export class ResearchPanel {
   // ---------------- Walk-Forward ----------------
   wfHtml() {
     const sid = document.getElementById('rsWfStrategy')?.value || 'donchianBreak';
-    const gridText = document.getElementById('rsWfGrid')?.value ?? JSON.stringify(DEFAULT_GRIDS[sid] || {});
+    const gridText = document.getElementById('rsWfGrid')?.value ?? JSON.stringify(this.defaultGridFor(sid));
     const v = (id, d) => document.getElementById(id)?.value ?? d;
     return `
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px;font-size:12px;">
@@ -762,7 +792,7 @@ export class ResearchPanel {
     const bars = this.bars;
     const sp = this.specFor(this.code);
     if (!sp || bars.length < 60) { this.api.toast?.('数据不足'); return; }
-    const strategy = getStrategy(document.getElementById('rsWfStrategy').value);
+    const strategy = this.strategyFromValue(document.getElementById('rsWfStrategy').value);
     const grids = parseGrid(document.getElementById('rsWfGrid').value);
     if (grids.__error) { this.api.toast?.(`参数网格有问题：${grids.__error}`); return; }
     if (!Object.keys(grids).length) { this.api.toast?.('网格是空的：写成 entry: 20,40,55 或 {"entry":[20,40,55]}'); return; }
@@ -793,7 +823,7 @@ export class ResearchPanel {
   portHtml() {
     const items = (this.api.watchlistItems?.() || []);
     const sid = document.getElementById('rsPortStrategy')?.value || 'donchianBreak';
-    const def = getStrategy(sid);
+    const def = this.strategyFromValue(sid) || getStrategy('donchianBreak');
     const list = items.length ? items : [];
     const mode = document.getElementById('rsPortMode')?.value || 'split';
     const v = (id, d) => document.getElementById(id)?.value ?? d;
@@ -818,7 +848,7 @@ export class ResearchPanel {
       </div>` : '';
     return `
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px;font-size:12px;">
-        ${this.strategySelect('rsPortStrategy')}
+        ${this.builtInStrategySelect('rsPortStrategy')}
         <label>核算方式<select id="rsPortMode" style="${INP}">
           <option value="split" ${mode === 'split' ? 'selected' : ''}>分仓独立（各花各的钱）</option>
           <option value="pool" ${mode === 'pool' ? 'selected' : ''}>共享保证金池（一个账户）</option>
@@ -1328,12 +1358,13 @@ export class ResearchPanel {
 
   cmpHtml() {
     const picks = this.cmpPicksSet();
-    const cards = STRATEGIES.map(s => {
-      const on = picks.has(s.id);
-      const params = Object.entries(s.params).slice(0, 4).map(([k, v]) => `${k}=${v}`).join(' ');
+    const cards = this.strategyOptions().map(s => {
+      const strategy = this.strategyFromValue(s.value);
+      const on = picks.has(s.value);
+      const params = Object.entries(strategy.params).slice(0, 4).map(([k, v]) => `${k}=${v}`).join(' ');
       return `<label data-cmpcard style="display:flex;gap:7px;align-items:flex-start;padding:7px 9px;border:1px solid ${on ? 'var(--accent-blue)' : 'var(--border-color)'};border-radius:5px;background:${on ? 'rgba(41,98,255,.08)' : 'var(--bg-tertiary)'};cursor:pointer;">
-        <input type="checkbox" data-cmpid="${esc(s.id)}" ${on ? 'checked' : ''} style="margin-top:2px;" />
-        <span style="min-width:0;"><span style="color:#fff;font-size:12px;">${esc(s.name)}</span>
+        <input type="checkbox" data-cmpid="${esc(s.value)}" ${on ? 'checked' : ''} style="margin-top:2px;" />
+        <span style="min-width:0;"><span style="color:#fff;font-size:12px;">${esc(s.label)}</span>
           <span style="display:block;font-size:10.5px;color:var(--text-muted);margin-top:1px;">默认 ${esc(params)}</span></span>
       </label>`;
     }).join('');
@@ -1466,7 +1497,12 @@ export class ResearchPanel {
     if (bars.length < 60) { this.api.toast?.('K 线不足 60 根，先同步一个品种'); return; }
     const sp = this.specFor(this.code);
     if (!sp) { this.api.toast?.('当前品种规格无法解析'); return; }
-    const entries = STRATEGIES.filter(s => this.cmpPicksSet().has(s.id)).map(s => s.id);
+    const entries = this.strategyOptions()
+      .filter(s => this.cmpPicksSet().has(s.value))
+      .map(s => {
+        const ruleDoc = this.ruleDocForValue(s.value);
+        return ruleDoc ? { id: s.value, ruleDoc } : s.value;
+      });
     if (entries.length < 2) { this.api.toast?.('至少勾选两个策略才能对比'); return; }
     const engineOpts = { ...this.engineOpts(), rules: sp.rules };
     this.busy = '策略对比计算中';
@@ -1496,9 +1532,10 @@ export class ResearchPanel {
   }
 
   useCompared(id) {
-    const st = getStrategy(id);
+    const entry = getRuleEntry(id);
+    const st = entry?.strategy || getStrategy(id);
     if (!st) return;
-    this.api.runBacktestWith?.(id, { ...st.params });
+    this.api.runBacktestWith?.(entry ? strategyValue(entry) : id, { ...st.params });
     this.api.toast?.(`已把「${st.name}」的默认参数交给回测面板`);
   }
 

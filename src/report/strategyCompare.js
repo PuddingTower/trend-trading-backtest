@@ -11,8 +11,8 @@
  * 纯函数、不碰 DOM：可离线单测，也能搬进 Worker。
  */
 
-import { getStrategy } from '../strategy/library.js';
 import { runOne } from './optimizer.js';
+import { resolveOptimizerStrategy } from './optimizeStrategy.js';
 import { buyHold } from '../core/backtestEngine.js';
 import { computeMetrics } from './metrics.js';
 
@@ -85,10 +85,11 @@ export function compareStrategies({
   const seen = new Set();
   const picked = [];
   for (const e of list) {
-    const strategy = getStrategy(e.id);
+    const strategy = resolveOptimizerStrategy(e);
     if (!strategy) return { error: `未知策略：${e.id}` };
-    if (seen.has(strategy.id)) return { error: `策略「${strategy.name}」被选了两次；重复对比只会得到两条一模一样的曲线` };
-    seen.add(strategy.id);
+    const identity = `${strategy.id}:${e.ruleDoc?.revision || 'builtin'}`;
+    if (seen.has(identity)) return { error: `策略「${strategy.name}」被选了两次；重复对比只会得到两条一模一样的曲线` };
+    seen.add(identity);
     picked.push({ strategy, params: { ...strategy.params, ...(e.params || {}) } });
   }
 
