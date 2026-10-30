@@ -1,4 +1,7 @@
 import { test, assert } from './harness.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { compileRule } from '../src/strategy/ruleStrategy.js';
 import { normalizeRule, ruleHash, validateRule } from '../src/strategy/ruleSchema.js';
 import { resolveOptimizerStrategy } from '../src/report/optimizeStrategy.js';
@@ -553,4 +556,20 @@ test('编译后的策略携带规则格式版本和内容哈希', () => {
 test('超过体积上限的规则文本不进入 JSON 解析', () => {
   const result = parseRuleJson('[' + '1'.repeat(300_000) + ']');
   assert.eq(result.errors[0].code, 'RULE_FILE_TOO_LARGE');
+});
+
+test('内置示例规则全部可规范化并编译', () => {
+  const root = path.dirname(fileURLToPath(import.meta.url));
+  const dir = path.join(root, '..', 'examples', 'strategies');
+  const files = fs.readdirSync(dir).filter((file) => file.endsWith('.rule.json')).sort();
+  assert.ok(files.includes('blank.rule.json'));
+  assert.ok(files.includes('ma_cross_json.rule.json'));
+  assert.ok(files.includes('donchian_breakout.rule.json'));
+  assert.ok(files.includes('rsi_filter.rule.json'));
+
+  for (const file of files) {
+    const parsed = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8'));
+    assert.eq(validateRule(parsed).length, 0, `${file} 校验失败：${JSON.stringify(validateRule(parsed))}`);
+    compileRule(parsed);
+  }
 });

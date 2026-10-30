@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "kind": "rules",
+  "id": "donchian_breakout_v1",
+  "name": "JSON 唐奇安突破示例",
+  "description": "收盘突破前 20 根高点做多，跌破前 10 根低点平仓；入场时按 2 倍 ATR 挂初始止损。",
+  "revision": 1,
+  "parameters": {
+    "entry": {
+      "type": "integer",
+      "default": 20,
+      "min": 2,
+      "max": 250,
+      "label": "入场回看",
+      "description": "突破判定使用上一根为止的 N 根最高价"
+    },
+    "exit": {
+      "type": "integer",
+      "default": 10,
+      "min": 2,
+      "max": 250,
+      "label": "出场回看",
+      "description": "退出判定使用上一根为止的 N 根最低价"
+    },
+    "atrLen": {
+      "type": "integer",
+      "default": 14,
+      "min": 2,
+      "max": 100,
+      "label": "ATR 周期"
+    },
+    "stopAtr": {
+      "type": "number",
+      "default": 2,
+      "min": 0,
+      "max": 10,
+      "label": "初始止损 ATR 倍"
+    }
+  },
+  "requires": {
+    "fields": ["open", "high", "low", "close", "volume"]
+  },
+  "series": {
+    "entryHigh": {
+      "op": "priorHigh",
+      "source": { "field": "high" },
+      "period": { "param": "entry" }
+    },
+    "exitLow": {
+      "op": "priorLow",
+      "source": { "field": "low" },
+      "period": { "param": "exit" }
+    },
+    "range": {
+      "op": "atr",
+      "period": { "param": "atrLen" }
+    }
+  },
+  "rules": [
+    {
+      "when": {
+        "op": "greaterThan",
+        "left": { "field": "close" },
+        "right": { "series": "entryHigh" }
+      },
+      "do": {
+        "action": "long",
+        "reason": "突破入场通道",
+        "risk": {
+          "stop": {
+            "op": "subtract",
+            "left": { "field": "close" },
+            "right": {
+              "op": "multiply",
+              "left": { "series": "range" },
+              "right": { "param": "stopAtr" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "when": {
+        "op": "lessThan",
+        "left": { "field": "close" },
+        "right": { "series": "exitLow" }
+      },
+      "do": {
+        "action": "close",
+        "reason": "跌破出场通道"
+      }
+    }
+  ]
+}

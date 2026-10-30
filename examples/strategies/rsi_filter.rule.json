@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "kind": "rules",
+  "id": "rsi_filter_v1",
+  "name": "JSON RSI 过滤示例",
+  "description": "RSI 低于超卖线做多，回升至 50 以上平仓；只演示动作与风控语义。",
+  "revision": 1,
+  "parameters": {
+    "period": {
+      "type": "integer",
+      "default": 14,
+      "min": 2,
+      "max": 100,
+      "label": "RSI 周期"
+    },
+    "oversold": {
+      "type": "number",
+      "default": 30,
+      "min": 0,
+      "max": 50,
+      "label": "超卖线"
+    }
+  },
+  "requires": {
+    "fields": ["open", "high", "low", "close", "volume"]
+  },
+  "series": {
+    "strength": {
+      "op": "rsi",
+      "source": { "field": "close" },
+      "period": { "param": "period" }
+    }
+  },
+  "rules": [
+    {
+      "when": {
+        "op": "lessThan",
+        "left": { "series": "strength" },
+        "right": { "param": "oversold" }
+      },
+      "do": {
+        "action": "long",
+        "reason": "RSI 进入超卖区",
+        "risk": {
+          "stop": {
+            "op": "subtract",
+            "left": { "field": "close" },
+            "right": { "const": 5 }
+          }
+        }
+      }
+    },
+    {
+      "when": {
+        "op": "greaterThan",
+        "left": { "series": "strength" },
+        "right": { "const": 50 }
+      },
+      "do": {
+        "action": "close",
+        "reason": "RSI 回到中轴上方"
+      }
+    }
+  ]
+}

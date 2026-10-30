@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "kind": "rules",
+  "id": "blank_template",
+  "name": "策略规则模板",
+  "description": "空白模板：替换 id、参数、序列和规则后即可导入。",
+  "revision": 1,
+  "parameters": {
+    "threshold": {
+      "type": "number",
+      "default": 0,
+      "min": -1000000,
+      "max": 1000000,
+      "label": "阈值",
+      "description": "示例参数，替换成策略自己的参数"
+    }
+  },
+  "requires": {
+    "fields": ["open", "high", "low", "close", "volume"]
+  },
+  "series": {
+    "exampleMa": {
+      "op": "sma",
+      "source": { "field": "close" },
+      "period": { "const": 20 }
+    }
+  },
+  "rules": [
+    {
+      "when": {
+        "op": "greaterThan",
+        "left": { "field": "close" },
+        "right": { "param": "threshold" }
+      },
+      "do": {
+        "action": "noop",
+        "reason": "模板默认不产生操作"
+      }
+    }
+  ]
+}
