@@ -7,7 +7,10 @@
 
 import { STRATEGIES } from '../strategy/library.js';
 import { BacktestEngine } from '../core/backtestEngine.js';
+import { addRule, getRuleEntry, listRuleEntries, parseRuleJson, resolveStrategyValue, strategyValue } from '../strategy/ruleRegistry.js';
+import { normalizeRule } from '../strategy/ruleSchema.js';
 import { computeMetrics, benchmarkCompare } from '../report/metrics.js';
+import { downloadText } from '../data/csvIO.js';
 import { resolveTradeSpec } from '../markets/instrumentSpec.js';
 import { rulesFor } from '../markets/marketRules.js';
 import { annotateGaps, checkAdjustmentContinuity, checkRolloverGaps, checkPriceValidity, repairAdjustmentGaps } from '../markets/dataQuality.js';
@@ -98,14 +101,34 @@ export class BacktestPanel {
     };
   }
 
+  currentStrategy(value = this.root.querySelector('#btStrategy')?.value) {
+    const custom = resolveStrategyValue(value || '');
+    if (custom) return custom;
+    return STRATEGIES.find(s => s.id === value) || STRATEGIES[0];
+  }
+
+  strategyOptions(value) {
+    const builtIn = STRATEGIES.map(s => ({ value: s.id, label: s.name, title: STRATEGY_DESC[s.id] || '' }));
+    const custom = listRuleEntries().map(entry => ({
+      value: strategyValue(entry),
+      label: `${entry.name}（自定义 r${entry.revision}）`,
+      title: entry.doc.description || '导入的 JSON 策略规则'
+    }));
+    return [...builtIn, ...custom].map(option =>
+      `<option value="${esc(option.value)}" title="${esc(option.title)}" ${option.value === value ? 'selected' : ''}>${esc(option.label)}</option>`
+    ).join('');
+  }
+
   render() {
     const stratId = this.root.querySelector('#btStrategy')?.value;
-    const st = STRATEGIES.find(s => s.id === stratId) || STRATEGIES[0];
+    const st = this.currentStrategy(stratId);
+    const selectedValue = STRATEGIES.some(s => s.id === stratId) || listRuleEntries().some(e => strategyValue(e) === stratId)
+      ? stratId : st.id;
     this.root.innerHTML = `
       <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; padding:8px 4px;">
         <label style="font-size:11px; color:var(--text-muted);">策略
           <select id="btStrategy" class="form-input" style="width:auto;">
-            ${STRATEGIES.map(s => `<option value="${s.id}" title="${esc(STRATEGY_DESC[s.id] || '')}" ${s.id === st.id ? 'selected' : ''}>${s.name}</option>`).join('')}
+            ${this.strategyOptions(selectedValue)}
           </select>
         </label>
         <label style="font-size:11px; color:var(--text-muted);">区间
@@ -152,6 +175,9 @@ export class BacktestPanel {
           title="单根 K 线最多吃掉的成交量占比；手数超过即被砍到上限。期货按手数、A股按股数自动换算">参与率%
           <input id="btImpactPart" class="form-input" type="number" value="10" min="1" max="100" style="width:48px;" /></label>
         <button class="btn btn-primary btn-sm" id="btRun">▶ 运行回测</button>
+        <button class="btn btn-sm" id="btImportRule" title="导入策略规则 v1 JSON；校验通过后才可选择">导入规则</button>
+        <button class="btn btn-sm" id="btExportRule" title="导出当前内置策略参数或自定义 JSON 规则">导出规则</button>
+        <input id="btRuleFile" type="file" accept=".json,application/json" hidden />
         <button class="btn btn-sm" id="btCheck" title="只体检数据不跑策略：停牌缺口、复权断崖、换月跳空">🩺 数据体检</button>
         <button class="btn btn-sm" id="btStress" title="把当前策略原样投放到 2015 股灾、2016 双十一夜盘、2020 疫情缺口、2024 微盘踩踏等历史极端窗口重放">🧨 压力测试</button>
         <label style="font-size:11px; color:var(--text-muted); display:flex; align-items:center; gap:4px;"
@@ -186,6 +212,9 @@ export class BacktestPanel {
       this.chart.backtestMarkers = null; this.chart.requestRender();
     });
     this.root.querySelector('#btStress').addEventListener('click', () => this.runStress());
+    this.root.querySelector('#btImportRule').addEventListener('click', () => this.root.querySelector('#btRuleFile').click());
+    this.root.querySelector('#btRuleFile').addEventListener('change', (e) => this.importRuleFile(e.target.files?.[0]));
+    this.root.querySelector('#btExportRule').addEventListener('click', () => this.exportCurrentRule());
   }
 
   /**
@@ -247,41 +276,102 @@ export class BacktestPanel {
   }
 
   renderParams() {
-    const st = STRATEGIES.find(s => s.id === this.root.querySelector('#btStrategy').value);
+    const st = this.currentStrategy();
     const box = this.root.querySelector('#btParams');
-    const inputs = Object.entries(st.params).map(([k, v]) => {
-      const isBool = typeof v === 'boolean';
-      const options = PARAM_OPTIONS[k];
-      const input = isBool
-        ? `<input data-p="${k}" data-t="bool" type="checkbox" ${v ? 'checked' : ''} style="width:auto;" />`
-        : options
-          ? `<select data-p="${k}" data-t="str" class="form-input" style="width:118px;">`
-            + options.map(([val, label]) => `<option value="${esc(val)}" ${v === val ? 'selected' : ''}>${esc(label)}</option>`).join('')
-            + '</select>'
-          : typeof v === 'string'
-            ? `<input data-p="${k}" data-t="str" value="${esc(v)}" class="form-input" style="width:80px;" />`
-            : `<input data-p="${k}" data-t="num" type="number" value="${v}" step="${Math.abs(v) < 1 ? 0.05 : 1}" class="form-input" style="width:68px;" />`;
-      const hint = PARAM_HINTS[k] ? ` title="${esc(PARAM_HINTS[k])}"` : '';
-      return `<label style="font-size:11px; color:var(--text-muted); display:flex; align-items:center; gap:4px;"${hint}>${esc(paramLabel(k))} ${input}</label>`;
-    }).join('');
+    const inputs = st.parameters
+      ? Object.entries(st.parameters).map(([k, definition]) => {
+          const value = st.params[k];
+          const options = definition.enum || (k === 'mode' ? PARAM_OPTIONS.mode : null);
+          const label = definition.label || paramLabel(k);
+          const hint = definition.description || PARAM_HINTS[k] || '';
+          const input = options
+            ? `<select data-p="${k}" data-t="str" class="form-input" style="width:118px;">`
+              + options.map(([val, optionLabel]) => `<option value="${esc(val)}" ${value === val ? 'selected' : ''}>${esc(optionLabel)}</option>`).join('')
+              + '</select>'
+            : definition.type === 'boolean'
+              ? `<input data-p="${k}" data-t="bool" type="checkbox" ${value ? 'checked' : ''} style="width:auto;" />`
+              : definition.type === 'integer' || definition.type === 'number'
+                ? `<input data-p="${k}" data-t="num" type="number" value="${value}" min="${definition.min ?? ''}" max="${definition.max ?? ''}" step="${definition.step ?? (definition.type === 'integer' ? 1 : 0.05)}" class="form-input" style="width:78px;" />`
+                : `<input data-p="${k}" data-t="str" value="${esc(value)}" class="form-input" style="width:90px;" />`;
+          return `<label style="font-size:11px; color:var(--text-muted); display:flex; align-items:center; gap:4px;"${hint ? ` title="${esc(hint)}"` : ''}>${esc(label)} ${input}</label>`;
+        }).join('')
+      : Object.entries(st.params).map(([k, v]) => {
+          const isBool = typeof v === 'boolean';
+          const options = PARAM_OPTIONS[k];
+          const input = isBool
+            ? `<input data-p="${k}" data-t="bool" type="checkbox" ${v ? 'checked' : ''} style="width:auto;" />`
+            : options
+              ? `<select data-p="${k}" data-t="str" class="form-input" style="width:118px;">`
+                + options.map(([val, label]) => `<option value="${esc(val)}" ${v === val ? 'selected' : ''}>${esc(label)}</option>`).join('')
+                + '</select>'
+              : typeof v === 'string'
+                ? `<input data-p="${k}" data-t="str" value="${esc(v)}" class="form-input" style="width:80px;" />`
+                : `<input data-p="${k}" data-t="num" type="number" value="${v}" step="${Math.abs(v) < 1 ? 0.05 : 1}" class="form-input" style="width:68px;" />`;
+          const hint = PARAM_HINTS[k] ? ` title="${esc(PARAM_HINTS[k])}"` : '';
+          return `<label style="font-size:11px; color:var(--text-muted); display:flex; align-items:center; gap:4px;"${hint}>${esc(paramLabel(k))} ${input}</label>`;
+        }).join('');
+    const description = st.description || STRATEGY_DESC[st.id] || '';
     box.innerHTML = `
       <div style="flex-basis:100%; font-size:11px; color:var(--text-muted);">
-        ${esc(STRATEGY_DESC[st.id] || '')}
+        ${esc(description)}
         <span style="opacity:.7;">参数名后括号是单位；改完点「运行回测」即可。</span>
       </div>
       ${inputs}
-      <button class="btn btn-sm" id="btResetParams" style="font-size:11px;" title="把当前策略的参数恢复为策略库默认值">恢复默认</button>`;
+      <button class="btn btn-sm" id="btResetParams" style="font-size:11px;" title="把当前策略的参数恢复为策略定义默认值">恢复默认</button>`;
     box.querySelector('#btResetParams')?.addEventListener('click', () => this.renderParams());
   }
 
   collectParams() {
-    const st = STRATEGIES.find(s => s.id === this.root.querySelector('#btStrategy').value);
+    const st = this.currentStrategy();
     const out = {};
     this.root.querySelectorAll('#btParams [data-p]').forEach(el => {
       const t = el.getAttribute('data-t'), k = el.getAttribute('data-p');
       out[k] = t === 'bool' ? el.checked : t === 'num' ? Number(el.value) : el.value;
     });
     return { def: st, id: st.id, params: out };
+  }
+
+  showRuleErrors(errors) {
+    const out = this.root.querySelector('#btOut');
+    out.innerHTML = `<div style="color:var(--up-color); font-weight:700; padding:4px 0;">策略规则校验失败</div>
+      <ol style="margin:0; padding-left:20px;">${errors.map(e =>
+        `<li><b>${esc(e.code)}</b> · <code>${esc(e.path)}</code> · ${esc(e.message)}</li>`).join('')}</ol>`;
+  }
+
+  importRuleFile(file) {
+    if (!file) return;
+    const currentOut = () => this.root.querySelector('#btOut');
+    const reader = new FileReader();
+    reader.onload = () => {
+      const parsed = parseRuleJson(String(reader.result));
+      if (parsed.errors) {
+        this.showRuleErrors(parsed.errors);
+        return;
+      }
+      try {
+        const entry = addRule(parsed.document);
+        this.render();
+        const select = this.root.querySelector('#btStrategy');
+        select.value = strategyValue(entry);
+        this.renderParams();
+        currentOut().innerHTML = `<span style="color:var(--data-up-text);">已导入 ${esc(entry.name)}（revision ${entry.revision}）。</span>`;
+      } catch (e) {
+        currentOut().innerHTML = `<span style="color:var(--up-color);">导入失败：${esc(e.message)}</span>`;
+      }
+    };
+    reader.onerror = () => { currentOut().innerHTML = `<span style="color:var(--up-color);">无法读取规则文件。</span>`; };
+    reader.readAsText(file);
+    file.value = '';
+  }
+
+  exportCurrentRule() {
+    const value = this.root.querySelector('#btStrategy').value;
+    const entry = value.startsWith('custom:') ? getRuleEntry(value.slice('custom:'.length)) : null;
+    const collected = this.collectParams();
+    const doc = entry
+      ? normalizeRule(entry.doc)
+      : normalizeRule({ schemaVersion: 1, kind: 'builtin', id: collected.id, revision: 1, params: collected.params });
+    downloadText(`${doc.id}.rule.json`, JSON.stringify(doc, null, 2), 'application/json;charset=utf-8');
   }
 
   /**

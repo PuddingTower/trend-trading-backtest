@@ -120,7 +120,9 @@ export function compileRule(rule) {
   return {
     id: rule.id,
     name: rule.name,
+    description: rule.description || '',
     params: defaultParams(rule.parameters),
+    parameters: rule.parameters || {},
     signals(bars, overrides = {}) {
       const params = { ...this.params, ...overrides };
       const series = buildSeries(rule.series, bars, params);

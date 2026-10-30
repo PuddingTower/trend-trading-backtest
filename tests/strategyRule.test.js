@@ -1,6 +1,7 @@
 import { test, assert } from './harness.js';
 import { compileRule } from '../src/strategy/ruleStrategy.js';
 import { normalizeRule, validateRule } from '../src/strategy/ruleSchema.js';
+import { addRule, getRuleEntry, listRuleEntries, parseRuleJson, resolveStrategyValue, strategyValue } from '../src/strategy/ruleRegistry.js';
 
 const mk = (date, close) => ({ date, open: close, high: close, low: close, close, volume: 100 });
 
@@ -379,4 +380,43 @@ test('动作可输出初始止损和止盈绝对价格', () => {
   };
   const signals = compileRule(rule).signals([mk('2024-01-01', 100)]);
   assert.deep(signals, [{ i: 0, dir: 1, reason: '进场', stop: 95, target: 110 }]);
+});
+
+test('规则注册表可解析 JSON、校验并编译导入规则', () => {
+  const rule = {
+    schemaVersion: 1,
+    kind: 'rules',
+    id: 'registered_demo',
+    name: '已注册规则',
+    revision: 1,
+    parameters: {},
+    requires: { fields: ['open', 'high', 'low', 'close', 'volume'] },
+    series: {},
+    rules: [{ when: { op: 'greaterThan', left: { const: 2 }, right: { const: 1 } }, do: { action: 'long' } }]
+  };
+  const entry = addRule(rule);
+
+  assert.eq(entry.id, 'registered_demo');
+  assert.eq(entry.doc.name, '已注册规则');
+  assert.eq(listRuleEntries().some((item) => item.id === entry.id), true);
+  assert.eq(getRuleEntry(entry.id).strategy.signals([mk('2024-01-01', 100)])[0].dir, 1);
+  assert.eq(parseRuleJson('{"schemaVersion":1,"kind":"unknown"}').errors[0].code, 'UNSUPPORTED_KIND');
+});
+
+test('自定义规则选项值可与内置策略 ID 隔离解析', () => {
+  const rule = {
+    schemaVersion: 1,
+    kind: 'rules',
+    id: 'option_demo',
+    name: '选项规则',
+    revision: 1,
+    parameters: {},
+    requires: { fields: ['open', 'high', 'low', 'close', 'volume'] },
+    series: {},
+    rules: [{ when: { op: 'greaterThan', left: { const: 2 }, right: { const: 1 } }, do: { action: 'noop' } }]
+  };
+  const entry = addRule(rule);
+  assert.eq(strategyValue(entry), 'custom:option_demo');
+  assert.eq(resolveStrategyValue('custom:option_demo').id, 'option_demo');
+  assert.eq(resolveStrategyValue('maCross'), null);
 });
