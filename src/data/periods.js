@@ -1,7 +1,7 @@
 /**
  * 周期口径的唯一入口。
  *
- * 为什么单独一个文件：主图取数（futures_replay_trader.html）和自选池批量拉取
+ * 为什么单独一个文件：主图取数（src/app/replayApp.js）和自选池批量拉取
  * （ui/watchlistPanel.js）以前各自调 fetchBars，于是新增一个周期就要记得改两处。
  * 上一版就是这么坏的 —— 4小时 直接发给 fetchBars 会被 `KLTL[period] || '101'`
  * 静默兜成**日线**，再按 4h 的缓存键存进去，组合回测拿到的是日线却标着 4 小时。

@@ -3,11 +3,12 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-<title>趋势交易回测系统 · 期货 + A股 双市场复盘</title>
-<meta name="description" content="纯本地的双市场 K 线复盘与策略回测学习工具。手动复盘与自动回测共用同一套撮合、规则与成本逻辑。在线打开即用真实行情，免 Token、无后端。" />
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
+<title>烛台簿 · 期货与 A股复盘</title>
+<meta name="description" content="烛台簿：期货与 A股 分成两个独立工作台，各用各的交易规则；手动复盘与自动回测共用同一套撮合内核。在线打开即用真实行情，免 Token、无后端。" />
 <meta name="theme-color" content="#f4efe4" />
-<meta property="og:title" content="趋势交易回测系统 · 一份成交逻辑，两种驱动" />
-<meta property="og:description" content="期货 + A股 双市场 K 线复盘与策略回测。在线即用真实行情，手动与自动跑在同一套引擎上。" />
+<meta property="og:title" content="烛台簿 · 两个工作台，一套成交逻辑" />
+<meta property="og:description" content="期货与 A股 分开复盘：期货 T+0 双向、保证金与逐日盯市；A股 T+1 仅做多、整手与印花税。内核共用一套撮合。" />
 <meta property="og:type" content="website" />
 <link rel="canonical" href="https://puddingtower.github.io/trend-trading-backtest/" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -379,6 +380,28 @@
     padding: 10px 16px; border-radius: 8px; z-index: 100;
   }
   .skip:focus { left: 12px; }
+
+  /* ---- Two workbenches ---- */
+  .desks { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 780px) { .desks { grid-template-columns: 1fr; } }
+  .desk-card {
+    position: relative; display: flex; flex-direction: column; gap: 14px;
+    padding: 28px 26px 22px; background: var(--paper-2); border: 1px solid var(--rule);
+    border-radius: var(--rad); text-decoration: none; color: var(--ink);
+    box-shadow: var(--shadow); overflow: hidden;
+    transition: transform .16s cubic-bezier(.2,.7,.3,1), border-color .16s, box-shadow .16s;
+  }
+  .desk-card::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 4px; background: var(--teal); }
+  .desk-card.ashare::before { background: var(--brass); }
+  .desk-card:hover { transform: translateY(-2px); border-color: var(--rule-strong); box-shadow: 0 2px 4px rgba(29,27,22,.07), 0 20px 44px -22px rgba(29,27,22,.42); }
+  .desk-card .kicker { font-family: var(--font-mono); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-faint); }
+  .desk-card h3 { margin: 0; font-family: var(--font-display); font-size: 27px; letter-spacing: -.02em; }
+  .desk-card p { margin: 0; color: var(--ink-soft); font-size: 15px; line-height: 1.65; }
+  .desk-card ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 7px; font-size: 14px; color: var(--ink-soft); }
+  .desk-card li b { color: var(--ink); }
+  .desk-card .go { margin-top: auto; padding-top: 6px; display: inline-flex; align-items: center; gap: 8px; font-weight: 600; color: var(--teal-ink); font-size: 15px; }
+  .desk-card.ashare .go { color: var(--brass); }
+  @media (prefers-reduced-motion: reduce) { .desk-card { transition: none; } .desk-card:hover { transform: none; } }
 </style>
 </head>
 <body>
@@ -386,12 +409,13 @@
 
 <header class="topbar">
   <div class="wrap topbar-inner">
-    <a class="brand" href="#top" aria-label="趋势交易回测系统 首页">
+    <a class="brand" href="#top" aria-label="烛台簿 首页">
       <span class="mark-bolt" aria-hidden="true">⚡</span>
-      <b>TREND&nbsp;REPLAY</b>
-      <small>期货 + A股</small>
+      <b>CANDLE&nbsp;LEDGER</b>
+      <small>烛台簿 · 期货 / A股</small>
     </a>
     <nav class="topnav" aria-label="页面导航">
+      <a href="#desks">两个工作台</a>
       <a href="#engine">成交逻辑</a>
       <a href="#online">在线版</a>
       <a href="#capabilities">能力台账</a>
@@ -399,7 +423,7 @@
       <a href="#calculators">计算器</a>
       <a href="#start">上手</a>
     </nav>
-    <a class="btn sm" href="futures_replay_trader.html">打开终端 <span class="arrow" aria-hidden="true">→</span></a>
+    <a class="btn sm" href="#desks">选择工作台 <span class="arrow" aria-hidden="true">→</span></a>
   </div>
 </header>
 
@@ -410,7 +434,7 @@
     <div class="desk-inner">
       <div class="wrap desk-top">
         <span class="dot" aria-hidden="true"></span>
-        <span class="sym">EG0 乙二醇主连 · 日线</span>
+        <span class="sym">期货示例 · EG0 乙二醇主连 · 日线</span>
         <span class="spacer"></span>
         <span class="tag">示例数据 · 可拖动回放</span>
       </div>
@@ -418,9 +442,10 @@
       <div class="wrap">
         <div class="desk-head">
           <h1 id="hero-title">把历史，<span class="mark">一格一格</span>按回去。</h1>
-          <p class="lede">期货 + A股 双市场 K 线复盘与策略回测。手动复盘和自动回测跑在同一套撮合、规则与成本之上 —— 一份成交逻辑，两种驱动。</p>
+          <p class="lede">期货和 A股 分成两个独立工作台：期货 T+0 双向、保证金与逐日盯市；A股 T+1 仅做多、100 股整手、佣金与印花税。两个台子共用同一套撮合与成本内核 —— 界面分开，口径不分裂。</p>
           <div class="hero-actions">
-            <a class="btn on-dark" href="futures_replay_trader.html">打开回测终端 <span class="arrow" aria-hidden="true">→</span></a>
+            <a class="btn on-dark" href="futures.html">进入期货工作台 <span class="arrow" aria-hidden="true">→</span></a>
+            <a class="btn on-dark-ghost" href="ashare.html">进入 A股工作台 <span class="arrow" aria-hidden="true">→</span></a>
             <a class="btn on-dark-ghost" href="https://github.com/PuddingTower/trend-trading-backtest" rel="noopener">在 GitHub 查看源码</a>
           </div>
           <ul class="chips" aria-label="产品要点">
@@ -450,6 +475,45 @@
           <span id="ledgerText">—</span>
           <span class="same" id="sameFill" title="两条驱动调用同一撮合器，成交价一致">成交价相同</span>
         </div>
+      </div>
+    </div>
+  </section>
+
+
+  <section id="desks" aria-labelledby="desks-title">
+    <div class="wrap">
+      <div class="section-head">
+        <h2 id="desks-title">两个工作台，各用各的规则</h2>
+        <p class="section-note">
+          期货和 A股 不是同一张表换几个默认值。杠杆、方向、交收、板幅、税费都不同，挤在一个账户里只会让回测口径失真。
+          所以从入口就分开：每个台子只显示本市场的品种与参数，跨市场代码会被明确拦下。
+        </p>
+      </div>
+      <div class="desks">
+        <a class="desk-card futures" href="futures.html">
+          <span class="kicker">Workbench 01 · 期货</span>
+          <h3>期货复盘台</h3>
+          <p>保证金、杠杆、逐日盯市与强平规则按合约规格自动带入；主连拼接与具体月份合约的区别会在取数时讲清楚。</p>
+          <ul>
+            <li><b>T+0 双向</b> · 多空都可开，平今费单独计</li>
+            <li><b>保证金交易</b> · 每手占用、隐含杠杆、维持线价位</li>
+            <li><b>逐日盯市</b> · 权益跌破维持线按规则强平</li>
+            <li><b>期货主连</b> · 工业品 / 农产品 / 贵金属 / 股指</li>
+          </ul>
+          <span class="go">进入期货工作台 <span aria-hidden="true">→</span></span>
+        </a>
+        <a class="desk-card ashare" href="ashare.html">
+          <span class="kicker">Workbench 02 · A股</span>
+          <h3>A股复盘台</h3>
+          <p>没有杠杆、没有做空、没有强平。买入按 100 股整手，卖出才收印花税，涨停封板买不进、跌停封板卖不出。</p>
+          <ul>
+            <li><b>T+1 仅做多</b> · 当日买入不能当日卖出</li>
+            <li><b>全额资金</b> · 1 手 = 100 股，无保证金</li>
+            <li><b>真实税费</b> · 佣金最低 5 元 + 卖出印花税 0.05%</li>
+            <li><b>复权口径</b> · 默认后复权，前复权负价如实提示</li>
+          </ul>
+          <span class="go">进入 A股工作台 <span aria-hidden="true">→</span></span>
+        </a>
       </div>
     </div>
   </section>
@@ -513,7 +577,7 @@
             <tr><th scope="col">能力</th><th scope="col">在线（GitHub Pages）</th><th scope="col">本地（python start.py）</th></tr>
           </thead>
           <tbody>
-            <tr><td class="cap"><b>真实行情 · 周期 · 复权</b><span>期货 + A股，浏览器直连东财</span></td><td class="ok">✓</td><td class="ok">✓ 另走 /api/kline 代理</td></tr>
+            <tr><td class="cap"><b>真实行情 · 周期 · 复权</b><span>期货与 A股 分台取数，浏览器直连东财</span></td><td class="ok">✓</td><td class="ok">✓ 另走 /api/kline 代理</td></tr>
             <tr><td class="cap"><b>手动复盘 · 画线 · 成交标记</b><span>逐根推进、盲测、测量尺、盈亏比</span></td><td class="ok">✓</td><td class="ok">✓</td></tr>
             <tr><td class="cap"><b>叠加指标</b><span>VP / Supertrend / Pivot / 形态 / 供需区</span></td><td class="ok">✓ 纯前端</td><td class="ok">✓</td></tr>
             <tr><td class="cap"><b>条件单</b><span>止损 / 止盈 / 移动止损 / 括号 / 部分平仓 / 加仓</span></td><td class="ok">✓ 与回测共用</td><td class="ok">✓</td></tr>
@@ -547,14 +611,14 @@
             <tr><th scope="col">环节</th><th scope="col">能力</th><th scope="col">说明</th></tr>
           </thead>
           <tbody>
-            <tr><td class="stage">数据</td><td class="cap"><b>期货 + A股真实行情</b></td><td>多周期（日/周/月/60m）与复权；代码-名称检索与交叉校验。</td></tr>
+            <tr><td class="stage">数据</td><td class="cap"><b>期货 / A股 分台真实行情</b></td><td>多周期（日/周/月/60m）与复权；代码-名称检索与交叉校验。</td></tr>
             <tr><td class="stage">数据</td><td class="cap"><b>数据质量校验</b></td><td>停牌缺口标注、复权连续性校验、当日无负债结算。</td></tr>
             <tr><td class="stage">复盘</td><td class="cap"><b>逐根推进 / 盲测复盘</b></td><td>隐藏未来行情，从历史起点一根一根验证你的系统。</td></tr>
             <tr><td class="stage">复盘</td><td class="cap"><b>画线与测量</b></td><td>水平线 / 趋势线 / 射线 / 测量尺 / 盈亏比工具 / 磁吸高低点。</td></tr>
             <tr><td class="stage">复盘</td><td class="cap"><b>成交标记与连线</b></td><td>多空平仓连线自动绘制轨迹与盈亏幅度框。</td></tr>
             <tr><td class="stage">复盘</td><td class="cap"><b>叠加指标</b></td><td>成交量分布 VP、Supertrend、Pivot 关键位、形态、供需区。</td></tr>
             <tr><td class="stage">执行</td><td class="cap"><b>条件单全家桶</b></td><td>止损 / 止盈 / 移动止损 / 括号单 / 部分平仓 / 金字塔加仓。</td></tr>
-            <tr><td class="stage">执行</td><td class="cap"><b>真实约束</b></td><td>强制逐日盯市与真实强平；涨跌停、流动性、保证金拒单口径。</td></tr>
+            <tr><td class="stage">执行</td><td class="cap"><b>真实约束</b></td><td>期货：逐日盯市与强平；A股：T+1、整手、涨跌停封板与印花税。</td></tr>
             <tr><td class="stage">回测</td><td class="cap"><b>9 个内置策略</b></td><td>同一个规则/成本引擎，支持保本止损与时间止损。</td></tr>
             <tr><td class="stage">研究</td><td class="cap"><b>参数寻优与稳健度</b></td><td>邻域稳健度、参数矩阵热图；Worker 不可用时自动退回主线程分块。</td></tr>
             <tr><td class="stage">研究</td><td class="cap"><b>Walk-Forward</b></td><td>效率比与参数漂移，检验过拟合。</td></tr>
@@ -576,9 +640,9 @@
   <section id="calculators" aria-labelledby="calc-title">
     <div class="wrap">
       <div class="section-head">
-        <h2 id="calc-title">先算清楚，再下单</h2>
+        <h2 id="calc-title">先算清楚，再下单（期货口径）</h2>
         <p class="section-note">
-          两个能直接用的计算器，公式与 <span class="mono">src/core</span> 里的实现一致。改数字即可看到结果。
+          两个期货口径的计算器，公式与 <span class="mono">src/core</span> 里的实现一致。A股 工作台里按 100 股/手、全额资金与佣金/印花税自动计算，不需要在这里换乘数。
         </p>
       </div>
 
@@ -657,7 +721,7 @@
             <tbody>
               <tr><td>推进下一根 K 线</td><td><kbd>Space</kbd> / <kbd>F</kbd></td></tr>
               <tr><td>买入开多</td><td><kbd>B</kbd></td></tr>
-              <tr><td>卖出开空</td><td><kbd>S</kbd></td></tr>
+              <tr><td>卖出开空（仅期货）</td><td><kbd>S</kbd></td></tr>
               <tr><td>一键平仓</td><td><kbd>C</kbd></td></tr>
               <tr><td>水平线 / 趋势线 / 射线</td><td><kbd>W</kbd> / <kbd>E</kbd> / <kbd>Q</kbd></td></tr>
               <tr><td>测量尺 / 盈亏比</td><td><kbd>D</kbd> / <kbd>R</kbd></td></tr>
@@ -694,8 +758,12 @@
         <div class="a">因为回测最容易骗人的地方，就是回测引擎和手工操作是两套代码。这里手动按键和策略信号都调用同一个撮合器，滑点、成本、涨跌停、保证金、结算完全一致，回测才可信。</div>
       </details>
       <details>
+        <summary>为什么把期货和 A股 分成两个工作台？</summary>
+        <div class="a">因为两者连“能不能卖”都不一样：期货 T+0 双向、有保证金和强平；A股 T+1、仅做多、整手、有涨跌停和印花税。放在同一张下单表里，要么给 A股 配上不存在的杠杆，要么把期货的强平规则套到股票上 —— 两种都会静默算错。现在入口分开，每个台子只认自己的规则；共用的是撮合、成本与研究内核。</div>
+      </details>
+      <details>
         <summary>支持哪些品种和周期？</summary>
-        <div class="a">期货主连（工业品、农产品、贵金属、股指）与 A股 / ETF / 指数；周期覆盖日线、周线、月线与 60 分钟，A股支持复权口径。</div>
+        <div class="a">期货工作台：主连（工业品、农产品、贵金属、股指），T+0 双向。A股工作台：A股 / ETF / 指数，T+1 仅做多。周期覆盖日线、周线、月线与 60 分钟；A股支持前/后复权，期货用主连拼接。</div>
       </details>
     </div>
   </section>
@@ -710,7 +778,7 @@
       <a href="trendline_algorithms.html">划线算法科普</a>
       <span class="mono" style="font-size:12px">仅供学习复盘 · 不构成投资建议</span>
     </div>
-    <a class="btn" href="futures_replay_trader.html">打开回测终端 <span class="arrow" aria-hidden="true">→</span></a>
+    <span style="display:flex;flex-wrap:wrap;gap:10px;"><a class="btn" href="futures.html">期货工作台 <span class="arrow" aria-hidden="true">→</span></a><a class="btn ghost" href="ashare.html">A股工作台 <span class="arrow" aria-hidden="true">→</span></a></span>
   </div>
 </footer>
 

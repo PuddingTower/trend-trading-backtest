@@ -33,6 +33,7 @@ export class WatchlistPanel {
   constructor(rootId, api) {
     this.root = document.getElementById(rootId);
     this.api = api || {};
+    this.marketFilter = this.api.marketFilter || null;
     this.groups = [];
     this.groupId = null;
     this.rows = [];
@@ -46,6 +47,20 @@ export class WatchlistPanel {
   }
 
   get group() { return getGroup(this.groups, this.groupId); }
+
+  /** 当前工作台只显示本市场的品种；自选池本身仍是一个池，另一市场的条目不在这里露出。 */
+  visibleItems() {
+    const items = this.group?.items || [];
+    return this.marketFilter ? items.filter(it => it.market === this.marketFilter) : items;
+  }
+
+  marketMismatch(code) {
+    if (!this.marketFilter) return null;
+    const pre = toItem(code, '');
+    if (!pre.ok) return null;
+    if (pre.item.market === this.marketFilter) return null;
+    return `${code} 是${pre.item.market === 'futures' ? '期货' : 'A股'}代码，当前${MARKET_LABEL[this.marketFilter]}工作台不加入`;
+  }
 
   async reload() {
     this.groups = await listGroups();
@@ -152,19 +167,22 @@ export class WatchlistPanel {
 
   listHtml() {
     const g = this.group;
+    const items = this.visibleItems();
+    const hidden = (g.items || []).length - items.length;
     const adder = `
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
-        <input id="wlAddInput" placeholder="代码：600519 / sh000001 / rb2610 / 螺纹钢主连" style="${inp}flex:1;min-width:220px;" />
+        <input id="wlAddInput" placeholder="${this.marketFilter === 'ashare' ? 'A股代码：600519 / sh000001 / 510300' : '期货代码：rb2610 / RB0 / 螺纹钢主连'}" style="${inp}flex:1;min-width:220px;" />
         <button class="btn btn-sm" style="${btnHi}" data-wl="addItem">＋ 加入自选</button>
         <button class="btn btn-sm" style="${btn}" data-wl="pullGroup">🔽 批量拉本组日线</button>
-        <button class="btn btn-sm" style="${btn}" data-wl="toDominant" title="把本组的具体月份合约（rb2701 这种）换成同品种主连：月份合约只有上市以来几个月，主连才有几年日线可回测">🔁 月份合约换主连</button>
-      </div>`;
-    if (!g.items.length) {
+        ${this.marketFilter === 'futures' ? `<button class="btn btn-sm" style="${btn}" data-wl="toDominant" title="把本组的具体月份合约（rb2701 这种）换成同品种主连：月份合约只有上市以来几个月，主连才有几年日线可回测">🔁 月份合约换主连</button>` : ''}
+      </div>
+      ${hidden > 0 ? `<div style="font-size:11px;color:var(--text-muted);margin-bottom:8px;">另有 ${hidden} 个其他市场的品种，在对应工作台查看。</div>` : ''}`;
+    if (!items.length) {
       return adder + `<div style="color:var(--text-muted);padding:18px;text-align:center;border:1px dashed var(--border-color);border-radius:6px;">
-        这个分组还没有品种。上面直接输代码，或点「🖼 识图 / 文本导入」从行情软件的截图/文本一次进一批。</div>`;
+        这个分组还没有${MARKET_LABEL[this.marketFilter] || ''}品种。上面直接输代码，或点「🖼 识图 / 文本导入」从行情软件的截图/文本一次进一批。</div>`;
     }
     return adder + `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:8px;">
-      ${g.items.map(it => this.cardHtml(it)).join('')}</div>`;
+      ${items.map(it => this.cardHtml(it)).join('')}</div>`;
   }
 
   cardHtml(it) {
@@ -214,6 +232,8 @@ export class WatchlistPanel {
     const el = this.root.querySelector('#wlAddInput');
     const raw = (el && el.value || '').trim();
     if (!raw) { this.api.toast && this.api.toast('请先输入代码，例如 600519 / sh000001 / rb2610'); return; }
+    const mismatch = this.marketMismatch(raw);
+    if (mismatch) { this.api.toast && this.api.toast(`❌ ${mismatch}`); return; }
     const r = addItem(this.group, raw, '');
     if (!r.ok) { this.api.toast && this.api.toast(`没能加入：${r.reason}`); return; }
     await this.save(this.group, `已加入 ${r.item.name || r.item.symbol}`);
@@ -246,6 +266,8 @@ export class WatchlistPanel {
   }
 
   onOpen(code) {
+    const mismatch = this.marketMismatch(code);
+    if (mismatch) { this.api.toast && this.api.toast(`❌ ${mismatch}`); return; }
     if (this.api.openSymbol) this.api.openSymbol(code);
   }
 
@@ -254,8 +276,8 @@ export class WatchlistPanel {
    * 不换图、不动当前复盘进度 —— 否则「批量」会把界面拖着一路闪。
    */
   async onBatchPull() {
-    const items = this.group.items;
-    if (!items.length) { this.api.toast && this.api.toast('本组没有品种'); return; }
+    const items = this.visibleItems();
+    if (!items.length) { this.api.toast && this.api.toast(`本组没有${MARKET_LABEL[this.marketFilter] || ''}品种`); return; }
     const periodEl = document.getElementById('periodSelect');
     const adjustEl = document.getElementById('adjustSelect');
     const period = periodEl ? periodEl.value : 'daily';
@@ -346,10 +368,15 @@ export class WatchlistPanel {
         </div>
       </div>
       <input type="file" accept="image/*" id="wlFile" style="display:none;" />`
-      : `<textarea id="wlText" rows="6" placeholder="从行情软件复制整列代码粘在这里，每行一条：&#10;600519 贵州茅台&#10;000001 平安银行&#10;rb2610 螺纹钢2610" style="${inp}width:100%;font-family:var(--font-mono);"></textarea>
+      : `<textarea id="wlText" rows="6" placeholder="${this.marketFilter === 'ashare'
+          ? '从行情软件复制整列代码粘在这里，每行一条：&#10;600519 贵州茅台&#10;000001 平安银行&#10;510300 沪深300ETF'
+          : '从行情软件复制整列代码粘在这里，每行一条：&#10;rb2610 螺纹钢2610&#10;RB0 螺纹钢主连&#10;M0 豆粕主连'}" style="${inp}width:100%;font-family:var(--font-mono);"></textarea>
         <button class="btn btn-sm" style="${btnHi}" data-wl="parseText">解析文本</button>`;
+    const scope = this.marketFilter
+      ? `<div style="font-size:11px;color:var(--text-muted);margin-bottom:8px;">当前工作台只接收 ${esc(MARKET_LABEL[this.marketFilter])} 代码；其他市场的行会在入池时跳过。</div>`
+      : '';
 
-    return tabs + engineOpts + stage + this.previewHtml();
+    return tabs + engineOpts + scope + stage + this.previewHtml();
   }
 
   previewHtml() {
@@ -478,6 +505,8 @@ export class WatchlistPanel {
     const g = this.group;
     const done = [], skipped = [];
     for (const r of picked) {
+      const mismatch = this.marketMismatch(r.code);
+      if (mismatch) { skipped.push(`${r.code}（其他市场）`); continue; }
       const res = addItem(g, r.code, r.displayName || r.nameHint || '');
       if (res.ok) done.push(res.item.symbol);
       else skipped.push(`${r.code}（${res.reason}）`);

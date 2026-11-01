@@ -93,6 +93,7 @@ export class ResearchPanel {
   constructor(rootId, api) {
     this.root = document.getElementById(rootId);
     this.api = api || {};
+    this.market = this.api.market || null;
     this.tab = 'grid';
     this.gridRows = null;
     this.wf = null;
@@ -842,9 +843,10 @@ export class ResearchPanel {
         <label>加仓次数<input id="rsPoolAdds" type="number" value="${v('rsPoolAdds', 0)}" min="0" max="3" style="${INP}width:56px;" title="金字塔加仓次数；0=不加仓。加仓单按突破首仓价 + 步长成交" /></label>
         <label>加仓步长%<input id="rsPoolAddStep" type="number" value="${v('rsPoolAddStep', 2)}" step="0.5" style="${INP}width:62px;" title="第 k 次加仓的突破价 = 首仓价 × (1 + k × 步长)" /></label>
         <label>加仓衰减<input id="rsPoolAddDecay" type="number" value="${v('rsPoolAddDecay', 0.5)}" step="0.1" min="0.05" max="1" style="${INP}width:58px;" title="每次加仓手数 = 首仓 × 衰减^k；0.5 表示逐次减半" /></label>
-        <label>维持比例%<input id="rsPoolMaint" type="number" value="${v('rsPoolMaint', 75)}" style="${INP}width:60px;" title="期货/杠杆：权益低于「占用保证金 × 该比例」时收盘判定、次日开盘强平；A股不适用" /></label>
+        ${this.market === 'ashare' ? '' : `
+        <label>维持比例%<input id="rsPoolMaint" type="number" value="${v('rsPoolMaint', 75)}" style="${INP}width:60px;" title="期货/杠杆：权益低于「占用保证金 × 该比例」时收盘判定、次日开盘强平" /></label>
         <label>强平冷却<input id="rsPoolCooldown" type="number" value="${v('rsPoolCooldown', 3)}" min="0" style="${INP}width:52px;" title="被强平的品种多少根 bar 内不许重开" /></label>
-        <span title="期货/杠杆品种强制逐日盯市；A股现货无杠杆，不结算、不强平" style="color:var(--text-muted);">逐日盯市：期货强制 / A股不适用</span>
+        <span title="期货/杠杆品种强制逐日盯市" style="color:var(--text-muted);">逐日盯市：期货强制</span>`}
       </div>` : '';
     return `
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px;font-size:12px;">

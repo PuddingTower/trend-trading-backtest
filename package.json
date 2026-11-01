@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "趋势交易回测系统 —— 纯前端 + 薄本地 Python 服务器。type:module 仅为让 node 能直接跑 src/ 下的 ES module 单测。",
+  "description": "烛台簿 · Candle Ledger —— 期货与 A股 分开复盘的纯前端回测工具，配薄本地 Python 服务器。type:module 仅为让 node 能直接跑 src/ 下的 ES module 单测。",
   "scripts": {
     "test": "node tests/run.js"
   }

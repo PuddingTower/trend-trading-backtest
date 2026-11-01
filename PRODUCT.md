@@ -12,11 +12,11 @@ China-market self-directed retail traders and learners who want to study price a
 
 ## Product Purpose
 
-A pure-local, dual-market (futures + A-shares) K-line replay and strategy-backtest learning tool. Manual replay and automated backtesting share the same matching, rule, and cost logic — one execution engine driven two ways (human keypresses vs strategy signals). Success means a learner can replay real history, place and manage trades by hand, then run a strategy over the same engine and trust that the fills follow identical rules.
+A pure-local K-line replay and strategy-backtest learning tool with two separate workbenches: futures and A-shares. Each entry point owns its own symbol universe, order panel, and market rules; below them, manual replay and automated backtesting share the same matching, conditional-order, and cost logic — one execution engine driven two ways (human keypresses vs strategy signals). Success means a learner can replay real history, place and manage trades by hand, then run a strategy over the same engine and trust that the fills follow identical rules, without ever confusing a leveraged futures account with a T+1 stock account.
 
 ## Positioning
 
-One execution engine, two drivers. A neighboring toy chart app or a black-box backtester cannot truthfully claim that the manual replay path and the automated backtest path run through the exact same order/fill/cost/settlement code. The online build also runs on static GitHub Pages against real market data with no token and no backend, while the local build adds a proxy, cache, and fixtures.
+One shared core, two market workbenches. Futures and A-shares must not share one order form: futures has T+0, margin, leverage, daily mark-to-market and liquidation; A-shares has T+1, long-only, 100-share lots, full cash, price-limit boards and stamp duty. A neighboring toy chart app or a black-box backtester cannot truthfully claim that the manual replay path and the automated backtest path run through the exact same order/fill/cost/settlement code. The online build also runs on static GitHub Pages against real market data with no token and no backend, while the local build adds a proxy, cache, and fixtures.
 
 ## Operating Context
 
@@ -27,13 +27,13 @@ One execution engine, two drivers. A neighboring toy chart app or a black-box ba
 
 ## Capabilities and Constraints
 
-Confirmed capabilities (see README feature table): real 期货+A股 bars with period/adjustment; manual replay with drawing and trade markers; overlays (volume profile, Supertrend, pivots, patterns, supply/demand); conditional orders (stop/target/trailing/bracket/partial close/add); 9 built-in strategies on the shared rule/cost engine; parameter optimization with neighborhood robustness and heatmap; walk-forward; portfolio backtest (independent and shared-margin); strategy comparison with correlation and equal-weight blend; position sizing (ATR risk budget / notional / vol target / half-Kelly / risk parity); Monte Carlo; cost sensitivity; market scanner; momentum rotation; data-quality checks (halts, adjustment continuity, daily mark-to-market); advanced reports and export; blind replay; trade journal; watchlist; symbol name resolution; OCR screenshot import (browser tesseract.js online, rapidocr local); CSV/paste import; HTML/CSV/Markdown export.
+Confirmed capabilities (see README feature table): separate futures and A-share workbenches; real 期货+A股 bars with period/adjustment; A-share manual replay with T+1, long-only, 100-share lots, full-cash sizing, price-limit boards and commission/stamp duty; futures manual replay with margin, two-way trading and daily mark-to-market; overlays (volume profile, Supertrend, pivots, patterns, supply/demand); conditional orders (stop/target/trailing/bracket/partial close/add); 9 built-in strategies on the shared rule/cost engine; parameter optimization with neighborhood robustness and heatmap; walk-forward; portfolio backtest (independent and shared-margin); strategy comparison with correlation and equal-weight blend; position sizing (ATR risk budget / notional / vol target / half-Kelly / risk parity); Monte Carlo; cost sensitivity; market scanner; momentum rotation; data-quality checks (halts, adjustment continuity, daily mark-to-market); advanced reports and export; blind replay; trade journal; watchlist; symbol name resolution; OCR screenshot import (browser tesseract.js online, rapidocr local); CSV/paste import; HTML/CSV/Markdown export.
 
 Constraints: no broker/live/real-time/tick-HFT; static hosting has no backend; fixtures are not committed (regenerable); no secrets in repo; data from 东财/新浪. Terminology is Chinese. Not for backend-only work.
 
 ## Brand Commitments
 
-Product name: 趋势交易回测系统 / TREND REPLAY (lightning-bolt mark ⚡). The application UI is a Material Design 3 dark scheme with a blue seed and a documented data palette (up/down). Treat the app's dark M3 world as incumbent and do not replace it during refinement.
+Product name: 烛台簿 / CANDLE LEDGER (lightning-bolt mark ⚡ is retained as the small "spark" motif). The application UI is a Material Design 3 dark scheme with a blue seed and a documented data palette (up/down). Treat the app's dark M3 world as incumbent and do not replace it during refinement.
 
 ## Evidence on Hand
 

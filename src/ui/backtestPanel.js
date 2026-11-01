@@ -75,9 +75,10 @@ const paramValueLabel = (k, v) => k === 'mode'
   ? (v === 'ema' ? 'EMA' : v === 'sma' ? 'SMA' : v) : v;
 
 export class BacktestPanel {
-  constructor(chart, rootId) {
+  constructor(chart, rootId, options = {}) {
     this.chart = chart;
     this.root = document.getElementById(rootId);
+    this.market = options.market || null;
     this.lastResult = null;
     this.render();
   }
@@ -90,7 +91,7 @@ export class BacktestPanel {
       notionalPct: Number(this.root.querySelector('#btNotional').value) / 100 || 0.25,
       lots: Number(this.root.querySelector('#btLots').value) || 1,
       slippageTicks: Number(this.root.querySelector('#btSlip').value) || 0,
-      allowShort: this.root.querySelector('#btAllowShort').checked,
+      allowShort: this.root.querySelector('#btAllowShort')?.checked ?? false,
       maintenanceRatio: (Number(this.root.querySelector('#btMaint')?.value) || 75) / 100,
       breakevenR: Number(this.root.querySelector('#btBe')?.value) || 0,
       timeStopBars: Number(this.root.querySelector('#btTimeStop')?.value) || 0,
@@ -149,19 +150,21 @@ export class BacktestPanel {
         </label>
         <label data-sizing="notional" style="font-size:11px; color:var(--text-muted);">单笔占比%
           <input id="btNotional" class="form-input" type="number" value="25" min="1" max="100" style="width:56px;" /></label>
-        <label data-sizing="fixed" style="font-size:11px; color:var(--text-muted);">固定手数
+        <label data-sizing="fixed" style="font-size:11px; color:var(--text-muted); display:flex; align-items:center; gap:4px;"
+          title="固定手数；A股 1 手 = 100 股">${this.market === 'ashare' ? '固定手数(100股)' : '固定手数'}
           <input id="btLots" class="form-input" type="number" value="1" min="1" style="width:52px;" /></label>
         <label style="font-size:11px; color:var(--text-muted);">滑点tick
           <input id="btSlip" class="form-input" type="number" value="1" min="0" style="width:48px;" /></label>
+        ${this.market === 'ashare' ? '' : `
         <label style="font-size:11px; color:var(--text-muted); display:flex; align-items:center; gap:4px;"
-          title="仅期货有效；A股按 T+1 与仅做多规则处理，勾了也不会开空">
+          title="仅期货有效；A股按 T+1 与仅做多规则处理">
           <input id="btAllowShort" type="checkbox" checked /> 允许做空</label>
         <span style="font-size:11px; color:var(--text-muted);"
-          title="期货/杠杆品种强制逐日盯市：每个交易日按结算价划转浮盈、重算占用；A股现货无杠杆，不结算、不强平">
-          逐日盯市：<b style="color:var(--text-main);">期货强制 / A股不适用</b></span>
+          title="期货/杠杆品种强制逐日盯市：每个交易日按结算价划转浮盈、重算占用">
+          逐日盯市：<b style="color:var(--text-main);">期货强制</b></span>
         <label style="font-size:11px; color:var(--text-muted); display:flex; align-items:center; gap:4px;"
-          title="期货/杠杆品种：权益跌破「占用保证金 × 该比例」即在下一根开盘强平；A股不适用">维持比例%
-          <input id="btMaint" class="form-input" type="number" value="75" min="10" max="100" style="width:52px;" /></label>
+          title="期货/杠杆品种：权益跌破「占用保证金 × 该比例」即在下一根开盘强平">维持比例%
+          <input id="btMaint" class="form-input" type="number" value="75" min="10" max="100" style="width:52px;" /></label>`}
         <label style="font-size:11px; color:var(--text-muted); display:flex; align-items:center; gap:4px;"
           title="浮盈达到该倍初始风险后，把止损抬到开仓价（保本）。0=不启用；策略没挂初始止损时无法定义 1R，会自动跳过">保本×R
           <input id="btBe" class="form-input" type="number" value="0" min="0" step="0.5" style="width:48px;" /></label>
@@ -180,9 +183,10 @@ export class BacktestPanel {
         <input id="btRuleFile" type="file" accept=".json,application/json" hidden />
         <button class="btn btn-sm" id="btCheck" title="只体检数据不跑策略：停牌缺口、复权断崖、换月跳空">🩺 数据体检</button>
         <button class="btn btn-sm" id="btStress" title="把当前策略原样投放到 2015 股灾、2016 双十一夜盘、2020 疫情缺口、2024 微盘踩踏等历史极端窗口重放">🧨 压力测试</button>
+        ${this.market === 'futures' ? '' : `
         <label style="font-size:11px; color:var(--text-muted); display:flex; align-items:center; gap:4px;"
           title="A股专用：把超过涨跌停幅度的隔夜跳空按复权因子接回（前复权本来就该这么做）。默认关闭，勾选后体检和回测都会用修正后的序列；成交额/成交量不改。">
-          <input id="btRepair" type="checkbox" /> 修复杂复权断崖</label>
+          <input id="btRepair" type="checkbox" /> 修复杂复权断崖</label>`}
         <button class="btn btn-sm" id="btClearMarks">清除图上标记</button>
       </div>
       <div id="btParams" style="display:flex; flex-wrap:wrap; gap:10px; padding:0 4px 8px; border-bottom:1px solid var(--border-color);"></div>
@@ -242,7 +246,7 @@ export class BacktestPanel {
           lots: s.lots, slippageTicks: s.slippageTicks, allowShort: s.allowShort,
           rules: rulesFor(spec)
         },
-        market: spec.market === 'aShare' ? 'aShare' : 'futures',
+        market: spec.market === 'ashare' ? 'ashare' : 'futures',
         periodsPerYear: this.chart.periodsPerYear || 252
       });
       const sign = v => (v > 0 ? 'val-up' : v < 0 ? 'val-down' : '');

@@ -1,0 +1,3571 @@
+// 复盘应用外壳：图表、画线、控制器。市场差异由入口页传入的 profile 决定。
+import { BarStore, barKey, cacheBars } from '../data/barStore.js';
+import { resolveBars, periodsPerYear, periodLabel, periodSpacingOk, sliceBarsByDate } from '../data/periods.js';
+import { parseCSV, tradesToCSV, downloadText, SAMPLE_CSV } from '../data/csvIO.js';
+import { parseSymbol, MARKETS } from '../markets/symbolMeta.js';
+import { resolveTradeSpec } from '../markets/instrumentSpec.js';
+import { OverlayManager } from '../ui/overlays.js';
+import { ORDER_KIND } from '../core/orders.js';
+import { BacktestPanel } from '../ui/backtestPanel.js';
+import { WatchlistPanel } from '../ui/watchlistPanel.js';
+import { ResearchPanel } from '../ui/researchPanel.js';
+import { JournalPanel } from '../ui/journalPanel.js';
+import { pickBlindSegment, blindBadge } from '../replay/blind.js';
+import { TradingEngine } from './tradingEngine.js';
+
+// 兼容内联 UI 里的旧调用点：缓存层统一走 BarStore（v2 schema）。
+const MarketDataCache = BarStore;
+
+    // --- 3. DRAWING & MEASUREMENT MODULE ---
+    /**
+     * 价格轴刻度格式。后复权把早年价格抬到几万、几十万，固定 toFixed(1) 会撑破 65px 的轴宽；
+     * 而对数轴上的刻度是算出来的非整数，直接 String() 又会漏出 4210.000000000001。
+     */
+    function fmtAxisPrice(price) {
+      if (!Number.isFinite(price)) return '--';
+      const a = Math.abs(price);
+      if (a >= 100000) return (price / 10000).toFixed(0) + '万';
+      if (a >= 10000) return (price / 10000).toFixed(1) + '万';
+      if (a >= 1000) return price.toFixed(0);
+      if (a >= 100) return price.toFixed(1);
+      if (a >= 1) return price.toFixed(2);
+      return price.toFixed(4);
+    }
+
+    /**
+     * 角色线胶囊上的百分比 = 这条线对应的浮动盈亏，从持仓视角算，不是从价格涨跌算。
+     * 空头止损挂在建仓价上方，价格"涨"了但亏的是 9%，所以仍显示 -9.0%。
+     * 必须在绘制时按当前线价现算：以前把百分比烤成常量存进 line.tagPct，
+     * 于是把止损线拖到任何位置，胶囊上都还写着下单那一刻的 -9.0%。
+     */
+    function rolePctFromEntry(line) {
+      if (!line.role || line.role === 'entry') return null;
+      const entry = line.basePrice, price = line.p1 && line.p1.price;
+      if (!Number.isFinite(entry) || !Number.isFinite(price) || entry === 0) return null;
+      const signed = (line.short ? entry - price : price - entry) / entry * 100;
+      return signed;
+    }
+
+    class DrawingModule {
+      constructor(chartModule) {
+        this.chart = chartModule;
+        this.currentTool = 'select'; // 'select' | 'hline' | 'segment' | 'ray' | 'measure' | 'riskreward'
+        this.lines = []; // [{ id, type, p1, p2, p3, color, width }]
+        this.selectedLineId = null;
+        this.hoveredLineId = null;
+        this.isDrawing = false;
+        this.stepPoints = []; // 存储多步画线的临时点
+
+        this.dragState = null;
+        this.magnetEnabled = false;
+        this.showTradePaths = true; // 是否在图表上显示多空平仓连线与盈亏统计
+
+        this.currentColor = '#f59e0b';
+        this.currentWidth = 2;
+      }
+
+      setTool(tool) {
+        this.currentTool = tool;
+        this.isDrawing = false;
+        this.stepPoints = [];
+        this.dragState = null;
+        this.chart.requestRender();
+      }
+
+      toggleMagnet() {
+        this.magnetEnabled = !this.magnetEnabled;
+        return this.magnetEnabled;
+      }
+
+      toggleTradePaths() {
+        this.showTradePaths = !this.showTradePaths;
+        this.chart.requestRender();
+        return this.showTradePaths;
+      }
+
+      deleteSelected() {
+        if (!this.selectedLineId) return false;
+        this.lines = this.lines.filter(l => l.id !== this.selectedLineId);
+        this.selectedLineId = null;
+        this.chart.requestRender();
+        return true;
+      }
+
+      clearAll() {
+        this.lines = [];
+        this.selectedLineId = null;
+        this.hoveredLineId = null;
+        this.isDrawing = false;
+        this.stepPoints = [];
+        this.chart.requestRender();
+      }
+
+      getChartCoordFromMouse(mouseX, mouseY) {
+        const { chart } = this;
+        let barIndex = chart.xToBarIndex(mouseX);
+        let price = chart.yToPrice(mouseY);
+        let snapped = false;
+
+        if (this.magnetEnabled && chart.data.length > 0) {
+          const clampedIdx = Math.max(0, Math.min(chart.visibleDataCount - 1, Math.round(barIndex)));
+          const bar = chart.data[clampedIdx];
+          if (bar) {
+            const ohlc = [bar.open, bar.high, bar.low, bar.close];
+            let closestPrice = ohlc[0];
+            let minDiff = Math.abs(price - ohlc[0]);
+            for (let i = 1; i < ohlc.length; i++) {
+              const diff = Math.abs(price - ohlc[i]);
+              if (diff < minDiff) {
+                minDiff = diff;
+                closestPrice = ohlc[i];
+              }
+            }
+            const pixelDiff = Math.abs(chart.priceToY(closestPrice) - mouseY);
+            if (pixelDiff < 50) {
+              price = closestPrice;
+              barIndex = clampedIdx;
+              snapped = true;
+            }
+          }
+        }
+
+        return { barIndex, price, snapped };
+      }
+
+      handleMouseDown(mouseX, mouseY) {
+        const coord = this.getChartCoordFromMouse(mouseX, mouseY);
+
+        // 1. 水平线 (单点)
+        if (this.currentTool === 'hline') {
+          this.lines.push({
+            id: 'line_' + Date.now(),
+            type: 'hline',
+            p1: { barIndex: coord.barIndex, price: coord.price },
+            color: this.currentColor,
+            width: this.currentWidth
+          });
+          this.setTool('select');
+          return true;
+        }
+
+        // 2. 趋势线段 (两点) 或 射线 (两点)
+        if (this.currentTool === 'segment' || this.currentTool === 'ray') {
+          if (!this.isDrawing) {
+            this.isDrawing = true;
+            this.stepPoints = [{ barIndex: coord.barIndex, price: coord.price }];
+          } else {
+            this.lines.push({
+              id: 'line_' + Date.now(),
+              type: this.currentTool,
+              p1: this.stepPoints[0],
+              p2: { barIndex: coord.barIndex, price: coord.price },
+              color: this.currentColor,
+              width: this.currentWidth
+            });
+            this.setTool('select');
+          }
+          return true;
+        }
+
+        // 3. 测量尺 (两点矩形区域测量)
+        if (this.currentTool === 'measure') {
+          if (!this.isDrawing) {
+            this.isDrawing = true;
+            this.stepPoints = [{ barIndex: coord.barIndex, price: coord.price }];
+          } else {
+            this.lines.push({
+              id: 'measure_' + Date.now(),
+              type: 'measure',
+              p1: this.stepPoints[0],
+              p2: { barIndex: coord.barIndex, price: coord.price },
+              color: '#06b6d4',
+              width: 1.5
+            });
+            this.setTool('select');
+          }
+          return true;
+        }
+
+        // 4. 盈亏比工具 (三点：进场点、止盈目标点、止损风险点)
+        if (this.currentTool === 'riskreward') {
+          if (!this.isDrawing) {
+            this.isDrawing = true;
+            this.stepPoints = [{ barIndex: coord.barIndex, price: coord.price }]; // 进场点
+          } else if (this.stepPoints.length === 1) {
+            this.stepPoints.push({ barIndex: coord.barIndex, price: coord.price }); // 目标点
+          } else {
+            // 第3点：止损点
+            this.lines.push({
+              id: 'rr_' + Date.now(),
+              type: 'riskreward',
+              p1: this.stepPoints[0], // Entry
+              p2: this.stepPoints[1], // Target
+              p3: { barIndex: coord.barIndex, price: coord.price }, // Stop
+              color: '#2962ff',
+              width: 1.5
+            });
+            this.setTool('select');
+          }
+          return true;
+        }
+
+        // 5. 选择与拖动模式
+        if (this.currentTool === 'select') {
+          // 检测 Handle 拖动
+          if (this.selectedLineId) {
+            const line = this.lines.find(l => l.id === this.selectedLineId);
+            if (line) {
+              const h1 = this.getPointScreenXY(line.p1);
+              if (h1 && Math.hypot(mouseX - h1.x, mouseY - h1.y) < 10) {
+                this.dragState = { mode: 'handle', line, handleIndex: 1, startCoord: coord };
+                return true;
+              }
+              if (line.p2) {
+                const h2 = this.getPointScreenXY(line.p2);
+                if (h2 && Math.hypot(mouseX - h2.x, mouseY - h2.y) < 10) {
+                  this.dragState = { mode: 'handle', line, handleIndex: 2, startCoord: coord };
+                  return true;
+                }
+              }
+              if (line.p3) {
+                const h3 = this.getPointScreenXY(line.p3);
+                if (h3 && Math.hypot(mouseX - h3.x, mouseY - h3.y) < 10) {
+                  this.dragState = { mode: 'handle', line, handleIndex: 3, startCoord: coord };
+                  return true;
+                }
+              }
+            }
+          }
+
+          // 命中线条本体
+          const hit = this.hitTest(mouseX, mouseY);
+          if (hit) {
+            this.selectedLineId = hit.line.id;
+            this.dragState = {
+              mode: 'body',
+              line: hit.line,
+              startCoord: coord,
+              originP1: { ...hit.line.p1 },
+              originP2: hit.line.p2 ? { ...hit.line.p2 } : null,
+              originP3: hit.line.p3 ? { ...hit.line.p3 } : null
+            };
+            this.chart.requestRender();
+            return true;
+          } else {
+            if (this.selectedLineId) {
+              this.selectedLineId = null;
+              this.chart.requestRender();
+            }
+          }
+        }
+
+        return false;
+      }
+
+      handleMouseMove(mouseX, mouseY) {
+        if (this.dragState) {
+          const coord = this.getChartCoordFromMouse(mouseX, mouseY);
+          const { mode, line, handleIndex, startCoord, originP1, originP2, originP3 } = this.dragState;
+
+          if (mode === 'handle') {
+            if (handleIndex === 1) line.p1 = { barIndex: coord.barIndex, price: coord.price };
+            else if (handleIndex === 2 && line.p2) line.p2 = { barIndex: coord.barIndex, price: coord.price };
+            else if (handleIndex === 3 && line.p3) line.p3 = { barIndex: coord.barIndex, price: coord.price };
+          } else if (mode === 'body') {
+            const dBar = coord.barIndex - startCoord.barIndex;
+            const dPrice = coord.price - startCoord.price;
+            line.p1 = { barIndex: originP1.barIndex + dBar, price: originP1.price + dPrice };
+            if (line.p2 && originP2) line.p2 = { barIndex: originP2.barIndex + dBar, price: originP2.price + dPrice };
+            if (line.p3 && originP3) line.p3 = { barIndex: originP3.barIndex + dBar, price: originP3.price + dPrice };
+          }
+          this.chart.requestRender();
+          return true;
+        }
+
+        if (this.isDrawing) {
+          this.chart.requestRender();
+          return true;
+        }
+
+        if (this.currentTool === 'select') {
+          const hit = this.hitTest(mouseX, mouseY);
+          const newHover = hit ? hit.line.id : null;
+          if (newHover !== this.hoveredLineId) {
+            this.hoveredLineId = newHover;
+            this.chart.requestRender();
+          }
+        }
+
+        return false;
+      }
+
+      handleMouseUp() {
+        if (this.dragState) {
+          const { line, originP1 } = this.dragState;
+          // 记下"这条角色线被人手拖过、拖到了哪"。只是点中没挪动不算拖动。
+          // syncPositionLevels 拿它来判断：改 止损% 输入框会重建这条线，
+          // 用户手工拖出来的价位会被静默换掉 —— 那件事必须说出来。
+          if (line && line.role && originP1 && Math.abs(line.p1.price - originP1.price) > 1e-9) {
+            line.userDragged = true;
+            this.chart.onRoleLineDragged && this.chart.onRoleLineDragged(line);
+          }
+          this.dragState = null;
+          this.chart.requestRender();
+          return true;
+        }
+        return false;
+      }
+
+      getPointScreenXY(pt) {
+        if (!pt) return null;
+        return {
+          x: this.chart.barIndexToX(pt.barIndex),
+          y: this.chart.priceToY(pt.price)
+        };
+      }
+
+      hitTest(mouseX, mouseY) {
+        // 手指的落点精度比鼠标粗一个量级，8px 的命中区在 iPad 上基本点不中已有的线
+        const threshold = this.coarse ? 22 : 8;
+        for (let i = this.lines.length - 1; i >= 0; i--) {
+          const line = this.lines[i];
+          if (line.type === 'hline') {
+            const y = this.chart.priceToY(line.p1.price);
+            if (Math.abs(mouseY - y) <= threshold) return { line };
+          } else if ((line.type === 'segment' || line.type === 'measure') && line.p2) {
+            const p1 = this.getPointScreenXY(line.p1);
+            const p2 = this.getPointScreenXY(line.p2);
+            if (p1 && p2 && this.distToSegment({ x: mouseX, y: mouseY }, p1, p2) <= threshold) return { line };
+          } else if (line.type === 'ray' && line.p2) {
+            const p1 = this.getPointScreenXY(line.p1);
+            const p2 = this.getPointScreenXY(line.p2);
+            if (p1 && p2 && this.distToRay({ x: mouseX, y: mouseY }, p1, p2) <= threshold) return { line };
+          } else if (line.type === 'riskreward') {
+            const p1 = this.getPointScreenXY(line.p1);
+            if (p1 && Math.abs(mouseY - p1.y) <= threshold) return { line };
+          }
+        }
+        return null;
+      }
+
+      distToSegment(p, v, w) {
+        const l2 = (v.x - w.x) ** 2 + (v.y - w.y) ** 2;
+        if (l2 === 0) return Math.hypot(p.x - v.x, p.y - v.y);
+        let t = ((p.x - v.x) * (w.x - v.x) + (p.y - v.y) * (w.y - v.y)) / l2;
+        t = Math.max(0, Math.min(1, t));
+        return Math.hypot(p.x - (v.x + t * (w.x - v.x)), p.y - (v.y + t * (w.y - v.y)));
+      }
+
+      distToRay(p, v, w) {
+        const dx = w.x - v.x;
+        const dy = w.y - v.y;
+        const l2 = dx * dx + dy * dy;
+        if (l2 === 0) return Math.hypot(p.x - v.x, p.y - v.y);
+        let t = ((p.x - v.x) * dx + (p.y - v.y) * dy) / l2;
+        if (t < 0) t = 0;
+        return Math.hypot(p.x - (v.x + t * dx), p.y - (v.y + t * dy));
+      }
+
+      // 渲染所有几何画线、测量尺、盈亏比工具与预览
+      render(ctx) {
+        const { chart } = this;
+        const width = chart.mainWidth;
+
+        // 1. 渲染用户画线
+        for (const line of this.lines) {
+          const isSelected = line.id === this.selectedLineId;
+          ctx.save();
+          ctx.strokeStyle = line.color || '#f59e0b';
+          ctx.lineWidth = line.width || 2;
+          if (isSelected) {
+            ctx.shadowColor = line.color;
+            ctx.shadowBlur = 8;
+          }
+
+          if (line.type === 'hline') {
+            const y = chart.priceToY(line.p1.price);
+            const x0 = Number.isFinite(line.fromBarIndex)
+              ? Math.max(0, Math.min(width, chart.barIndexToX(line.fromBarIndex))) : 0;
+            if (line.dash) ctx.setLineDash(line.dash);
+            // 整条线满不透明、横贯绘图区：这是一笔当前有效的持仓价位，本来就该横着读。
+            // 开仓根只用小圆点 + 起点胶囊标出来，不靠"截断线段"表达来路 ——
+            // 截断法在开仓根贴着屏幕右缘时会让线几乎看不见，而这个观感成本不值得。
+            ctx.beginPath();
+            ctx.moveTo(0, y);
+            ctx.lineTo(width, y);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            if (x0 > 8 && x0 < width - 8) {
+              // 只在开仓根真的落在图内时打点，否则它会在右缘糊成一个多余的色块
+              ctx.fillStyle = line.color;
+              ctx.beginPath(); ctx.arc(x0, y, 2.6, 0, Math.PI * 2); ctx.fill();
+            }
+            if (line.role) this.drawRoleChip(ctx, line, x0 > 8 && x0 < width - 90 ? x0 : 4, y);
+            this.drawPriceTag(ctx, line.p1.price, line.color);
+
+          } else if (line.type === 'segment' && line.p2) {
+            const p1 = this.getPointScreenXY(line.p1);
+            const p2 = this.getPointScreenXY(line.p2);
+            if (p1 && p2) {
+              ctx.beginPath();
+              ctx.moveTo(p1.x, p1.y);
+              ctx.lineTo(p2.x, p2.y);
+              ctx.stroke();
+              if (isSelected) {
+                this.drawHandle(ctx, p1.x, p1.y, line.color);
+                this.drawHandle(ctx, p2.x, p2.y, line.color);
+              }
+            }
+
+          } else if (line.type === 'ray' && line.p2) {
+            const p1 = this.getPointScreenXY(line.p1);
+            const p2 = this.getPointScreenXY(line.p2);
+            if (p1 && p2) {
+              const dx = p2.x - p1.x;
+              const dy = p2.y - p1.y;
+              ctx.beginPath();
+              ctx.moveTo(p1.x, p1.y);
+              if (Math.abs(dx) < 0.001) {
+                ctx.lineTo(p1.x, dy >= 0 ? chart.chartHeight : 0);
+              } else {
+                const extendX = width;
+                const extendY = p1.y + (dy / dx) * (extendX - p1.x);
+                ctx.lineTo(extendX, extendY);
+              }
+              ctx.stroke();
+              if (isSelected) {
+                this.drawHandle(ctx, p1.x, p1.y, line.color);
+                this.drawHandle(ctx, p2.x, p2.y, line.color);
+              }
+            }
+
+          } else if (line.type === 'measure' && line.p2) {
+            this.renderMeasureBox(ctx, line.p1, line.p2, isSelected);
+
+          } else if (line.type === 'riskreward' && line.p2 && line.p3) {
+            this.renderRiskRewardBox(ctx, line.p1, line.p2, line.p3, isSelected);
+          }
+
+          ctx.restore();
+        }
+
+        // 2. 绘制多空持仓成本线 (Matching Image 2 & 3)
+        this.renderPositionCostLine(ctx);
+
+        // 3. 绘制多空平仓连线与盈亏统计 (Matching Image 3 & 4)
+        if (this.showTradePaths) {
+          this.renderTradePathBrackets(ctx);
+        }
+
+        // 4. 正在绘制过程中的动态预览
+        this.renderDrawingPreview(ctx);
+      }
+
+      // 绘制当前持仓成本线
+      renderPositionCostLine(ctx) {
+        const { chart } = this;
+        const pos = chart.tradingEngine ? chart.tradingEngine.position : null;
+        if (!pos) return;
+
+        const y = chart.priceToY(pos.entryPrice);
+        const isLong = pos.direction === 'long';
+        const color = isLong ? '#ef4444' : '#10b981';
+
+        ctx.save();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([4, 3]);
+
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(chart.mainWidth, y);
+        ctx.stroke();
+
+        // 左侧醒目成本徽标 (如 Image 2: "成本 83.68 · 100股")
+        const labelText = `成本 ${pos.entryPrice} · ${pos.lots}手`;
+        ctx.font = 'bold 11px monospace';
+        const txtWidth = ctx.measureText(labelText).width;
+
+        ctx.fillStyle = color;
+        ctx.fillRect(8, y - 10, txtWidth + 12, 20);
+
+        ctx.fillStyle = '#ffffff';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(labelText, 14, y);
+
+        // 从开仓K线到当前K线的动态连线
+        const x1 = chart.barIndexToX(pos.entryIndex);
+        const curBar = chart.getCurrentBar();
+        if (curBar) {
+          const curY = chart.priceToY(curBar.close);
+          const curX = chart.barIndexToX(chart.getCurrentIndex());
+
+          ctx.strokeStyle = 'rgba(245, 158, 11, 0.7)';
+          ctx.beginPath();
+          ctx.moveTo(x1, y);
+          ctx.lineTo(curX, curY);
+          ctx.stroke();
+        }
+
+        ctx.restore();
+      }
+
+      // 绘制已平仓交易连线与盈亏统计 (100% 还原 Image 4 效果)
+      renderTradePathBrackets(ctx) {
+        const { chart } = this;
+        const trades = chart.tradingEngine ? chart.tradingEngine.tradesHistory : [];
+        if (!trades || trades.length === 0) return;
+
+        ctx.save();
+        for (const t of trades) {
+          const x1 = chart.barIndexToX(t.entryIndex);
+          const y1 = chart.priceToY(t.entryPrice);
+          const x2 = chart.barIndexToX(t.exitIndex);
+          const y2 = chart.priceToY(t.exitPrice);
+
+          const isWin = t.netPnL >= 0;
+          const color = isWin ? '#ef4444' : '#10b981'; // 盈利红，亏损绿
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 1.2;
+          ctx.setLineDash([3, 3]);
+
+          // 1. 开仓点与出场点小圆圈
+          ctx.fillStyle = color;
+          ctx.beginPath();
+          ctx.arc(x1, y1, 3.5, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.beginPath();
+          ctx.arc(x2, y2, 3.5, 0, Math.PI * 2);
+          ctx.fill();
+
+          // 2. 垂直虚线与水平虚线形成跟踪阶梯 (如 Image 4)
+          ctx.beginPath();
+          ctx.moveTo(x1, y1);
+          ctx.lineTo(x1, y2); // 垂直段
+          ctx.lineTo(x2, y2); // 水平段
+          ctx.stroke();
+
+          // 3. 垂直段箭头指示方向
+          const arrowDir = y2 < y1 ? -1 : 1; // y向下是价格下跌，y向上是价格上涨
+          ctx.beginPath();
+          ctx.moveTo(x1, y2);
+          ctx.lineTo(x1 - 4, y2 - arrowDir * 6);
+          ctx.lineTo(x1 + 4, y2 - arrowDir * 6);
+          ctx.closePath();
+          ctx.fill();
+
+          // 4. 统计虚线徽标框 (如 Image 4: [+1.82%  +149.65])
+          const midX = (x1 + x2) / 2;
+          const boxY = y2 - (arrowDir * 16);
+          const pctStr = `${t.pct >= 0 ? '+' : ''}${t.pct.toFixed(2)}%`;
+          const pnlStr = `${t.netPnL >= 0 ? '+' : ''}${t.netPnL.toFixed(1)}`;
+          const badgeText = `${pctStr}  ${pnlStr}元  (${t.holdingBars}根)`;
+
+          ctx.font = 'bold 11px monospace';
+          const textW = ctx.measureText(badgeText).width;
+          const boxW = textW + 14;
+          const boxH = 18;
+
+          // 虚线框背景
+          ctx.fillStyle = 'rgba(18, 21, 28, 0.85)';
+          ctx.fillRect(midX - boxW / 2, boxY - boxH / 2, boxW, boxH);
+
+          ctx.setLineDash([2, 2]);
+          ctx.strokeRect(midX - boxW / 2, boxY - boxH / 2, boxW, boxH);
+
+          ctx.setLineDash([]);
+          ctx.fillStyle = color;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(badgeText, midX, boxY);
+        }
+        ctx.restore();
+      }
+
+      // 渲染测量尺 (Matching Image 3)
+      renderMeasureBox(ctx, pt1, pt2, isSelected) {
+        const { chart } = this;
+        const p1 = this.getPointScreenXY(pt1);
+        const p2 = this.getPointScreenXY(pt2);
+        if (!p1 || !p2) return;
+
+        const left = Math.min(p1.x, p2.x);
+        const right = Math.max(p1.x, p2.x);
+        const top = Math.min(p1.y, p2.y);
+        const bottom = Math.max(p1.y, p2.y);
+
+        const pointDiff = pt2.price - pt1.price;
+        const pctDiff = ((pointDiff / pt1.price) * 100);
+        const barsCount = Math.abs(Math.round(pt2.barIndex - pt1.barIndex));
+        const estRMB = pointDiff * (chart.tradingEngine ? chart.tradingEngine.multiplier : 10);
+
+        ctx.save();
+        // 区域半透明填充
+        ctx.fillStyle = 'rgba(6, 182, 212, 0.12)';
+        ctx.fillRect(left, top, right - left, bottom - top);
+
+        // 边框
+        ctx.strokeStyle = '#06b6d4';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([4, 3]);
+        ctx.strokeRect(left, top, right - left, bottom - top);
+
+        // 对角连接线
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y);
+        ctx.lineTo(p2.x, p2.y);
+        ctx.stroke();
+
+        // 测量数值标签框 (如 Image 3)
+        const midX = (left + right) / 2;
+        const midY = (top + bottom) / 2;
+        const line1 = `${pointDiff >= 0 ? '+' : ''}${pointDiff.toFixed(1)}  ${pctDiff >= 0 ? '+' : ''}${pctDiff.toFixed(2)}%`;
+        const line2 = `${barsCount} 根K线  (估算 ${estRMB >= 0 ? '+' : ''}${estRMB.toFixed(0)}元)`;
+
+        ctx.font = 'bold 11px monospace';
+        const w1 = ctx.measureText(line1).width;
+        const w2 = ctx.measureText(line2).width;
+        const badgeW = Math.max(w1, w2) + 16;
+        const badgeH = 34;
+
+        ctx.fillStyle = 'rgba(18, 21, 28, 0.9)';
+        ctx.fillRect(midX - badgeW / 2, midY - badgeH / 2, badgeW, badgeH);
+
+        ctx.setLineDash([]);
+        ctx.strokeStyle = '#06b6d4';
+        ctx.strokeRect(midX - badgeW / 2, midY - badgeH / 2, badgeW, badgeH);
+
+        ctx.fillStyle = pointDiff >= 0 ? '#ef4444' : '#10b981';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        ctx.fillText(line1, midX, midY - 13);
+
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(line2, midX, midY + 3);
+
+        if (isSelected) {
+          this.drawHandle(ctx, p1.x, p1.y, '#06b6d4');
+          this.drawHandle(ctx, p2.x, p2.y, '#06b6d4');
+        }
+        ctx.restore();
+      }
+
+      // 渲染盈亏比测算工具 (Risk/Reward Tool: 设定进场、止盈、止损)
+      renderRiskRewardBox(ctx, entryPt, targetPt, stopPt, isSelected) {
+        const { chart } = this;
+        const pEntry = this.getPointScreenXY(entryPt);
+        const pTarget = this.getPointScreenXY(targetPt);
+        const pStop = this.getPointScreenXY(stopPt);
+        if (!pEntry || !pTarget || !pStop) return;
+
+        const left = Math.min(pEntry.x, pTarget.x, pStop.x) - 10;
+        const right = Math.max(pEntry.x, pTarget.x, pStop.x) + 70;
+        const width = Math.max(100, right - left);
+
+        const targetDiff = Math.abs(targetPt.price - entryPt.price);
+        const stopDiff = Math.abs(entryPt.price - stopPt.price);
+        const rrRatio = stopDiff > 0 ? (targetDiff / stopDiff) : 0;
+
+        ctx.save();
+        // 1. 目标止盈区间 —— 红：涨的那一侧（与 --data-up 同色）
+        const targetTop = Math.min(pEntry.y, pTarget.y);
+        const targetH = Math.abs(pEntry.y - pTarget.y);
+        ctx.fillStyle = 'rgba(239, 68, 68, 0.2)'; // 盈利区域
+        ctx.fillRect(left, targetTop, width, targetH);
+        ctx.strokeStyle = '#ef4444';
+        ctx.lineWidth = 1.2;
+        ctx.strokeRect(left, targetTop, width, targetH);
+
+        // 2. 止损风险区间 —— 绿：跌的那一侧（与 --data-down 同色）
+        const stopTop = Math.min(pEntry.y, pStop.y);
+        const stopH = Math.abs(pEntry.y - pStop.y);
+        ctx.fillStyle = 'rgba(16, 185, 129, 0.2)'; // 止损区域
+        ctx.fillRect(left, stopTop, width, stopH);
+        ctx.strokeStyle = '#10b981';
+        ctx.lineWidth = 1.2;
+        ctx.strokeRect(left, stopTop, width, stopH);
+
+        // 3. 进场基准线
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.moveTo(left, pEntry.y);
+        ctx.lineTo(left + width, pEntry.y);
+        ctx.stroke();
+
+        // 4. 核心盈亏比汇总徽标
+        const badgeText = `盈亏比: ${rrRatio.toFixed(2)}R | 目标: +${targetDiff.toFixed(1)} | 止损: -${stopDiff.toFixed(1)}`;
+        ctx.font = 'bold 11px monospace';
+        const txtW = ctx.measureText(badgeText).width;
+
+        ctx.setLineDash([]);
+        ctx.fillStyle = '#2962ff';
+        ctx.fillRect(left + 6, pEntry.y - 10, txtW + 12, 20);
+
+        ctx.fillStyle = '#ffffff';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(badgeText, left + 12, pEntry.y);
+
+        if (isSelected) {
+          this.drawHandle(ctx, pEntry.x, pEntry.y, '#2962ff');
+          this.drawHandle(ctx, pTarget.x, pTarget.y, '#ef4444');
+          this.drawHandle(ctx, pStop.x, pStop.y, '#10b981');
+        }
+        ctx.restore();
+      }
+
+      // 绘制画线预览
+      renderDrawingPreview(ctx) {
+        if (!this.isDrawing || this.stepPoints.length === 0) return;
+        const { chart } = this;
+        const curMouse = chart.lastMousePos;
+        if (!curMouse) return;
+
+        const p1 = this.getPointScreenXY(this.stepPoints[0]);
+        if (!p1) return;
+
+        ctx.save();
+        ctx.strokeStyle = this.currentColor;
+        ctx.lineWidth = this.currentWidth;
+        ctx.setLineDash([4, 4]);
+
+        if (this.currentTool === 'segment') {
+          ctx.beginPath();
+          ctx.moveTo(p1.x, p1.y);
+          ctx.lineTo(curMouse.x, curMouse.y);
+          ctx.stroke();
+          this.drawHandle(ctx, p1.x, p1.y, this.currentColor);
+
+        } else if (this.currentTool === 'ray') {
+          const dx = curMouse.x - p1.x;
+          const dy = curMouse.y - p1.y;
+          ctx.beginPath();
+          ctx.moveTo(p1.x, p1.y);
+          if (Math.abs(dx) > 0.001) {
+            const extendX = chart.mainWidth;
+            const extendY = p1.y + (dy / dx) * (extendX - p1.x);
+            ctx.lineTo(extendX, extendY);
+          } else {
+            ctx.lineTo(p1.x, curMouse.y);
+          }
+          ctx.stroke();
+          this.drawHandle(ctx, p1.x, p1.y, this.currentColor);
+
+        } else if (this.currentTool === 'measure') {
+          ctx.fillStyle = 'rgba(6, 182, 212, 0.15)';
+          const left = Math.min(p1.x, curMouse.x);
+          const top = Math.min(p1.y, curMouse.y);
+          const w = Math.abs(curMouse.x - p1.x);
+          const h = Math.abs(curMouse.y - p1.y);
+          ctx.fillRect(left, top, w, h);
+          ctx.strokeRect(left, top, w, h);
+
+        } else if (this.currentTool === 'riskreward') {
+          ctx.beginPath();
+          ctx.moveTo(p1.x, p1.y);
+          ctx.lineTo(curMouse.x, curMouse.y);
+          ctx.stroke();
+          this.drawHandle(ctx, p1.x, p1.y, '#2962ff');
+        }
+
+        ctx.restore();
+      }
+
+      drawHandle(ctx, x, y, color) {
+        ctx.save();
+        ctx.fillStyle = '#ffffff';
+        ctx.strokeStyle = color || '#2962ff';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(x, y, 4.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      /** 线起点的小胶囊：角色 + 距开仓的百分比。价格轴那边只留价位，两处不打架。 */
+      drawRoleChip(ctx, line, x, y) {
+        const name = { entry: '开仓', sl: '止损', tp: '止盈' }[line.role] || '';
+        const pct = rolePctFromEntry(line);
+        const text = name + (pct === null ? '' : ` ${pct > 0 ? '+' : ''}${pct.toFixed(1)}%`);
+        const { chart } = this;
+        ctx.save();
+        ctx.font = '10px system-ui, -apple-system, "Microsoft YaHei", sans-serif';
+        const w = ctx.measureText(text).width + 10, h = 15;
+        const bx = Math.max(2, Math.min(x + 5, chart.mainWidth - w - 2));
+        // 止损的帽子戴在线下方，其余戴上方 —— 两条线靠得再近也不会互相盖住
+        const by = line.role === 'sl' ? y + 4 : y - h - 4;
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(bx, by, w, h, 3); else ctx.rect(bx, by, w, h);
+        ctx.fillStyle = 'rgba(18,21,28,0.88)';
+        ctx.fill();
+        ctx.strokeStyle = line.color;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.fillStyle = line.color;
+        ctx.textBaseline = 'middle';
+        ctx.fillText(text, bx + 5, by + h / 2 + 0.5);
+        ctx.restore();
+      }
+
+      /**
+       * 价格轴上的价位标签。角色线的名字已经戴在起点胶囊上了，这里只留价位：
+       * 轴宽只有 65px，"止损 4210.0" 会被裁一半，三条线的色块还糊成一片。
+       */
+      drawPriceTag(ctx, price, color) {
+        const y = this.chart.priceToY(price);
+        const x = this.chart.mainWidth;
+        const w = this.chart.priceScaleWidth - 2;
+
+        ctx.save();
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(x + 1, y - 8, w, 16, 2); else ctx.rect(x + 1, y - 8, w, 16);
+        ctx.fillStyle = color || '#f59e0b';
+        ctx.globalAlpha = 0.9;
+        ctx.fill();
+        ctx.restore();
+
+        ctx.save();
+        ctx.fillStyle = '#131722';
+        ctx.font = 'bold 10px Consolas, monospace';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(fmtAxisPrice(price), x + 6, y);
+        ctx.restore();
+      }
+    }
+
+    // --- 4. CHART MODULE ---
+    class ChartModule {
+      constructor(containerId, canvasId) {
+        this.container = document.getElementById(containerId);
+        this.canvas = document.getElementById(canvasId);
+        this.ctx = this.canvas.getContext('2d');
+
+        this.data = [];
+        this.visibleDataCount = 0;
+
+        this.priceScaleWidth = 65;
+        this.timeScaleHeight = 26;
+        this.volumePaneHeightRatio = 0.22;
+
+        this.barWidth = 9;
+        this.barSpacing = 4;
+        this.scrollOffset = 0;
+        this.centerLatest = false;   // true → 最新K线锚定在图表中线
+        this.logScale = true;        // Y 轴默认对数：百分比止损/等率通道只有在对数下才量得准
+
+        this.isPanning = false;
+        this.lastMousePos = null;
+        this.panStartX = 0;
+        this.panStartScrollOffset = 0;
+
+        this.drawingModule = new DrawingModule(this);
+        this.tradingEngine = null;
+
+        this.setupEventListeners();
+        this.resize();
+        // iPad 旋转屏幕不一定只触发 window.resize（Safari 还会走 visualViewport），
+        // 而 canvas 尺寸一不对，坐标换算就会整体偏移 —— 三个信号都接上，并用 rAF 合并。
+        const relayout = () => {
+          if (this._relayoutPending) return;
+          this._relayoutPending = true;
+          requestAnimationFrame(() => { this._relayoutPending = false; this.resize(); });
+        };
+        window.addEventListener('resize', relayout);
+        window.addEventListener('orientationchange', () => setTimeout(relayout, 120));
+        if (window.visualViewport) window.visualViewport.addEventListener('resize', relayout);
+        if (window.matchMedia) {
+          // iPad 外接显示器 / 台前调度会让 dpr 从 1 跳到 2，不重算就是一层糊的位图
+          const mq = window.matchMedia('(resolution: 1dppx)');
+          const onDpr = () => relayout();
+          if (mq.addEventListener) mq.addEventListener('change', onDpr);
+          else if (mq.addListener) mq.addListener(onDpr);
+        }
+      }
+
+      setData(data) {
+        this.data = data;
+        this.visibleDataCount = Math.min(120, data.length);
+        this.scrollOffset = 0;
+        this.requestRender();
+      }
+
+      setVisibleCount(count) {
+        this.visibleDataCount = Math.max(1, Math.min(count, this.data.length));
+        this.requestRender();
+      }
+
+      stepForward() {
+        if (this.visibleDataCount < this.data.length) {
+          this.visibleDataCount++;
+          this.scrollOffset = 0;
+          this.requestRender();
+          return this.getCurrentBar();
+        }
+        return null;
+      }
+
+      getCurrentBar() {
+        if (this.visibleDataCount <= 0 || this.data.length === 0) return null;
+        return this.data[this.visibleDataCount - 1];
+      }
+
+      getCurrentIndex() {
+        return this.visibleDataCount - 1;
+      }
+
+      resize() {
+        const rect = this.container.getBoundingClientRect();
+        if (rect.width < 2 || rect.height < 2) return;   // 侧栏抽屉收起/旋转过渡中会量到 0，直接算会写出 NaN 几何
+        this.dpr = window.devicePixelRatio || 1;
+        this.width = rect.width;
+        this.height = rect.height;
+
+        this.canvas.width = this.width * this.dpr;
+        this.canvas.height = this.height * this.dpr;
+        this.ctx.scale(this.dpr, this.dpr);
+
+        this.mainWidth = this.width - this.priceScaleWidth;
+        this.totalChartHeight = this.height - this.timeScaleHeight;
+        this.volumeHeight = this.totalChartHeight * this.volumePaneHeightRatio;
+        this.klineHeight = this.totalChartHeight - this.volumeHeight;
+
+        this.requestRender();
+      }
+
+      requestRender() {
+        if (!this.renderScheduled) {
+          this.renderScheduled = true;
+          requestAnimationFrame(() => {
+            this.renderScheduled = false;
+            this.render();
+          });
+        }
+      }
+
+      /**
+       * 触控/鼠标统一走 Pointer Events。
+       * 原来只有 mousedown/mousemove/mouseup + wheel：在 iPad 上手指一个事件都收不到，
+       * 于是画不了线、拖不动 K 线、捏不缩放 —— 这不是样式问题，是根本没有输入通路。
+       */
+      setupEventListeners() {
+        const { canvas } = this;
+        canvas.style.touchAction = 'none';      // CSS 里也写了；这里兜住内联样式覆盖不到的场合
+        this._pointers = new Map();             // pointerId -> {x,y}
+        this.pinch = null;
+
+        const local = (e) => {
+          const rect = canvas.getBoundingClientRect();
+          return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+        };
+
+        canvas.addEventListener('pointerdown', (e) => {
+          const { x: mouseX, y: mouseY } = local(e);
+          this.drawingModule.coarse = e.pointerType === 'touch';
+          this._pointers.set(e.pointerId, { x: mouseX, y: mouseY });
+
+          if (this._pointers.size === 2) { this._beginPinch(); return; }
+          if (this._pointers.size > 2) return;
+
+          if (canvas.setPointerCapture) {
+            try { canvas.setPointerCapture(e.pointerId); } catch (_) { /* 指针已离开，忽略 */ }
+          }
+          if (this.drawingModule.handleMouseDown(mouseX, mouseY)) return;
+
+          if ((e.pointerType !== 'mouse' || e.button === 0) && mouseX < this.mainWidth) {
+            this.isPanning = true;
+            this.panStartX = mouseX;
+            this.panStartScrollOffset = this.scrollOffset;
+          }
+        });
+
+        canvas.addEventListener('pointermove', (e) => {
+          const { x: mouseX, y: mouseY } = local(e);
+          if (this._pointers.has(e.pointerId)) this._pointers.set(e.pointerId, { x: mouseX, y: mouseY });
+
+          if (this.pinch) { this._updatePinch(); return; }
+
+          this.lastMousePos = { x: mouseX, y: mouseY };
+
+          if (this.drawingModule.handleMouseMove(mouseX, mouseY)) return;
+
+          if (this.isPanning) {
+            const dx = mouseX - this.panStartX;
+            const barPitch = this.barWidth + this.barSpacing;
+            this.scrollOffset = this.panStartScrollOffset + dx / barPitch;
+            this.requestRender();
+            return;
+          }
+
+          this.requestRender();
+        });
+
+        const release = (e) => {
+          const wasTouch = e.pointerType === 'touch';
+          this._pointers.delete(e.pointerId);
+          if (this._pointers.size < 2) this.pinch = null;
+          if (this._pointers.size === 0) {
+            this.isPanning = false;
+            this.drawingModule.handleMouseUp();
+            // 手指抬起后不该把十字光标钉在最后触碰的位置 —— 触摸没有“悬停”这个状态
+            if (wasTouch) { this.lastMousePos = null; this.requestRender(); }
+          }
+        };
+        canvas.addEventListener('pointerup', release);
+        canvas.addEventListener('pointercancel', release);
+
+        canvas.addEventListener('pointerleave', (e) => {
+          if (e.pointerType === 'mouse') { this.lastMousePos = null; this.requestRender(); }
+        });
+
+        canvas.addEventListener('wheel', (e) => {
+          e.preventDefault();
+          const delta = e.deltaY < 0 ? 1.15 : 0.85;
+          this.barWidth = Math.max(3, Math.min(50, this.barWidth * delta));
+          this.barSpacing = Math.max(1, Math.round(this.barWidth * 0.35));
+          this.requestRender();
+        }, { passive: false });
+      }
+
+      _beginPinch() {
+        const [a, b] = [...this._pointers.values()];
+        this.pinch = {
+          d0: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)),
+          w0: this.barWidth,
+          cx: (a.x + b.x) / 2
+        };
+        this.isPanning = false;
+        // 第二根手指落下时若还在画线，会拉出一条斜穿屏幕的废线 —— 直接收尾
+        this.drawingModule.handleMouseUp();
+      }
+
+      _updatePinch() {
+        const pts = [...this._pointers.values()];
+        if (pts.length < 2 || !this.pinch) return;
+        const d = Math.max(1, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y));
+        const next = Math.max(3, Math.min(50, this.pinch.w0 * (d / this.pinch.d0)));
+        if (Math.abs(next - this.barWidth) < 0.05) return;
+
+        // 以双指中心为锚：不补偿的话缩放时画面整体左右漂，捏完找不到刚才在看哪一段
+        const anchor = this.pinch.cx;
+        const before = this.xToBarIndex(anchor);
+        this.barWidth = next;
+        this.barSpacing = Math.max(1, Math.round(this.barWidth * 0.35));
+        this.scrollOffset -= (this.xToBarIndex(anchor) - before);
+        this.requestRender();
+      }
+
+      calcVisibleRange() {
+        const barPitch = this.barWidth + this.barSpacing;
+        const totalVisibleData = this.visibleDataCount;
+        const rightEdgeX = this.centerLatest ? Math.round(this.mainWidth * 0.5) : this.mainWidth - 10;
+        const latestBarX = rightEdgeX + this.scrollOffset * barPitch;
+
+        const startIdx = Math.max(0, Math.floor((0 - latestBarX) / barPitch + (totalVisibleData - 1)));
+        const finalEndIdx = Math.min(totalVisibleData - 1, Math.ceil((this.mainWidth - latestBarX) / barPitch + (totalVisibleData - 1)));
+
+        return {
+          startIdx: Math.min(startIdx, finalEndIdx),
+          endIdx: Math.max(startIdx, finalEndIdx),
+          latestBarX,
+          barPitch
+        };
+      }
+
+      barIndexToX(barIndex) {
+        const { latestBarX, barPitch } = this.calcVisibleRange();
+        return latestBarX - (this.visibleDataCount - 1 - barIndex) * barPitch;
+      }
+
+      xToBarIndex(x) {
+        const { latestBarX, barPitch } = this.calcVisibleRange();
+        return (this.visibleDataCount - 1) - (latestBarX - x) / barPitch;
+      }
+
+      /**
+       * 价格 → 屏幕 Y。默认对数：趋势交易的止损/止盈是按百分比定的，
+       * 线性轴上"从 3000 涨到 3300"和"从 6000 涨到 6300"画出来一样高，
+       * 但前者是 +10%、后者是 +5% —— 在同一张图上量两根K线的高低，结论必然是错的。
+       * 对数轴下等距的像素对应等率的涨跌，回撤深度、盈亏比、通道宽度才可比。
+       *
+       * 前提是最小价 > 0。前复权会把早年价格扣到负数，那种序列只能退回线性并如实标注。
+       */
+      priceToY(price) {
+        const r = this.currentPriceRange || { minPrice: 4000, maxPrice: 5000 };
+        const innerHeight = this.klineHeight - 30;
+        if (r.maxPrice === r.minPrice) return this.klineHeight / 2;
+        const t = this.priceToT(price, r);
+        return 15 + (1 - t) * innerHeight;
+      }
+
+      yToPrice(y) {
+        const r = this.currentPriceRange || { minPrice: 4000, maxPrice: 5000 };
+        const innerHeight = this.klineHeight - 30;
+        const norm = 1 - (y - 15) / innerHeight;
+        return this.axisPrice(r.minPrice, r.maxPrice, norm);
+      }
+
+      /** 价格在轴上的归一化位置 [0,1]（可以越界），与 axisPrice 互逆。 */
+      priceToT(price, r) {
+        if (!r.log) return (price - r.minPrice) / (r.maxPrice - r.minPrice);
+        // 不许把越界的价格夹到 minPrice：那样一条被拖到可视区下方的止损线会贴死在轴底，
+        // 看着像"止损就在今日最低点"，而它其实在图外。越界就该继续越界画到可视区外。
+        if (!(price > 0)) return -1;   // 非正值在对数上没有位置，同样推到可视区下方之外
+        const lo = Math.log(r.minPrice), hi = Math.log(r.maxPrice);
+        return (Math.log(price) - lo) / (hi - lo);
+      }
+
+      /** 轴上比例 t 处的价格。对数下等距的是对数，不是价格本身。 */
+      axisPrice(minPrice, maxPrice, t) {
+        if (this.currentPriceRange && this.currentPriceRange.log) {
+          const lo = Math.log(minPrice), hi = Math.log(maxPrice);
+          return Math.exp(lo + t * (hi - lo));
+        }
+        return minPrice + t * (maxPrice - minPrice);
+      }
+
+      render() {
+        const { ctx, width, height, mainWidth, klineHeight, totalChartHeight } = this;
+        ctx.clearRect(0, 0, width, height);
+
+        if (this.visibleDataCount === 0 || this.data.length === 0) return;
+
+        const range = this.calcVisibleRange();
+        const start = Math.max(0, range.startIdx);
+        const end = Math.min(this.visibleDataCount - 1, range.endIdx);
+
+        let minPrice = Infinity;
+        let maxPrice = -Infinity;
+        let maxVolume = 1000;
+
+        for (let i = start; i <= end; i++) {
+          const bar = this.data[i];
+          if (bar.high > maxPrice) maxPrice = bar.high;
+          if (bar.low < minPrice) minPrice = bar.low;
+          if (bar.ma5 && bar.ma5 > maxPrice) maxPrice = bar.ma5;
+          if (bar.ma5 && bar.ma5 < minPrice) minPrice = bar.ma5;
+          if (bar.ma20 && bar.ma20 > maxPrice) maxPrice = bar.ma20;
+          if (bar.ma20 && bar.ma20 < minPrice) minPrice = bar.ma20;
+          if (bar.volume > maxVolume) maxVolume = bar.volume;
+        }
+
+        if (minPrice === Infinity || maxPrice === -Infinity) {
+          minPrice = 4000;
+          maxPrice = 4500;
+        }
+
+        // 对数只在整段可见价格都为正时才成立；含 ≤0 时静默退回线性，但要在轴上写清楚
+        const log = this.logScale && minPrice > 0 && maxPrice > minPrice;
+        if (log) {
+          // 线性轴留 6% 的加法余量，对数轴得换成等价的乘法余量，否则上下沿留白差一个量级
+          const f = Math.pow(maxPrice / minPrice, 0.06);
+          minPrice /= f; maxPrice *= f;
+        } else {
+          const pricePadding = (maxPrice - minPrice) * 0.06;
+          minPrice -= pricePadding;
+          maxPrice += pricePadding;
+        }
+        this.currentPriceRange = { minPrice, maxPrice, log, logFallback: this.logScale && !log };
+
+        this.drawGrid(minPrice, maxPrice, start, end, range.barPitch);
+        this.drawVolume(start, end, maxVolume);
+        this.drawCandlesticks(start, end);
+        this.drawMovingAverages(start, end);
+        this.drawTradeMarkers();
+        this.drawBacktestMarkers();
+
+        // 叠加指标（VP / Supertrend / Pivot / 形态 / 供需区）—— 画在 K线之上、用户画线之下
+        if (this.overlayManager) this.overlayManager.render(this);
+
+        // 渲染画线、测量尺、多空平仓连线与持仓成本线
+        this.drawingModule.render(ctx);
+
+        this.drawScales(minPrice, maxPrice, start, end, range.barPitch);
+        this.drawCrosshair();
+      }
+
+      drawGrid(minPrice, maxPrice, start, end, barPitch) {
+        const { ctx, mainWidth, klineHeight, totalChartHeight } = this;
+        ctx.save();
+        ctx.strokeStyle = 'rgba(42, 49, 66, 0.4)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([2, 2]);
+
+        const steps = 5;
+        for (let i = 0; i <= steps; i++) {
+          const price = this.axisPrice(minPrice, maxPrice, i / steps);
+          const y = this.priceToY(price);
+          ctx.beginPath();
+          ctx.moveTo(0, y);
+          ctx.lineTo(mainWidth, y);
+          ctx.stroke();
+        }
+
+        ctx.beginPath();
+        ctx.moveTo(0, klineHeight);
+        ctx.lineTo(mainWidth, klineHeight);
+        ctx.stroke();
+
+        const stepBars = Math.max(15, Math.floor(mainWidth / (barPitch * 6)));
+        for (let i = start; i <= end; i++) {
+          if (i % stepBars === 0) {
+            const x = this.barIndexToX(i);
+            ctx.beginPath();
+            ctx.moveTo(x, 0);
+            ctx.lineTo(x, totalChartHeight);
+            ctx.stroke();
+          }
+        }
+        ctx.restore();
+      }
+
+      drawCandlesticks(start, end) {
+        const { ctx, barWidth } = this;
+        const halfWidth = barWidth / 2;
+
+        for (let i = start; i <= end; i++) {
+          const bar = this.data[i];
+          const x = this.barIndexToX(i);
+          const openY = this.priceToY(bar.open);
+          const closeY = this.priceToY(bar.close);
+          const highY = this.priceToY(bar.high);
+          const lowY = this.priceToY(bar.low);
+
+          const isUp = bar.close >= bar.open;
+          const color = isUp ? '#ef4444' : '#10b981';
+
+          ctx.strokeStyle = color;
+          ctx.fillStyle = color;
+          ctx.lineWidth = 1.2;
+
+          ctx.beginPath();
+          ctx.moveTo(x, highY);
+          ctx.lineTo(x, lowY);
+          ctx.stroke();
+
+          const top = Math.min(openY, closeY);
+          const bodyHeight = Math.max(1.5, Math.abs(closeY - openY));
+          ctx.fillRect(x - halfWidth, top, barWidth, bodyHeight);
+        }
+      }
+
+      drawVolume(start, end, maxVolume) {
+        const { ctx, klineHeight, totalChartHeight, barWidth } = this;
+        const volHeight = totalChartHeight - klineHeight;
+        const halfWidth = barWidth / 2;
+
+        ctx.save();
+        for (let i = start; i <= end; i++) {
+          const bar = this.data[i];
+          const x = this.barIndexToX(i);
+          const h = (bar.volume / maxVolume) * (volHeight - 16);
+          const y = totalChartHeight - h;
+
+          const isUp = bar.close >= bar.open;
+          ctx.fillStyle = isUp ? 'rgba(239, 68, 68, 0.45)' : 'rgba(16, 185, 129, 0.45)';
+          ctx.fillRect(x - halfWidth, y, barWidth, h);
+        }
+        ctx.restore();
+      }
+
+      drawMovingAverages(start, end) {
+        this.drawOneMA(start, end, 'ma5', '#f59e0b');
+        this.drawOneMA(start, end, 'ma10', '#06b6d4');
+        this.drawOneMA(start, end, 'ma20', '#a855f7');
+      }
+
+      drawOneMA(start, end, key, color) {
+        const { ctx } = this;
+        ctx.save();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+
+        let started = false;
+        for (let i = start; i <= end; i++) {
+          const val = this.data[i][key];
+          if (val === null || val === undefined) continue;
+          const x = this.barIndexToX(i);
+          const y = this.priceToY(val);
+          if (!started) {
+            ctx.moveTo(x, y);
+            started = true;
+          } else {
+            ctx.lineTo(x, y);
+          }
+        }
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      drawTradeMarkers() {
+        if (!this.tradingEngine || this.tradingEngine.tradeMarkers.length === 0) return;
+        const { ctx } = this;
+
+        for (const marker of this.tradingEngine.tradeMarkers) {
+          if (marker.barIndex > this.visibleDataCount - 1) continue;
+          const x = this.barIndexToX(marker.barIndex);
+          if (x < -20 || x > this.mainWidth + 20) continue;
+
+          const bar = this.data[marker.barIndex];
+          if (!bar) continue;
+
+          ctx.save();
+          if (marker.direction === 'long' || marker.type === 'buy_long') {
+            const y = this.priceToY(bar.low) + 16;
+            ctx.fillStyle = '#ef4444';
+            ctx.beginPath();
+            ctx.moveTo(x, y - 10);
+            ctx.lineTo(x - 7, y + 2);
+            ctx.lineTo(x + 7, y + 2);
+            ctx.closePath();
+            ctx.fill();
+
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('买多', x, y + 14);
+
+          } else if (marker.direction === 'short' || marker.type === 'sell_short') {
+            const y = this.priceToY(bar.high) - 16;
+            ctx.fillStyle = '#10b981';
+            ctx.beginPath();
+            ctx.moveTo(x, y + 10);
+            ctx.lineTo(x - 7, y - 2);
+            ctx.lineTo(x + 7, y - 2);
+            ctx.closePath();
+            ctx.fill();
+
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('卖空', x, y - 6);
+
+          } else if (marker.type === 'close') {
+            const isBuyClose = marker.direction === 'buy_close';
+            const y = isBuyClose ? (this.priceToY(bar.low) + 16) : (this.priceToY(bar.high) - 16);
+            ctx.fillStyle = '#f59e0b';
+            ctx.beginPath();
+            ctx.arc(x, y, 5.5, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('平', x, isBuyClose ? y + 14 : y - 7);
+          }
+          ctx.restore();
+        }
+      }
+
+      /** 自动回测的成交点：与手动复盘的标记分开画，两套数字不能混在同一个视觉层里。 */
+      drawBacktestMarkers() {
+        const marks = this.backtestMarkers;
+        if (!marks || !marks.length) return;
+        const { ctx } = this;
+        const lastIdx = this.visibleDataCount - 1;
+        ctx.save();
+        ctx.font = '10px Consolas, monospace';
+        for (const t of marks) {
+          if (t.entryIdx > lastIdx) continue;
+          const long = t.dir === 'long';
+          const x0 = this.barIndexToX(t.entryIdx);
+          const y0 = this.priceToY(t.entryPrice);
+          ctx.fillStyle = long ? '#ef4444' : '#10b981';
+          ctx.beginPath();
+          if (long) { ctx.moveTo(x0, y0 + 12); ctx.lineTo(x0 - 4, y0 + 20); ctx.lineTo(x0 + 4, y0 + 20); }
+          else { ctx.moveTo(x0, y0 - 12); ctx.lineTo(x0 - 4, y0 - 20); ctx.lineTo(x0 + 4, y0 - 20); }
+          ctx.closePath(); ctx.fill();
+
+          if (t.exitIdx <= lastIdx) {
+            const x1 = this.barIndexToX(t.exitIdx), y1 = this.priceToY(t.exitPrice);
+            ctx.strokeStyle = t.netPnL >= 0 ? 'rgba(239,68,68,0.75)' : 'rgba(16,185,129,0.75)';
+            ctx.lineWidth = 1.2; ctx.setLineDash([4, 3]);
+            ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.beginPath(); ctx.arc(x1, y1, 3, 0, Math.PI * 2); ctx.fill();
+            if (x1 > 40) {
+              ctx.fillStyle = t.netPnL >= 0 ? '#ef4444' : '#10b981';
+              ctx.fillText((t.netPnL >= 0 ? '+' : '') + Math.round(t.netPnL), x1 - 38, y1 - 4);
+            }
+          }
+        }
+        ctx.restore();
+      }
+
+      drawScales(minPrice, maxPrice, start, end, barPitch) {
+        const { ctx, width, height, mainWidth, totalChartHeight } = this;
+        ctx.save();
+        ctx.fillStyle = '#1a1e29';
+        ctx.fillRect(mainWidth, 0, this.priceScaleWidth, height);
+        ctx.fillRect(0, totalChartHeight, mainWidth, this.timeScaleHeight);
+
+        ctx.strokeStyle = '#2a3142';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(mainWidth, 0);
+        ctx.lineTo(mainWidth, height);
+        ctx.moveTo(0, totalChartHeight);
+        ctx.lineTo(mainWidth, totalChartHeight);
+        ctx.stroke();
+
+        ctx.fillStyle = '#848c9e';
+        ctx.font = '11px monospace';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+
+        const steps = 5;
+        for (let i = 0; i <= steps; i++) {
+          const price = this.axisPrice(minPrice, maxPrice, i / steps);
+          const y = this.priceToY(price);
+          ctx.fillText(fmtAxisPrice(price), mainWidth + 6, y);
+        }
+        // 轴口径必须写在轴上：对数和线性看着都像"一条价格轴"，事后没人记得是哪一种，
+        // 而对数轴上线段斜率的含义完全不同。
+        if (this.currentPriceRange && this.currentPriceRange.log) {
+          ctx.save();
+          ctx.fillStyle = '#5c6370';
+          ctx.font = 'bold 9px monospace';
+          ctx.fillText('LOG', mainWidth + this.priceScaleWidth / 2, 10);
+          ctx.restore();
+        } else if (this.currentPriceRange && this.currentPriceRange.logFallback) {
+          ctx.save();
+          ctx.fillStyle = '#f59e0b';
+          ctx.font = 'bold 9px monospace';
+          ctx.fillText('线性', mainWidth + this.priceScaleWidth / 2, 10);
+          ctx.restore();
+        }
+
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        const stepBars = Math.max(15, Math.floor(mainWidth / (barPitch * 6)));
+        for (let i = start; i <= end; i++) {
+          if (i % stepBars === 0 && this.data[i]) {
+            const x = this.barIndexToX(i);
+            // 盲复盘时日期刻度必须换成 bar 序号：X 轴上留着 "03-15" 就足够让人认出是哪一波行情，
+            // 遮住了侧栏品种名却放任时间轴照抄，等于没遮。
+            ctx.fillText(this.blindMode ? `#${i + 1}` : this.data[i].date.slice(5), x, totalChartHeight + 6);
+          }
+        }
+        ctx.restore();
+      }
+
+      drawCrosshair() {
+        if (!this.lastMousePos) return;
+        const { ctx, mainWidth, totalChartHeight } = this;
+        const { x, y } = this.lastMousePos;
+        if (x < 0 || x > mainWidth || y < 0 || y > totalChartHeight) return;
+
+        ctx.save();
+        ctx.strokeStyle = 'rgba(209, 213, 219, 0.45)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(mainWidth, y);
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, totalChartHeight);
+        ctx.stroke();
+
+        const price = this.yToPrice(y);
+        ctx.fillStyle = '#2962ff';
+        ctx.fillRect(mainWidth + 1, y - 10, this.priceScaleWidth - 2, 20);
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 11px monospace';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(price.toFixed(1), mainWidth + 6, y);
+
+        const barIdx = Math.round(this.xToBarIndex(x));
+        if (barIdx >= 0 && barIdx < this.visibleDataCount && this.data[barIdx]) {
+          const bar = this.data[barIdx];
+          ctx.fillStyle = '#2962ff';
+          ctx.fillRect(x - 42, totalChartHeight + 2, 84, 18);
+          ctx.fillStyle = '#ffffff';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          // 十字光标的日期标签同样要遮：X 轴刻度遮了、这里漏出一个 2020-01-23，照样能认出是哪段行情
+          ctx.fillText(this.blindMode ? `#${barIdx + 1}` : bar.date, x, totalChartHeight + 11);
+          this.updateLegend(bar, barIdx);
+        }
+
+        if (this.drawingModule.magnetEnabled) {
+          const coord = this.drawingModule.getChartCoordFromMouse(x, y);
+          if (coord.snapped) {
+            ctx.strokeStyle = '#06b6d4';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([]);
+            ctx.beginPath();
+            ctx.arc(this.barIndexToX(coord.barIndex), this.priceToY(coord.price), 6, 0, Math.PI * 2);
+            ctx.stroke();
+          }
+        }
+        ctx.restore();
+      }
+
+      updateLegend(bar, idx) {
+        // 盲复盘：legend 的日期换成相对根号，价格照给 —— 训练要看的就是价格行为，
+        // 但年份一露出来，复盘的人就会开始回忆"这是不是那波疫情行情"。
+        // 这里原本写的是 this.chartModule.blindMode：本方法就在 ChartModule 里面，
+        // this.chartModule 永远是 undefined，第一句就抛 TypeError，于是整条 OHLC 图例
+        // 从来没填过一次（界面上 时间/开/高/低/收 恒为 --）。drawCrosshair 用的是 this.blindMode，
+        // 两处口径不一致正是这个 bug 能活下来的原因。
+        document.getElementById('legendTime').textContent = this.blindMode
+          ? `第 ${(idx === undefined ? this.visibleDataCount - 1 : idx) + 1} 根（盲复盘）`
+          : bar.date;
+        document.getElementById('legendOpen').textContent = bar.open;
+        document.getElementById('legendHigh').textContent = bar.high;
+        document.getElementById('legendLow').textContent = bar.low;
+        document.getElementById('legendClose').textContent = bar.close;
+
+        const chg = bar.close - bar.open;
+        // 前复权会把早年价格扣到 ≤0，开盘价为 0 时百分比是 Infinity，图例上会印出 "Infinity%"
+        const chgPct = bar.open > 0 ? ` (${chg >= 0 ? '+' : ''}${((chg / bar.open) * 100).toFixed(2)}%)` : '';
+        const chgEl = document.getElementById('legendChange');
+        chgEl.textContent = `${chg >= 0 ? '+' : ''}${chg}${chgPct}`;
+        chgEl.style.color = chg >= 0 ? 'var(--up-color)' : 'var(--down-color)';
+
+        document.getElementById('legendVol').textContent = bar.volume.toLocaleString();
+        document.getElementById('legendMA5').textContent = bar.ma5 ?? '--';
+        document.getElementById('legendMA10').textContent = bar.ma10 ?? '--';
+        document.getElementById('legendMA20').textContent = bar.ma20 ?? '--';
+      }
+    }
+
+    // --- 5. REPLAY, UI & MODAL CONTROLLER ---
+    class AppController {
+      constructor(profile) {
+        this.profile = profile;
+        this.tradingEngine = new TradingEngine(profile);
+        this.chartModule = new ChartModule('chartContainer', 'chartCanvas');
+        this.chartModule.tradingEngine = this.tradingEngine;
+        this.chartModule.overlayManager = new OverlayManager();
+        this.backtestPanel = new BacktestPanel(this.chartModule, 'backtestPanelRoot', { market: profile.id });
+        // 自选池：面板只调 store 与解析层，「看盘」交回给本控制器的取数入口
+        this.watchlistPanel = new WatchlistPanel('watchlistPanelRoot', {
+          openSymbol: (code) => this.loadSymbolData(code, false),
+          toast: (msg) => this.showToast(msg),
+          marketFilter: profile.id
+        });
+        // 研究面板：寻优结果可以一键交回回测面板复现，组合直接吃自选池
+        this.researchPanel = new ResearchPanel('researchPanelRoot', {
+          chart: this.chartModule,
+          toast: (msg) => this.showToast(msg),
+          market: profile.id,
+          watchlistItems: () => this.scopedWatchlistItems(),
+          currentStrategyId: () => document.getElementById('btStrategy')?.value || 'donchianBreak',
+          currentParams: () => this.backtestPanel?.collectParams?.().params || null,
+          loadBarsFor: (it) => this.loadBarsForSymbol(it),
+          openSymbol: (code) => this.loadSymbolData(code, false),
+          runBacktestWith: (strategyId, params) => this.applyResearchParams(strategyId, params)
+        });
+        // 交易日志：手动复盘与自动回测的成交都能标注
+        this.journalPanel = new JournalPanel('journalPanelRoot', {
+          toast: (msg) => this.showToast(msg),
+          trades: () => this.allClosedTrades(),
+          snapshotCanvas: () => document.getElementById('chartCanvas')
+        });
+        this.blind = null;         // 盲复盘会话状态
+
+        this.autoPlayTimer = null;
+        this.currentSymbol = profile.defaultSymbol;
+        this.currentTradable = true;
+
+        this.init();
+      }
+
+      /** 研究/组合/扫描只吃本市场的自选池，避免把 A股 和期货混进同一个组合。 */
+      scopedWatchlistItems() {
+        return (this.watchlistPanel?.group?.items || []).filter(it => it.market === this.profile.id);
+      }
+
+      /** A股涨跌停锚定价：日内序列里往前找到上一个交易日的最后一根收盘。 */
+      prevDayCloseFor(index) {
+        const data = this.chartModule.data;
+        if (!data[index]) return null;
+        const day = String(data[index].date || '').slice(0, 10);
+        for (let j = index - 1; j >= 0; j--) {
+          if (String(data[j].date || '').slice(0, 10) !== day) return Number(data[j].close) || null;
+        }
+        return null;
+      }
+
+      init() {
+        this.bindEvents();
+        this.loadSymbolData(this.currentSymbol);
+        this.syncUI();
+      }
+
+      /** 组合回测取数用：先读缓存，没有再走三通道取数并回写缓存。周期口径与主图共用 acquireBars。 */
+      async loadBarsForSymbol(it) {
+        const periodEl = document.getElementById('periodSelect');
+        const adjustEl = document.getElementById('adjustSelect');
+        const period = periodEl ? periodEl.value : 'daily';
+        const isFutures = it.market === MARKETS.FUTURES;
+        const adjust = isFutures ? 'none' : (adjustEl ? adjustEl.value : 'hfq');
+        const key = barKey(it.market, it.symbol, period, adjust);
+        const cached = await BarStore.getCache(key);
+        if (cached && Array.isArray(cached.data) && cached.data.length >= 60) return cached.data;
+        try {
+          const out = await this.acquireBars({ market: it.market, secid: it.secid,
+                                               sinaCode: parseSymbol(it.symbol, '').sinaCode },
+                                             it.symbol, period, adjust, false);
+          if (out.ok && out.bars && out.bars.length) {
+            await cacheBars(key, out.bars, { market: it.market, symbol: it.symbol, period, adjust, name: out.name, source: out.source });
+            return out.bars;
+          }
+        } catch (e) { /* 交给调用方按"没有数据"处理 */ }
+        return null;
+      }
+
+      /**
+       * 把寻优选出的参数交回回测面板并跑一次。
+       * 这一步存在的意义：寻优表上的数字必须能在主回测里复现出来，
+       * 否则"最优参数"只是另一个页面上的漂亮数字，没人能验证它。
+       */
+      applyResearchParams(strategyId, params) {
+        const sel = document.getElementById('btStrategy');
+        if (!sel) { this.showToast('回测面板还没初始化'); return; }
+        if (strategyId) sel.value = strategyId;
+        sel.dispatchEvent(new Event('change'));          // 重建参数表单，否则下面的选择器还不存在
+        const host = document.getElementById('btParams');
+        let set = 0;
+        if (host) {
+          for (const el of host.querySelectorAll('[data-p]')) {
+            const k = el.getAttribute('data-p');
+            if (!(k in (params || {}))) continue;
+            const t = el.getAttribute('data-t');
+            if (t === 'bool') el.checked = !!params[k];
+            else el.value = params[k];
+            set++;
+          }
+        }
+        document.querySelector('.tab-btn[data-tab="tabBacktest"]').click();
+        this.backtestPanel.run();
+        this.showToast(`已把 ${set} 个参数交给回测面板复现`);
+      }
+
+      /**
+       * 汇总所有已平仓交易给日志用：手动复盘 + 自动回测各一套。
+       * id 必须加来源前缀 —— 两套引擎各自从 1 编号，直接拼会让手动第 3 笔和回测第 3 笔
+       * 共用同一条笔记，改一笔另一笔的笔记就被覆盖。
+       */
+      allClosedTrades() {
+        const manual = (this.tradingEngine.tradesHistory || []).map(t => ({ ...t, id: 'm' + t.id, source: '手动复盘' }));
+        const bt = (this.backtestPanel?.lastResult?.trades || []).map(t => ({
+          ...t, id: 'b' + t.id, source: '自动回测', symbol: t.symbol || this.currentSymbol
+        }));
+        return manual.concat(bt);
+      }
+
+      /** 抽一道盲复盘题：从自选池挑品种、截一段、遮身份。 */
+      async startBlind() {
+        const items = this.scopedWatchlistItems();
+        if (!items.length) { this.showToast('自选池是空的 —— 盲复盘的抽取池就是自选池，先加几个品种'); return; }
+        const len = Math.max(40, Math.min(400, Number(document.getElementById('blindLen').value) || 120));
+        const pool = [];
+        this.showToast(`正在准备 ${items.length} 个品种的历史数据…`);
+        for (const it of items) {
+          const bars = await this.loadBarsForSymbol(it);
+          if (bars && bars.length >= len + 2) pool.push({ name: `${it.name || ''} ${it.openCode || it.symbol}`.trim(), symbol: it, bars });
+        }
+        if (!pool.length) { this.showToast(`自选池里没有够 ${len} 根历史的品种`); return; }
+        const seed = (Date.now() % 1000000) + 1;
+        const state = pickBlindSegment(pool, { rangeLen: len, seed });
+        if (!state) { this.showToast('抽题失败：可选品种不足'); return; }
+
+        // 先备份现场，退出时原样还回去
+        this.blindBackup = {
+          data: this.chartModule.data, visible: this.chartModule.visibleDataCount,
+          scroll: this.chartModule.scrollOffset, symbol: this.currentSymbol, market: this.currentMarket
+        };
+        this.blind = state;
+        this.chartModule.blindMode = true;
+        this.chartModule.setData(state.bars);
+        // setData 会把游标推到 min(120, n) —— 不压回 1 的话一开局就把整段答案摊在桌上
+        this.chartModule.setVisibleCount(1);
+        this.chartModule.drawingModule.clearAll();
+        this.tradingEngine.reset(parseFloat(document.getElementById('inputInitialCapital').value) || 100000);
+        this.syncUI();
+        this.showToast(`盲复盘开始：${pool.length} 个候选品种，${state.bars.length} 根，推进到末尾才揭示答案`);
+      }
+
+      exitBlind(reveal = false) {
+        if (!this.blind) return;
+        const label = this.blind.label;
+        this.blind = null;
+        this.chartModule.blindMode = false;
+        const bak = this.blindBackup || {};
+        if (bak.data && bak.data.length) {
+          this.chartModule.setData(bak.data);
+          this.chartModule.setVisibleCount(bak.visible || 120);
+          this.chartModule.scrollOffset = bak.scroll || 0;
+          this.currentSymbol = bak.symbol || this.currentSymbol;
+          this.currentMarket = bak.market || this.currentMarket;
+        }
+        this.chartModule.drawingModule.clearAll();
+        this.chartModule.requestRender();
+        this.syncUI();
+        if (reveal) this.showToast(`本题品种是：${label}`);
+      }
+
+      /** 盲复盘的界面遮罩与揭示状态（syncUI 每根都要调）。 */
+      syncBlindUI() {
+        const badge = document.getElementById('blindBadge');
+        const ctl = document.getElementById('blindCtl');
+        const exitBtn = document.getElementById('btnBlindExit');
+        const posBadge = document.getElementById('posSymbolBadge');
+        if (!badge || !ctl || !exitBtn) return;
+        if (!this.blind) {
+          badge.style.display = 'none'; ctl.style.display = 'flex'; exitBtn.style.display = 'none';
+          if (posBadge) posBadge.textContent = this.currentSymbol || '—';
+          return;
+        }
+        const b = blindBadge(this.blind, this.chartModule.visibleDataCount);
+        ctl.style.display = 'none';
+        badge.style.display = 'inline-block';
+        badge.textContent = b.answer ? `揭示：${b.answer}` : `${b.symbolText} · ${b.dateText}`;
+        badge.style.borderColor = b.answer ? 'var(--accent-gold)' : 'var(--accent-blue)';
+        badge.style.color = b.answer ? 'var(--accent-gold)' : '#93c5fd';
+        exitBtn.style.display = 'inline-flex';
+        if (posBadge) posBadge.textContent = b.answer ? b.answer : '🔒 已隐藏';
+        if (b.answer && !this._blindRevealed) {
+          this._blindRevealed = true;
+          this.showToast(`已到区间末尾 —— 本题答案：${b.answer}`);
+        }
+        if (!b.answer) this._blindRevealed = false;
+      }
+
+      async loadSymbolData(rawCode, forceOnline = false) {
+        const periodEl = document.getElementById('periodSelect');
+        const period = periodEl ? periodEl.value : 'daily';
+        const adjustSel = document.getElementById('adjustSelect');
+
+        const parsed = parseSymbol(String(rawCode).trim(), '');
+        if (!parsed.ok) {
+          // hint:false —— 代码没解析出来不是"取数失败"，图上留着上一个品种的真实K线是对的，
+          // 不该配一句"宁可留白"，那会让人以为当前画面上的东西不可信。
+          this.showDataError(`代码无法解析：${rawCode}`, [],
+            parsed.reason || (this.profile.id === 'ashare'
+              ? 'A股 / ETF / 指数写 6 位码，如 600519、510300、000300。'
+              : '期货写 rb2610 / RB0 / 螺纹钢主连；具体月份合约也可。'),
+            { hint: false });
+          return;
+        }
+
+        const isFutures = parsed.market === MARKETS.FUTURES;
+        if (parsed.market !== this.profile.id) {
+          const other = isFutures ? '期货' : 'A股';
+          const page = isFutures ? '期货工作台' : 'A股工作台';
+          this.showDataError(`${other}代码不属于当前工作台`, [],
+            `${rawCode} 是${other}代码。当前是${this.profile.label}工作台，请到「${page}」处理。`,
+            { hint: false });
+          this.showToast(`❌ ${other}代码，当前是${this.profile.label}工作台`);
+          return;
+        }
+        this.currentMarket = parsed.market;
+        const adjust = isFutures ? 'none' : (adjustSel ? adjustSel.value : 'hfq');
+        const symbol = isFutures ? parsed.contractCode : parsed.code;
+        // 换品种先清掉上一轮的回测标记；代码本身等数据真正进图再改（applyDataToChart），
+        // 否则取数失败时图上还是旧品种、研究面板却已按新品种规格算成本。
+        this.chartModule.backtestMarkers = null;
+        this.chartModule.periodsPerYear = periodsPerYear(period);
+        // 寻优/组合报表读这个字段标头，以前全仓库没人赋值，于是无论选哪个周期都印 "周期 daily"
+        this.chartModule.periodLabel = periodLabel(period);
+        const cacheKey = barKey(parsed.market, symbol, period, adjust);
+        const label = isFutures
+          ? `${parsed.name}${parsed.isDominant ? ' 主连' : ''} (${symbol})`
+          : `${parsed.code} (${parsed.board || parsed.kind})`;
+        this.clearDataError();
+
+        this.applyMarketSpec(parsed);
+
+        if (!forceOnline) {
+          try {
+            const cached = await MarketDataCache.getCache(cacheKey);
+            if (cached && cached.data && cached.data.length > 5) {
+              // 缓存里可能躺着被上游静默降级过的序列（历史上新浪把"取周线"当日线返回并按
+              // weekly 键存了进来）。间隔对不上就当没有，重新向上游要，别把坏数据"秒开"出去。
+              if (!periodSpacingOk(cached.data, period)) {
+                this.showToast(`${label} ${period} 的本地缓存间隔对不上，已丢弃重取…`);
+                await MarketDataCache.deleteCache(cacheKey);
+              } else {
+                // 缓存记录里带着当初的来源，报出来：4小时/周线是本地合成的，
+                // 不说清楚的话，用户会以为这 77 根是上游直接给的 4 小时行情。
+                const csrc = { 'eastmoney': '东财', 'eastmoney-direct': '东财直连', 'sina': '新浪',
+                               'local-aggregate': '本地日线聚合', 'local-aggregate-60m': '本地60分钟合成' }[cached.meta && cached.meta.source] || '';
+                this.applyDataToChart(cached.data, label,
+                  `已从本地缓存秒开 ${label} (${cached.data.length} 根K线${csrc ? `, 源:${csrc}` : ''}, 缓存时间: ${cached.updateTime})`, symbol);
+                this.refreshCacheListUI();
+                return;
+              }
+            }
+          } catch (e) {}
+        }
+
+        this.showToast(`正在拉取 ${label} ${period} 真实行情…`);
+        let out;
+        try {
+          out = await this.acquireBars(parsed, symbol, period, adjust, forceOnline);
+        } catch (err) {
+          out = { ok: false, error: String(err && err.message || err), attempted: err && err.attempted };
+        }
+
+        if (out.ok && out.bars && out.bars.length > 0) {
+          await cacheBars(cacheKey, out.bars, { market: parsed.market, symbol, period, adjust, count: out.bars.length, name: out.name || parsed.name });
+          BarStore.putSymbol({ market: parsed.market, symbol, name: out.name || parsed.name, kind: isFutures ? 'futures' : parsed.kind, secid: parsed.secid });
+          const src = { 'eastmoney': '东财', 'eastmoney-direct': '东财直连', 'sina': '新浪',
+                        'local-aggregate': '本地日线聚合', 'local-aggregate-60m': '本地60分钟合成' }[out.source] || out.source;
+          // 前复权会把早期价格推到负数（累计扣减分红），不是脏数据而是口径后果，必须说清楚。
+          // 含 ≤0 时对数轴不成立，render 会退回线性并在轴上标「线性」—— 这里要说的是实际发生的事。
+          const negCount = out.bars.filter(b => !(b.close > 0)).length;
+          const negNote = negCount > 0
+            ? `｜⚠ 有 ${negCount} 根价格 ≤0，对数轴不成立、本次已退回线性（轴上标了「线性」）；要回对数口径请切「后复权」或「不复权」`
+            : '';
+          const depth = this.dataDepthNote(parsed, period, out);
+          this.applyDataToChart(out.bars, label,
+            `🎉 ${label} 同步成功：${out.bars.length} 根K线（源:${src}，起 ${String(out.bars[0].date).slice(0, 10)}，末根 ${out.bars[out.bars.length - 1].date}）`
+            + `${depth ? `｜${depth}` : ''}${negNote}${out.caveat ? `｜⚠ ${out.caveat}` : ''}${out.note ? `｜${out.note}` : ''}`, symbol);
+          this.warnIfThinHistory(parsed, out.bars, period);
+          this.refreshCacheListUI();
+          return;
+        }
+
+        // 缓存里还有一版真实数据就先顶着，但必须说清楚这不是最新行情
+        const stale = await MarketDataCache.getCache(cacheKey);
+        if (stale && stale.data && stale.data.length) {
+          this.applyDataToChart(stale.data, label, `在线拉取失败，已离线加载本地缓存 ${label} (${stale.data.length} 根K线, 缓存于 ${stale.updateTime})`, symbol);
+          this.refreshCacheListUI();
+        } else {
+          // 拉不到真数据就留白 —— 本项目不允许用合成K线填空，画一根假线比画不出来更糟
+          this.currentSymbol = symbol;              // 图上没数据，但重试按钮要重试刚才这个代码
+          this.chartModule.setData([]);
+          this.chartModule.backtestCode = null;
+          this._loadedBars = [];
+          this.syncUI();
+        }
+        this.showDataError(`${label} · ${period} 真实行情拉取失败`, out.attempted || [], out.error || '');
+      }
+
+      /**
+       * 周期口径的判断全在 src/data/periods.js 的 resolveBars 里 —— 不在这里复制一份，
+       * 因为自选池批量拉取也要走同一条判断，两处规则漂移过一次就已经出过"4h 拿到日线"的事故。
+       */
+      async acquireBars(parsed, symbol, period, adjust, forceOnline) {
+        return resolveBars({ market: parsed.market, symbol, secid: parsed.secid,
+                             sinaSymbol: parsed.sinaCode, period, adjust, forceOnline,
+                             // 期货日线顺带用新浪补交易所结算价；60m/4h 没有结算价可补
+                             withSettlement: parsed.market === MARKETS.FUTURES && period === 'daily' });
+      }
+
+      /**
+       * 具体月份合约只有上市以来那几根，不是 bug 是市场事实 —— 但拿它跑回测的人
+       * 多半以为自己用的是连续行情。所以数一下根数，短到不够用就明说并给出主连。
+       */
+      warnIfThinHistory(parsed, bars, period) {
+        if (parsed.market !== MARKETS.FUTURES || parsed.isDominant) return;
+        const need = period === 'daily' ? 120 : 400;
+        if (bars.length >= need) return;
+        const dom = `${parsed.variety}0`;
+        this.showDataError(
+          `${parsed.name} ${parsed.contractCode} 是具体月份合约，只有 ${bars.length} 根`,
+          [],
+          `这是该合约上市以来的全部真实行情，不是数据缺失。要跑趋势回测请用主力连续：` +
+          `「${dom} ${parsed.name}主连」（东财已拼好，日线可回溯到 2015 年）。` +
+          `注意主连的换月拼接方式上游不透明，跨换月日的价格水平不是任何人真实成交过的价。`,
+          { swapTo: dom, hint: false });
+      }
+
+      /**
+       * 取数失败横幅。逐条列出哪条通道、报什么错，再给一条能照着做的下一步 ——
+       * 只说"拉取失败"等于没说，用户无法区分"代理没起"和"东财挂了"。
+       */
+      showDataError(title, attempted, extra, actions = {}) {
+        const box = document.getElementById('dataError');
+        if (!box) return;
+        const lines = (attempted || []).filter(a => a && !/已跳过，非故障/.test(a.error || ''));
+        const body = document.getElementById('dataErrorBody');
+        const parts = lines.map(a => `· ${a.channel}：${a.error}`);
+        if (extra && !parts.some(p => p.includes(extra))) parts.push(`· ${extra}`);
+        body.textContent = parts.join('\n');
+
+        // actions.hint：false 表示"这不是取数失败，别补一句取数建议"。
+        // 短历史提示走的就是这条 —— 图上有真实K线，说"宁可留白"是自相矛盾。
+        if (actions.hint !== false) {
+          const hint = document.createElement('span');
+          hint.className = 'de-hint';
+          hint.textContent = typeof actions.hint === 'string' ? actions.hint : this.dataErrorHint(lines);
+          body.appendChild(hint);
+        }
+
+        let swap = document.getElementById('btnSwapToDominant');
+        if (actions.swapTo) {
+          if (!swap) {
+            swap = document.createElement('button');
+            swap.id = 'btnSwapToDominant';
+            swap.className = 'btn btn-sm btn-primary';
+            swap.addEventListener('click', () => {
+              const code = swap.dataset.code;
+              const input = document.getElementById('symbolInput');
+              if (input) input.value = code;
+              this.loadSymbolData(code, true);
+            });
+            document.querySelector('.data-error-head').insertBefore(swap, document.getElementById('btnRetryData'));
+          }
+          swap.dataset.code = actions.swapTo;
+          swap.textContent = `改用主连 ${actions.swapTo}`;
+          swap.hidden = false;
+        } else if (swap) {
+          swap.hidden = true;
+        }
+
+        document.getElementById('dataErrorTitle').textContent = title;
+        box.hidden = false;
+      }
+
+      clearDataError() {
+        const box = document.getElementById('dataError');
+        if (box) box.hidden = true;
+      }
+
+      /** 从失败通道里推断最可能的原因，给一条具体可执行的下一步。 */
+      dataErrorHint(lines) {
+        const all = lines.map(a => `${a.channel} ${a.error}`).join(' | ');
+        if (/本地服务器返回 404/.test(all)) {
+          return '下一步：当前这个端口只是纯静态服务器，没有 /api/kline 代理。停掉它，改用 python start.py（或 python run_local_server.py）重新打开页面。';
+        }
+        if (/eastmoney/.test(all) && /超时|timeout|Failed to fetch|reset|network|连接/i.test(all)) {
+          return '下一步：东财 push2his 此刻整段不可达（已知会 connection reset，A股和期货一起挂）。这不是本项目的 bug，稍后再试或换网络；重试按钮会强制走在线通道。';
+        }
+        if (!lines.length) return '没有真实行情可画。本项目不生成合成K线，所以图上宁可留白。';
+        return '三条通道都没取到真实行情。图上不会画合成K线，可先用「行情与缓存中心」导入 CSV，或换个品种试。';
+      }
+
+      /** 合约规格 → 账户参数输入框（乘数/保证金率）。用户仍可手改；手续费按品种费率暂不覆盖手填值。 */
+      applyContractSpec(spec) {
+        const set = (id, val) => {
+          const el = document.getElementById(id);
+          if (el && val !== undefined && val !== null) {
+            el.value = val;
+            el.dispatchEvent(new Event('change'));   // 参数绑定听的是 change（不是 input）
+          }
+        };
+        set('contractMultiplier', spec.multiplier);
+        set('marginRatio', Math.round(spec.marginRate * 10000) / 100);
+        this.tradingEngine.useSpec({
+          market: 'futures',
+          multiplier: spec.multiplier,
+          tick: spec.tick,
+          marginRate: spec.marginRate,
+          limitPct: spec.limitPct,
+          fee: spec.fee,
+          closeTodayFee: spec.closeTodayFee
+        });
+        this.currentSpec = spec;
+        this.currentTradable = true;
+      }
+
+      /** A股：乘数固定 100、全额资金、T+1、仅做多；指数只可看图，不可直接下单。 */
+      applyAShareSpec(parsed) {
+        const resolved = resolveTradeSpec(parsed.code);
+        if (!resolved.ok) { this.currentTradable = false; return; }
+        const el = document.getElementById('aShareCommRate');
+        const ratePct = el ? (parseFloat(el.value) || 2.5) : 2.5;
+        this.tradingEngine.commRate = ratePct / 10000;
+        const spec = {
+          ...resolved.spec,
+          market: 'ashare',
+          marginRate: 1,
+          tradable: parsed.kind !== 'index',
+          fee: { mode: 'rate', value: ratePct / 10000, min: 5 }
+        };
+        this.tradingEngine.useSpec(spec);
+        const quiet = (id, val) => { const node = document.getElementById(id); if (node) node.value = val; };
+        quiet('contractMultiplier', 100);
+        quiet('marginRatio', 100);
+        this.currentSpec = spec;
+        this.currentTradable = parsed.kind !== 'index';
+        if (!this.currentTradable) {
+          this.showToast('指数不可直接交易：看图可以，下单请改用对应 ETF 或股指期货');
+        }
+      }
+
+      applyMarketSpec(parsed) {
+        if (parsed.market === MARKETS.FUTURES) {
+          if (parsed.spec) this.applyContractSpec(parsed.spec);
+          return;
+        }
+        this.applyAShareSpec(parsed);
+      }
+
+
+      /**
+       * 「为什么只有这么点数据」的答案，必须写在同步成功的提示里，而不是让人自己猜。
+       * 两种短法完全不同：月份合约短是市场事实（换主连就有几年），分钟线短是上游只给最近一段。
+       */
+      dataDepthNote(parsed, period, out) {
+        const bits = [];
+        const bars = out.bars || [];
+        if (out.pages) bits.push(`分钟线往前回填了 ${out.pages} 页`);
+        if (out.exhausted && bars.length < 400) {
+          bits.push(`东财分钟线只到 ${String(bars[0] && bars[0].date || '').slice(0, 10)} 为止，再往前没有了 —— 要跑长周期分钟回测请走 CSV 导入`);
+        }
+        if (parsed && parsed.market === 'futures' && !parsed.isDominant && bars.length < 400) {
+          bits.push(`这是具体月份合约，只有上市以来那几个月 —— 想回测几年改用主连（如 ${parsed.variety}0）`);
+        }
+        return bits.join('；');
+      }
+
+      /**
+       * 自定义区间的输入框跟随当前数据：min/max 限在真实首末日期，没填过就默认整段。
+       * 只按 YYYY-MM-DD 比较；60m/4h 的 date 带钟点也能用，Safari 也不会因为
+       * `new Date('2026-10-14 10:30')` 变成 Invalid Date 而把区间切空。
+       */
+      syncCustomRangeInputs(bars) {
+        const fromEl = document.getElementById('customRangeFrom');
+        const toEl = document.getElementById('customRangeTo');
+        if (!fromEl || !toEl || !bars || !bars.length) return;
+        const first = String(bars[0].date).slice(0, 10);
+        const last = String(bars[bars.length - 1].date).slice(0, 10);
+        fromEl.min = first; fromEl.max = last;
+        toEl.min = first; toEl.max = last;
+        if (!fromEl.value) fromEl.value = first;
+        if (!toEl.value) toEl.value = last;
+      }
+
+      applyDataToChart(bars, symbol, toastMsg, code) {
+        const specCode = code || symbol;
+        const parsedSpec = parseSymbol(String(specCode || ''), '');
+        if (parsedSpec.ok && parsedSpec.market !== this.profile.id) {
+          const other = parsedSpec.market === MARKETS.FUTURES ? '期货' : 'A股';
+          this.showDataError(`${other}代码不属于当前工作台`, [],
+            `${specCode} 是${other}代码。当前是${this.profile.label}工作台，请到对应工作台打开。`, { hint: false });
+          return;
+        }
+        if (parsedSpec.ok) this.applyMarketSpec(parsedSpec);
+        else this.currentTradable = true;
+        // currentSymbol 跟图上的数据走：跨市场被拒或取数失败时，不能把旧图换成新代码。
+        this.currentSymbol = symbol;
+        this._loadedBars = bars;                       // 全量留存，切换起点时免重新拉取
+        // 代码跟数据走：研究面板/回测面板都读 backtestCode 去查合约规格，
+        // 数据换了而代码没换，会把上一个品种的乘数/保证金套在新数据上。
+        if (code) {
+          this.chartModule.backtestCode = code;
+          this.chartModule.backtestMarkers = null;
+        }
+        const offsetEl = document.getElementById('startOffset');
+        const mode = offsetEl ? offsetEl.value : '0';
+        let view = bars;
+        if (mode === 'custom' && bars.length > 0) {
+          this.syncCustomRangeInputs(bars);
+          const from = document.getElementById('customRangeFrom')?.value || '';
+          const to = document.getElementById('customRangeTo')?.value || '';
+          const sliced = sliceBarsByDate(bars, from, to);
+          if (sliced.length >= 2) view = sliced;
+          else this.showToast('自定义区间内不足 2 根 K 线，已保留全部数据');
+        } else if (mode !== 'custom') {
+          const years = parseFloat(mode) || 0;
+          if (years > 0 && bars.length > 0) {
+            // 只按字符串切：60m/4h 的 date 是 '2026-10-14 10:30' 这种形状，
+            // Safari（iPad）下 new Date() 直接给 Invalid Date，起点选择会整个失效。
+            const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(bars[bars.length - 1].date));
+            if (m) {
+              const cut = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+              cut.setUTCMonth(cut.getUTCMonth() - Math.round(years * 12));
+              const cutStr = cut.toISOString().slice(0, 10);
+              const sliced = bars.filter(b => String(b.date).slice(0, 10) >= cutStr);
+              if (sliced.length >= 2) {
+                // 回测面板要求 ≥60 根；周线/月线一年只有 52/12 根，按根数补足到 60
+                // （只往前多取几天/几周，不等于退回全历史）。
+                view = (sliced.length >= 60 || bars.length <= 60) ? sliced : bars.slice(bars.length - 60);
+              }
+            }
+          }
+        }
+        this.chartModule.setData(view);
+        const currentIndex = this.chartModule.getCurrentIndex();
+        this.tradingEngine.setBarContext(this.chartModule.getCurrentBar(),
+          this.chartModule.data[currentIndex - 1] || null, this.prevDayCloseFor(currentIndex));
+        this.tradingEngine.reset(parseFloat(document.getElementById('inputInitialCapital').value) || 100000);
+        this.syncUI();
+        if (toastMsg) this.showToast(toastMsg);
+      }
+
+      async refreshCacheListUI() {
+        const container = document.getElementById('cacheListContainer');
+        if (!container) return;
+        try {
+          const all = await MarketDataCache.listCaches();
+          const list = all.filter(item => !item.market || item.market === this.profile.id);
+          const hidden = all.length - list.length;
+          if (list.length === 0) {
+            container.innerHTML = `<div style="color:var(--text-muted); text-align:center; padding:8px;">当前工作台还没有本地缓存。${hidden ? `另有 ${hidden} 条其他市场缓存，在对应工作台查看。` : '可点击上方【🌐 在线同步】抓取真实行情并自动缓存。'}</div>`;
+            return;
+          }
+          const PERIOD_CN = { daily: '日线', weekly: '周线', monthly: '月线', '60m': '60分钟', '4h': '4小时' };
+          const ADJUST_CN = { none: '不复权', qfq: '前复权', hfq: '后复权' };
+          const esc = (v) => String(v === null || v === undefined ? '' : v)
+            .replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+          // 按末根日期倒序：最近抓过的排前面，用户才找得到
+          list.sort((a, b) => String(b.lastDate || b.updateTime || '').localeCompare(String(a.lastDate || a.updateTime || '')));
+          let html = '';
+          for (const item of list) {
+            const bars = item.data || [];
+            const marketTag = item.market === 'ashare' ? 'A股' : (item.market === 'futures' ? '期货' : '其他');
+            const periodCn = PERIOD_CN[item.period] || item.period || '';
+            const adjustCn = item.adjust && item.adjust !== 'none' ? ` ${ADJUST_CN[item.adjust] || item.adjust}` : '';
+            const legacy = item.key && !String(item.key).includes(':') ? ' ⚠旧格式' : '';
+            html += `<div style="display:flex; justify-content:space-between; align-items:center; padding:4px 6px; border-bottom:1px solid rgba(42,49,66,0.5);">
+              <div>
+                <b style="color:#60a5fa;">${esc(item.symbol || item.key)}</b>
+                <span style="color:#8b5cf6; font-size:10px; margin-left:4px;">${esc(marketTag)}${esc(periodCn)}${esc(adjustCn)}</span>
+                <span style="color:var(--text-muted); margin-left:6px;">${bars.length} 根</span>
+                <span style="color:#848c9e; font-size:10px; margin-left:6px;">(${esc(item.lastDate || '日期未知')} · ${esc(item.updateTime || '已存')})</span>${legacy}
+              </div>
+              <button class="btn btn-sm btn-primary" data-cache-key="${esc(item.key)}" style="height:18px; padding:0 6px; font-size:10px;">载入</button>
+            </div>`;
+          }
+          if (hidden > 0) {
+            html += `<div style="color:var(--text-muted); font-size:11px; padding:6px;">另有 ${hidden} 条其他市场缓存，在对应工作台查看。</div>`;
+          }
+          container.innerHTML = html;
+          // 用事件委托而不是内联 onclick：内联串在全局作用域求值，模块重构后最容易静默失效
+          container.querySelectorAll('button[data-cache-key]').forEach(btn => {
+            btn.addEventListener('click', () => this.loadFromCacheKey(btn.getAttribute('data-cache-key')));
+          });
+        } catch (e) {
+          container.innerHTML = `<div style="color:var(--text-muted); text-align:center;">读取缓存异常</div>`;
+        }
+      }
+
+      async loadFromCacheKey(key) {
+        const cached = await MarketDataCache.getCache(key);
+        const cachedMarket = cached && (cached.market || (cached.meta && cached.meta.market));
+        if (cachedMarket && cachedMarket !== this.profile.id) {
+          this.showToast(`这条缓存属于${cachedMarket === 'futures' ? '期货' : 'A股'}，当前工作台不打开`);
+          return;
+        }
+        if (cached && cached.data && cached.data.length) {
+          const symbol = cached.symbol || (cached.meta ? cached.meta.symbol : key.split(/[:_]/)[0]);
+          this.currentSymbol = symbol;              // 起点重切片会用 backtestCode，但下单记录等其他入口读 currentSymbol
+          this.applyDataToChart(cached.data, symbol, `已载入缓存: ${symbol} (${cached.data.length} 根)`, symbol);
+          const sel = document.getElementById('symbolSelect');
+          if (sel) {
+            const match = Array.from(sel.options).find(o => o.value.toUpperCase() === String(symbol).toUpperCase());
+            if (match) sel.value = match.value;
+          }
+        } else {
+          this.showToast(`缓存里没有 ${key} 的有效数据`);
+        }
+      }
+
+
+      /** 参数条：只为“已开启”的叠加层生成控件，改一项就重算重绘。 */
+      renderOverlaySettings() {
+        const bar = document.getElementById('overlaySettings');
+        const body = document.getElementById('overlaySettingsBody');
+        if (!bar || !body) return;
+        const om = this.chartModule.overlayManager;
+        const on = Object.entries(om.state).filter(([, s]) => s.on).map(([k]) => k);
+        if (on.length === 0) { bar.style.display = 'none'; body.innerHTML = ''; return; }
+        bar.style.display = 'flex';
+
+        const INP = 'background:var(--md-sys-color-surface-container-high); color:var(--md-sys-color-on-surface); border:1px solid var(--md-sys-color-outline-variant); padding:1px 4px; border-radius:var(--md-shape-xs); font-size:var(--md-type-label-sm); width:58px;';
+        const ctl = (key, field, { type = 'number', min, max, step, options } = {}) => {
+          const v = om.state[key][field];
+          const id = `ovs_${key}_${field}`;
+          if (type === 'select') {
+            return `<label>${field}<select id="${id}" style="${INP} width:auto;">` +
+              options.map(o => `<option value="${o}" ${String(o) === String(v) ? 'selected' : ''}>${o}</option>`).join('') +
+              `</select></label>`;
+          }
+          if (type === 'checkbox') {
+            return `<label style="display:flex;align-items:center;gap:3px;"><input type="checkbox" id="${id}" ${v ? 'checked' : ''} style="width:auto;" />${field}</label>`;
+          }
+          return `<label>${field}<input id="${id}" type="number" value="${v}" min="${min ?? 0}" max="${max ?? 1000}" step="${step ?? 1}" style="${INP}" /></label>`;
+        };
+
+        let html = '';
+        if (om.state.vp.on) html += `<span style="color:var(--accent-gold);">VP</span>` +
+          ctl('vp', 'mode', { type: 'select', options: ['auto', 'visible', 'lookback'] }) +
+          ctl('vp', 'bins', { min: 8, max: 200 }) + ctl('vp', 'vaPct', { min: 0.1, max: 0.95, step: 0.05 }) +
+          ctl('vp', 'lookback', { min: 20, max: 2000, step: 10 });
+        if (om.state.supertrend.on) html += `<span style="color:var(--accent-cyan);">ST</span>` +
+          ctl('supertrend', 'period', { min: 5, max: 50 }) + ctl('supertrend', 'multiplier', { min: 1, max: 10, step: 0.5 });
+        if (om.state.pivots.on) html += `<span style="color:var(--accent-blue);">Pivot</span>` +
+          ctl('pivots', 'type', { type: 'select', options: ['standard', 'fibonacci', 'camarilla', 'woodie'] }) +
+          ctl('pivots', 'timeframe', { type: 'select', options: ['daily', 'weekly', 'monthly'] }) +
+          ctl('pivots', 'visibleSets', { min: 1, max: 12, step: 1 }) +
+          ctl('pivots', 'showHL', { type: 'checkbox' });
+        if (om.state.patterns.on) html += `<span style="color:var(--accent-purple);">形态</span>` +
+          ctl('patterns', 'swingPct', { min: 0.01, max: 0.2, step: 0.005 }) + ctl('patterns', 'max', { min: 1, max: 10 });
+        if (om.state.zones.on) html += `<span style="color:var(--down-color);">供需</span>` +
+          ctl('zones', 'maxZones', { min: 1, max: 20 }) + ctl('zones', 'wyckoff', { type: 'checkbox' });
+        body.innerHTML = html;
+
+        body.querySelectorAll('[id^="ovs_"]').forEach(el => {
+          const [, key, field] = el.id.split('_');
+          const apply = () => {
+            const raw = el.type === 'checkbox' ? el.checked : el.value;
+            const num = Number(raw);
+            om.merge({ [key]: { [field]: (el.type === 'checkbox' || el.tagName === 'SELECT' || !Number.isFinite(num)) ? raw : num } });
+            this.chartModule.requestRender();
+          };
+          el.addEventListener('change', apply);
+          el.addEventListener('input', apply);
+        });
+      }
+
+      bindEvents() {
+        document.getElementById('symbolSelect').addEventListener('change', (e) => {
+          this.loadSymbolData(e.target.value, false);
+        });
+
+        // iPad 竖屏下 .side-panel 变成抽屉（CSS 里 translateX 收起），不给个开关就下不了单
+        const toggleSb = document.getElementById('btnToggleSidebar');
+        const sidePanel = document.querySelector('.side-panel');
+        if (toggleSb && sidePanel) {
+          toggleSb.addEventListener('click', () => {
+            const open = sidePanel.classList.toggle('open');
+            toggleSb.classList.toggle('active', open);
+            if (open) sidePanel.scrollTop = 0;
+          });
+        }
+
+        // 任意代码输入：解析权交给 symbolMeta，不在这里写正则
+        const loadTypedCode = () => {
+          const el = document.getElementById('symbolInput');
+          const code = (el && el.value || '').trim();
+          if (!code) { this.showToast('请先输入代码，例如 rb2610 / 600519 / sh000001'); return; }
+          this.loadSymbolData(code, false);
+        };
+        if (document.getElementById('btnLoadCode')) {
+          document.getElementById('btnLoadCode').addEventListener('click', loadTypedCode);
+        }
+        if (document.getElementById('symbolInput')) {
+          document.getElementById('symbolInput').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') loadTypedCode();
+          });
+        }
+
+        if (document.getElementById('periodSelect')) {
+          document.getElementById('periodSelect').addEventListener('change', () => {
+            const sym = document.getElementById('symbolSelect').value;
+            this.loadSymbolData(sym, false);
+          });
+        }
+
+        // 复权口径一变就是另一份数据，缓存键含 adjust，必须重新载入
+        if (document.getElementById('adjustSelect')) {
+          document.getElementById('adjustSelect').addEventListener('change', () => {
+            const sym = document.getElementById('symbolSelect').value;
+            this.loadSymbolData(sym, false);
+          });
+        }
+
+        if (document.getElementById('btnSyncOnlineData')) {
+          document.getElementById('btnSyncOnlineData').addEventListener('click', () => {
+            const sym = document.getElementById('symbolSelect').value;
+            this.loadSymbolData(sym, true);
+          });
+        }
+
+        // 失败横幅上的重试走 forceOnline，绕开那份把用户锁在旧数据里的无期限缓存
+        if (document.getElementById('btnRetryData')) {
+          document.getElementById('btnRetryData').addEventListener('click', () => {
+            this.loadSymbolData(this.currentSymbol, true);
+          });
+        }
+        if (document.getElementById('btnDismissDataError')) {
+          document.getElementById('btnDismissDataError').addEventListener('click', () => this.clearDataError());
+        }
+
+        if (document.getElementById('btnTriggerFetchOnline')) {
+          document.getElementById('btnTriggerFetchOnline').addEventListener('click', () => {
+            const sym = document.getElementById('inputCustomSymbol').value.trim() || 'EG0';
+            const period = document.getElementById('selectOnlinePeriod').value;
+            if (document.getElementById('periodSelect')) document.getElementById('periodSelect').value = period;
+            this.loadSymbolData(sym, true);
+          });
+        }
+
+        if (document.getElementById('btnRefreshCacheList')) {
+          document.getElementById('btnRefreshCacheList').addEventListener('click', () => {
+            this.refreshCacheListUI();
+            this.showToast('已刷新本地缓存列表');
+          });
+        }
+
+        if (document.getElementById('btnClearAllCache')) {
+          document.getElementById('btnClearAllCache').addEventListener('click', async () => {
+            if (confirm('确定要清空所有已缓存的真实行情数据吗？')) {
+              await MarketDataCache.clearAll();
+              this.refreshCacheListUI();
+              this.showToast('已清空本地所有行情缓存');
+            }
+          });
+        }
+
+        // 画线与测量工具切换
+        document.querySelectorAll('.tool-btn[data-tool]').forEach(btn => {
+          btn.addEventListener('click', () => {
+            document.querySelectorAll('.tool-btn[data-tool]').forEach(b => {
+              b.classList.remove('active');
+              b.setAttribute('aria-pressed', 'false');
+            });
+            btn.classList.add('active');
+            btn.setAttribute('aria-pressed', 'true');
+            this.chartModule.drawingModule.setTool(btn.dataset.tool);
+            this.showToast(`已切换至: ${btn.textContent.trim()}`);
+          });
+        });
+
+        // 磁吸开关
+        const magnetBtn = document.getElementById('btnToggleMagnet');
+        magnetBtn.addEventListener('click', () => {
+          const on = this.chartModule.drawingModule.toggleMagnet();
+          magnetBtn.textContent = on ? '🧲 磁吸: 开' : '🧲 磁吸: 关';
+          magnetBtn.classList.toggle('active', on);
+          magnetBtn.setAttribute('aria-pressed', String(on));
+          this.showToast(on ? '磁吸已开启 (自动吸附 K 线高低开收)' : '磁吸已关闭');
+        });
+
+        // 交易连线显示切换
+        const pathsBtn = document.getElementById('btnToggleTradePaths');
+        pathsBtn.addEventListener('click', () => {
+          const on = this.chartModule.drawingModule.toggleTradePaths();
+          pathsBtn.textContent = on ? '📍 交易连线: 开' : '📍 交易连线: 关';
+          pathsBtn.classList.toggle('active', on);
+          pathsBtn.setAttribute('aria-pressed', String(on));
+          this.showToast(on ? '图表已显示多空平仓连线与盈亏统计' : '图表已隐藏平仓连线');
+        });
+
+        // 叠加指标开关（TradingView 式：开关在工具栏，参数在下方参数条）
+        document.querySelectorAll('button[data-overlay]').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const name = btn.getAttribute('data-overlay');
+            const on = this.chartModule.overlayManager.toggle(name);
+            btn.classList.toggle('active', on);
+            btn.setAttribute('aria-pressed', String(on));
+            this.renderOverlaySettings();
+            this.chartModule.requestRender();
+            const cn = { vp: 'VP 量能剖面', supertrend: 'SuperTrend', pivots: 'Pivot 关键位', patterns: '形态识别', zones: '供需区' }[name];
+            this.showToast(on ? `已开启 ${cn}（启发式叠加层，仅供复盘参考）` : `已关闭 ${cn}`);
+          });
+        });
+
+        // 画线属性
+        document.getElementById('drawColorPicker').addEventListener('input', (e) => {
+          this.chartModule.drawingModule.currentColor = e.target.value;
+        });
+        document.getElementById('drawLineWidth').addEventListener('change', (e) => {
+          this.chartModule.drawingModule.currentWidth = parseInt(e.target.value);
+        });
+
+        document.getElementById('btnDeleteSelectedLine').addEventListener('click', () => {
+          if (this.chartModule.drawingModule.deleteSelected()) {
+            this.showToast('已删除选中划线');
+          } else {
+            this.showToast('未选中任何线条，请先在选择模式下点击要删除的线');
+          }
+        });
+
+        document.getElementById('btnClearAllLines').addEventListener('click', () => {
+          if (confirm('确定要清空图表上的所有画线吗？')) {
+            this.chartModule.drawingModule.clearAll();
+            this.showToast('已清空全部画线');
+          }
+        });
+
+        // 复盘控制
+        document.getElementById('btnReplayStep').addEventListener('click', () => this.stepForward());
+        document.getElementById('btnReplayReset').addEventListener('click', () => this.resetReplay());
+
+        // 回测起点：从留存的全量数据里重新切片，无需重新联网拉取。
+        // 「自定义区间」用两个原生 date 输入框（值就是 YYYY-MM-DD），起止都含。
+        const startOffsetEl = document.getElementById('startOffset');
+        const customWrap = document.getElementById('customRangeWrap');
+        customWrap.style.display = startOffsetEl.value === 'custom' ? 'flex' : 'none';
+        const applyStartOffset = () => {
+          if (!this._loadedBars || !this._loadedBars.length) return;
+          const code = this.chartModule.backtestCode || this.currentSymbol;
+          this.applyDataToChart(this._loadedBars, this.currentSymbol, undefined, code);
+          this.showToast('已按新起点重新载入，回测进度已重置');
+        };
+        startOffsetEl.addEventListener('change', () => {
+          const custom = startOffsetEl.value === 'custom';
+          customWrap.style.display = custom ? 'flex' : 'none';
+          if (custom && this._loadedBars && this._loadedBars.length) {
+            this.syncCustomRangeInputs(this._loadedBars);
+          }
+          applyStartOffset();
+        });
+        const applyCustomRange = () => {
+          if (startOffsetEl.value !== 'custom') return;
+          const from = document.getElementById('customRangeFrom').value;
+          const to = document.getElementById('customRangeTo').value;
+          if (from && to && from > to) { this.showToast('起始日期不能晚于结束日期'); return; }
+          applyStartOffset();
+        };
+        for (const id of ['customRangeFrom', 'customRangeTo']) {
+          document.getElementById(id).addEventListener('change', applyCustomRange);
+        }
+        document.getElementById('customRangeApply').addEventListener('click', applyCustomRange);
+
+        // 最新K线居中锚定
+        const anchorBtn = document.getElementById('btnToggleAnchor');
+        anchorBtn.addEventListener('click', () => {
+          const on = !this.chartModule.centerLatest;
+          this.chartModule.centerLatest = on;
+          anchorBtn.textContent = on ? '🎯 K线末端居中: 开' : '🎯 K线末端居中: 关';
+          anchorBtn.classList.toggle('active', on);
+          anchorBtn.setAttribute('aria-pressed', String(on));
+          this.chartModule.scrollOffset = 0;
+          this.chartModule.requestRender();
+        });
+        // Y 轴对数/线性切换。默认对数，留一个开关只为对照，不作为常规口径。
+        const logBtn = document.getElementById('btnToggleLogScale');
+        if (logBtn) {
+          logBtn.addEventListener('click', () => {
+            const on = !this.chartModule.logScale;
+            this.chartModule.logScale = on;
+            logBtn.textContent = on ? '📏 对数轴: 开' : '📏 对数轴: 线性';
+            logBtn.classList.toggle('active', on);
+            logBtn.setAttribute('aria-pressed', String(on));
+            this.chartModule.requestRender();
+          });
+        }
+        document.getElementById('btnReplayAutoPlay').addEventListener('click', () => this.toggleAutoPlay());
+        document.getElementById('btnShowAllBars').addEventListener('click', () => {
+          this.stopAutoPlay();
+          this.chartModule.setVisibleCount(this.chartModule.data.length);
+          this.syncUI();
+          this.showToast('已全部展开完整历史行情');
+        });
+
+        // 交易操作
+        document.getElementById('btnBuyLong').addEventListener('click', () => this.handleTrade('long'));
+        document.getElementById('btnSellShort').addEventListener('click', () => this.handleTrade('short'));
+        document.getElementById('btnClosePosition').addEventListener('click', () => this.handleClose());
+
+        // 条件单（M4）
+        document.getElementById('btnAttachCond').addEventListener('click', () => this.handleAttachConditional());
+        document.getElementById('btnClearCond').addEventListener('click', () => {
+          const r = this.tradingEngine.clearConditional();
+          this.showToast(r.message);
+          this.syncUI();
+          this.chartModule.requestRender();
+        });
+        document.getElementById('btnPartialClose').addEventListener('click', () => this.handlePartialClose());
+        document.getElementById('btnAddPosition').addEventListener('click', () => this.handleAddPosition());
+
+        // 侧边栏按钮 (单次撤销、账户分析、全部清空)
+        document.getElementById('btnUndoTrade').addEventListener('click', () => {
+          if (this.tradingEngine.undo()) {
+            this.chartModule.requestRender();
+            this.syncUI();
+            this.showToast('已撤销上一笔操作');
+          } else {
+            this.showToast('暂无可撤销的历史操作');
+          }
+        });
+
+        document.getElementById('btnOpenAnalysisModal').addEventListener('click', () => this.openAnalysisModal());
+        document.getElementById('btnSideOpenAnalysis').addEventListener('click', () => this.openAnalysisModal());
+        document.getElementById('btnCloseAnalysisModal').addEventListener('click', () => this.closeAnalysisModal());
+
+        // 权益曲线口径切换：已实现（按平仓笔数）/ 含浮动（逐根 mark-to-market）
+        ;[['modalTabRealized', 'realized'], ['modalTabFloating', 'floating']].forEach(([id, m]) => {
+          document.getElementById(id).addEventListener('click', () => {
+            this._modalEquityMode = m;
+            [['modalTabRealized', 'realized'], ['modalTabFloating', 'floating']].forEach(([bid, bm]) => {
+              const el = document.getElementById(bid);
+              const on = bm === m;
+              el.classList.toggle('active', on);
+              el.setAttribute('aria-pressed', String(on));
+            });
+            this.renderModalCharts();
+          });
+        });
+
+        document.getElementById('btnSideClearAll').addEventListener('click', () => {
+          document.getElementById('btnResetAccount').click();
+        });
+
+        // 参数配置联动
+        document.getElementById('inputInitialCapital').addEventListener('change', (e) => {
+          const cap = parseFloat(e.target.value) || 100000;
+          this.tradingEngine.initialCapital = cap;
+          this.syncUI();
+        });
+        document.getElementById('contractMultiplier').addEventListener('change', (e) => {
+          this.tradingEngine.multiplier = parseFloat(e.target.value) || 10;
+          this.syncUI();
+        });
+        document.getElementById('marginRatio').addEventListener('change', (e) => {
+          this.tradingEngine.marginRatio = (parseFloat(e.target.value) || 10) / 100;
+          this.syncUI();
+        });
+        document.getElementById('maintenanceRatio').addEventListener('change', (e) => {
+          const v = Math.min(1, Math.max(0.1, (parseFloat(e.target.value) || 75) / 100));
+          this.tradingEngine.maintenanceRatio = v;
+          this.syncUI();
+        });
+        document.getElementById('commissionPerLot').addEventListener('change', (e) => {
+          this.tradingEngine.commission = parseFloat(e.target.value) || 4;
+          this.syncUI();
+        });
+        const ashareRate = document.getElementById('aShareCommRate');
+        if (ashareRate) ashareRate.addEventListener('change', (e) => {
+          this.tradingEngine.commRate = (parseFloat(e.target.value) || 2.5) / 10000;
+          this.syncUI();
+        });
+
+        // 底部 Tab 切换
+        document.querySelectorAll('.tab-btn').forEach(btn => {
+          btn.addEventListener('click', () => {
+            document.querySelectorAll('.tab-btn').forEach(b => {
+              b.classList.remove('active');
+              b.setAttribute('aria-selected', 'false');
+            });
+            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+            btn.classList.add('active');
+            btn.setAttribute('aria-selected', 'true');
+            const target = document.getElementById(btn.dataset.tab);
+            if (target) target.classList.add('active');
+
+            if (btn.dataset.tab === 'tabEquity') {
+              this.renderEquityCurve();
+            }
+            // 日志要读 IndexedDB，只在切进去的时候刷新，别挂在每次 syncUI 上拖慢复盘
+            if (btn.dataset.tab === 'tabJournal' && this.journalPanel) {
+              this.journalPanel.reload();
+            }
+            if (btn.dataset.tab === 'tabResearch' && this.researchPanel) {
+              this.researchPanel.render();
+            }
+          });
+        });
+
+        // CSV 导入与导出
+        document.getElementById('csvFileInput').addEventListener('change', (e) => this.handleCSVUpload(e));
+        document.getElementById('btnDownloadSampleCSV').addEventListener('click', () => this.downloadSampleCSV());
+        document.getElementById('btnExportCSV').addEventListener('click', () => this.exportTradesToCSV());
+        document.getElementById('btnResetAccount').addEventListener('click', () => {
+          if (confirm('确定要清空所有回测交易记录并重置资金吗？')) {
+            this.tradingEngine.reset(parseFloat(document.getElementById('inputInitialCapital').value) || 100000);
+            this.syncUI();
+            this.showToast('账户与交易历史已重置');
+          }
+        });
+        // 键盘全局快捷键
+        window.addEventListener('keydown', (e) => {
+          if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName)) return;
+
+          if (e.code === 'Space' || e.key === 'f' || e.key === 'F') {
+            e.preventDefault();
+            this.stepForward();
+          } else if (e.key === 'b' || e.key === 'B') {
+            e.preventDefault();
+            this.handleTrade('long');
+          } else if (e.key === 's' || e.key === 'S') {
+            e.preventDefault();
+            this.handleTrade('short');
+          } else if (e.key === 'c' || e.key === 'C') {
+            e.preventDefault();
+            this.handleClose();
+          } else if (e.key === 'w' || e.key === 'W') {
+            document.querySelector('.tool-btn[data-tool="hline"]').click();
+          } else if (e.key === 'e' || e.key === 'E') {
+            document.querySelector('.tool-btn[data-tool="segment"]').click();
+          } else if (e.key === 'q' || e.key === 'Q') {
+            document.querySelector('.tool-btn[data-tool="ray"]').click();
+          } else if (e.key === 'd' || e.key === 'D') {
+            document.querySelector('.tool-btn[data-tool="measure"]').click();
+          } else if (e.key === 'r' || e.key === 'R') {
+            document.querySelector('.tool-btn[data-tool="riskreward"]').click();
+          } else if (e.key === 'm' || e.key === 'M') {
+            document.getElementById('btnToggleMagnet').click();
+          } else if (e.key === 'Delete' || e.key === 'Backspace') {
+            if (this.chartModule.drawingModule.selectedLineId) {
+              e.preventDefault();
+              this.chartModule.drawingModule.deleteSelected();
+              this.showToast('已删除选中画线');
+            }
+          } else if (e.key === 'Escape') {
+            this.closeAnalysisModal();
+            document.querySelector('.tool-btn[data-tool="select"]').click();
+          }
+        });
+      }
+
+      stepForward() {
+        const bar = this.chartModule.stepForward();
+        if (bar) {
+          const idx = this.chartModule.getCurrentIndex();
+          this.tradingEngine.setBarContext(bar, this.chartModule.data[idx - 1] || null, this.prevDayCloseFor(idx));
+
+          // 0) 上一交易日挂起的平仓（A股 T+1 / 封板）在开盘价上执行。
+          const pending = this.tradingEngine.resolvePendingExit(bar, idx);
+          if (pending) {
+            this.showToast(`🔔 挂起的平仓已成交：${pending.exitTag || pending.exitReason}，净盈亏 ${pending.netPnL.toFixed(1)} 元`);
+            this.renderEquityCurve();
+          }
+
+          // 1) 开盘先处理强平：昨日触发的挂单、或跳空直接穿维持线。
+          const openRisk = this.tradingEngine.liquidateAtOpen(bar, idx);
+          if (openRisk) {
+            this.showToast(openRisk.kind === 'cancelled' ? `ℹ ${openRisk.message}` : `⚠ ${openRisk.message}`);
+            this.renderEquityCurve();
+          }
+
+          // 2) 图上的止损/止盈线（拖过的线按拖后的价）
+          if (this.tradingEngine.position) this.checkStopLevels(bar);
+
+          // 3) 条件单（止损/止盈/移动止损/分批）——原来这段是死代码，挂了条件单不会触发
+          if (this.tradingEngine.position) {
+            const res = this.tradingEngine.evaluateConditional(bar, idx);
+            if (res.closed.length) {
+              const last = res.closed[res.closed.length - 1];
+              this.showToast(`🔔 条件单触发：${last.exitTag || last.exitReason} ${last.lots} 手，净盈亏 ${last.netPnL.toFixed(1)} 元`);
+              this.renderEquityCurve();
+            } else if (res.deferred) {
+              this.showToast(`⏳ ${res.deferred.message}`);
+            }
+          }
+
+          // 4) 盘中走完后仍持仓：用本根极值判维持线，触发则挂到下一根开盘
+          if (this.tradingEngine.position) {
+            const risk = this.tradingEngine.queueMarginExtreme(bar, idx);
+            if (risk) this.showToast(risk.kind === 'pending' ? `⚠ ${risk.message}` : `⚠ ${risk.message}`);
+          }
+
+          this.syncUI();
+        } else {
+          this.stopAutoPlay();
+          this.showToast('已推进到行情的最后一根 K 线！');
+        }
+      }
+
+      resetReplay() {
+        this.stopAutoPlay();
+        this.chartModule.setVisibleCount(40);
+        this.chartModule.scrollOffset = 0;
+        this.syncUI();
+        this.showToast('复盘进度已重置至起点');
+      }
+
+      toggleAutoPlay() {
+        if (this.autoPlayTimer) {
+          this.stopAutoPlay();
+        } else {
+          const speed = parseInt(document.getElementById('replaySpeed').value) || 500;
+          this.autoPlayTimer = setInterval(() => this.stepForward(), speed);
+          const btn = document.getElementById('btnReplayAutoPlay');
+          btn.textContent = '⏸ 暂停播放';
+          btn.classList.add('btn-primary');
+          this.showToast('自动复盘播放中...');
+        }
+      }
+
+      stopAutoPlay() {
+        if (this.autoPlayTimer) {
+          clearInterval(this.autoPlayTimer);
+          this.autoPlayTimer = null;
+        }
+        const btn = document.getElementById('btnReplayAutoPlay');
+        btn.textContent = '▶ 自动播放';
+        btn.classList.remove('btn-primary');
+      }
+
+      handleTrade(direction) {
+        const bar = this.chartModule.getCurrentBar();
+        if (!bar) {
+          this.showToast('当前无可用 K 线');
+          return;
+        }
+        if (!this.currentTradable) {
+          this.showToast('❌ 指数不可直接交易：请改用对应 ETF 或股指期货');
+          return;
+        }
+        if (direction === 'short' && !this.profile.allowShort) {
+          this.showToast('❌ A股工作台仅做多，没有卖出开空');
+          return;
+        }
+
+        const lots = parseInt(document.getElementById('tradeLots').value) || 1;
+        const price = bar.close;
+        const time = bar.date;
+        const barIdx = this.chartModule.getCurrentIndex();
+        this.tradingEngine.setBarContext(bar, this.chartModule.data[barIdx - 1] || null, this.prevDayCloseFor(barIdx));
+
+        try {
+          if (direction === 'long') {
+            this.tradingEngine.openLong(this.currentSymbol, price, lots, time, barIdx);
+            this.showToast(`✅ ${this.profile.id === 'ashare' ? '买入' : '开多'}成交: ${lots}手 @ ${price}`);
+          } else {
+            this.tradingEngine.openShort(this.currentSymbol, price, lots, time, barIdx);
+            this.showToast(`✅ 开空成交: ${lots}手 @ ${price}`);
+          }
+          this.chartModule.requestRender();
+          this.syncUI();
+        } catch (err) {
+          this.showToast(`❌ 下单失败: ${err.message}`);
+        }
+      }
+
+      /** 挂括号单：数值全交给 makeBracket 归一，界面不做任何价格推算 ——
+       *  两处各算一遍迟早给出两个止损位，而复盘的人看不出来哪个是真的。 */
+      handleAttachConditional() {
+        const pos = this.tradingEngine.position;
+        if (!pos) { this.showToast('当前无持仓，先开仓再挂条件单'); return; }
+        const num = (id) => {
+          const el = document.getElementById(id);
+          const v = el && el.value !== '' ? Number(el.value) : null;
+          return Number.isFinite(v) ? v : null;
+        };
+        const scalePct = num('condScalePct');
+        const cfg = {
+          stopPrice: num('condStopPrice'), stopPct: num('condStopPct') != null ? num('condStopPct') / 100 : null,
+          targetPrice: num('condTargetPrice'), targetPct: num('condTargetPct') != null ? num('condTargetPct') / 100 : null,
+          rr: num('condRr'), trailPct: num('condTrailPct') != null ? num('condTrailPct') / 100 : null
+        };
+        const r = this.tradingEngine.attachConditional(cfg);
+        if (!r.success) { this.showToast(`❌ ${r.message}`); return; }
+        // 分批止盈：目标单只平这一部分，剩下的带着止损继续跑
+        if (scalePct != null && scalePct > 0 && scalePct < 100) {
+          const tgt = (r.orders || []).find(o => o.kind === ORDER_KIND.TARGET);
+          if (tgt) {
+            tgt.qtyLots = Math.max(1, Math.floor(pos.lots * scalePct / 100));
+            this.showToast(`已挂：止损/止盈（止盈只平 ${tgt.qtyLots}/${pos.lots} 手）`);
+          } else {
+            this.showToast(r.message);
+          }
+        } else {
+          this.showToast(r.message);
+        }
+        this.syncUI();
+        this.chartModule.requestRender();
+      }
+
+      handlePartialClose() {
+        const bar = this.chartModule.getCurrentBar();
+        const pos = this.tradingEngine.position;
+        if (!bar || !pos) { this.showToast('当前无持仓'); return; }
+        const lotsEl = document.getElementById('condQty');
+        const lots = Math.max(1, Number(lotsEl && lotsEl.value) || 1);
+        try {
+          const res = this.tradingEngine.partialClose(lots, bar.close, bar.date, this.chartModule.getCurrentIndex());
+          if (res.deferred) { this.showToast(`⏳ ${res.message}`); return; }
+          if (res.emptied === false) this.showToast(`➖ 已减 ${lots} 手，剩 ${pos.lots} 手继续由条件单看管`);
+          else this.showToast(`➖ 已减 ${lots} 手，净盈亏 ${(res.trade && res.trade.netPnL.toFixed(1))} 元`);
+          this.chartModule.requestRender();
+          this.syncUI();
+          this.renderEquityCurve();
+        } catch (err) {
+          this.showToast(`❌ 减仓失败: ${err.message}`);
+        }
+      }
+
+      handleAddPosition() {
+        const bar = this.chartModule.getCurrentBar();
+        const pos = this.tradingEngine.position;
+        if (!bar || !pos) { this.showToast('当前无持仓，先开仓才能加仓'); return; }
+        const lotsEl = document.getElementById('condQty');
+        const lots = Math.max(1, Number(lotsEl && lotsEl.value) || 1);
+        const r = this.tradingEngine.addToPosition(pos.symbol, bar.close, lots, bar.date, this.chartModule.getCurrentIndex());
+        this.showToast(r.success ? `➕ ${r.message}` : `❌ ${r.message}`);
+        if (r.success) { this.chartModule.requestRender(); this.syncUI(); }
+      }
+
+      handleClose() {
+        const bar = this.chartModule.getCurrentBar();
+        if (!bar) return;
+
+        try {
+          const res = this.tradingEngine.closePosition(bar.close, bar.date, this.chartModule.getCurrentIndex());
+          const t = res.trade;
+          const pnlText = `${t.netPnL >= 0 ? '+' : ''}${t.netPnL.toFixed(1)} 元`;
+          this.showToast(`🔔 平仓完成! 净盈亏: ${pnlText}`);
+          this.chartModule.requestRender();
+          this.syncUI();
+          this.renderEquityCurve();
+        } catch (err) {
+          this.showToast(`❌ 平仓失败: ${err.message}`);
+        }
+      }
+
+      /** 持仓止损/止盈线：画在图上、可拖动；签名未变时不动，保住用户拖出来的价位。 */
+      syncPositionLevels() {
+        const dm = this.chartModule.drawingModule;
+        const pos = this.tradingEngine && this.tradingEngine.position;
+        const slPct = parseFloat(document.getElementById('stopLossPct').value) || 0;
+        const tpPct = parseFloat(document.getElementById('takeProfitPct').value) || 0;
+        const sig = pos ? [pos.direction, pos.entryPrice, pos.entryIndex, slPct, tpPct].join('|') : 'flat';
+        if (sig === this._posLevelSig) return;
+        this._posLevelSig = sig;
+        // 重建会把手工拖出来的价位换成输入框算出来的价位。这个替换本身是对的
+        // （改 止损% 就是想让新百分比生效），错的是过去它一声不吭。
+        const dragged = dm.lines.filter(l => l.role && l.userDragged);
+        if (dragged.length) {
+          const name = { sl: '止损', tp: '止盈', entry: '开仓' };
+          this.showToast(`⚠ 止损/止盈参数已改，手工拖过的 ${dragged.map(l => `${name[l.role]}线 ${l.p1.price.toFixed(2)}`).join('、')} 被按输入框重算覆盖`);
+        }
+        dm.lines = dm.lines.filter(l => !l.role);
+        if (pos && pos.entryPrice) {
+          const entry = pos.entryPrice;
+          const long = pos.direction === 'long';
+          const lv = this.levelColors();
+          // 从开仓那一根起画，不横贯全屏：它是"这笔交易"的价位，不是全局支撑压力。
+          // 叠加层那边已经吃过这个教训 —— 拖到最右边会让早就无效的线看着像当前有效。
+          const mk = (role, price, color) => ({
+            id: 'pos_' + role, type: 'hline', role, basePrice: entry, short: !long,
+            fromBarIndex: Number.isFinite(pos.entryIndex) ? pos.entryIndex : 0,
+            p1: { barIndex: 0, price }, color, width: 1.5, dash: [7, 4]
+          });
+          dm.lines.push(mk('entry', entry, lv.entry));
+          // 默认不止盈（0）就不画止盈线：挂一条不生效的线，只会让人以为它在起作用。
+          if (slPct > 0) dm.lines.push(mk('sl', long ? entry * (1 - slPct / 100) : entry * (1 + slPct / 100), lv.sl));
+          if (tpPct > 0) dm.lines.push(mk('tp', long ? entry * (1 + tpPct / 100) : entry * (1 - tpPct / 100), lv.tp));
+        }
+        this.chartModule.requestRender();
+      }
+
+      /**
+       * 线色跟着主题走，别在代码里写死 hex。
+       * 红涨绿跌是 A股口径：止盈在涨的那一侧所以是红，止损在跌的那一侧所以是绿
+       * （以前正好反了，和 K 线、叠加层两套语义同屏打架）。
+       */
+      levelColors() {
+        const css = getComputedStyle(document.documentElement);
+        const v = (name, fallback) => (css.getPropertyValue(name) || '').trim() || fallback;
+        return { sl: v('--data-down', '#10b981'), tp: v('--data-up', '#ef4444'), entry: v('--data-flat', '#9aa1ae') };
+      }
+
+      /**
+       * 下单前的成本与杠杆读数。
+       * 期货这一层不摆出来，"手数"就只是个数字：同样 2 手，螺纹和股指的名义差一个量级，
+       * 占用、隐含杠杆、爆仓价全都不一样。这些数以前只在下单失败的报错里露一次脸。
+       */
+      orderCostModel() {
+        const num = (id, d) => { const el = document.getElementById(id); const v = el ? parseFloat(el.value) : NaN; return Number.isFinite(v) ? v : d; };
+        const bar = this.chartModule.getCurrentBar();
+        if (!bar) return null;
+        const price = bar.close;
+        const eng = this.tradingEngine;
+        const lots = Math.max(0, Math.round(num('tradeLots', 1)));
+        const stopPct = Math.max(0, num('stopLossPct', 0));
+        const equity = eng.getTotalEquity(price);
+        const freeCash = Math.max(0, eng.cash);
+        const usedMargin = eng.position ? eng.position.margin : 0;
+
+        if (this.profile.id === 'ashare') {
+          const mult = Math.abs(eng.multiplier || 100);
+          const perLotNotional = price * mult;
+          const buyFee = eng._entryFee(price, Math.max(1, lots));
+          const sellFee = eng._exitFee(price, Math.max(1, lots));
+          const orderFee = lots > 0 ? buyFee + sellFee : 0;
+          const maxLots = perLotNotional > 0 ? Math.max(0, Math.floor((freeCash - 5) / perLotNotional)) : 0;
+          return {
+            market: 'ashare', price, mult, lots, perLotNotional, perLotMargin: perLotNotional,
+            equity, freeCash, usedMargin, orderMargin: perLotNotional * lots,
+            orderFee, buyFee, sellFee, maxLots, stopPct,
+            riskAmt: stopPct > 0 ? perLotNotional * lots * stopPct / 100 : null,
+            limitPct: eng.limitPct, isStock: true, hasStamp: !!eng.spec?.stampTax
+          };
+        }
+
+        const mult = Math.abs(num('contractMultiplier', eng && eng.multiplier) || 1);
+        const rate = Math.min(1, Math.max(0.001, num('marginRatio', (eng && eng.marginRatio || 0.1) * 100) / 100));
+        const feePerLot = Math.max(0, num('commissionPerLot', 0));
+        const perLotNotional = price * mult;
+        const perLotMargin = perLotNotional * rate;
+        const orderMargin = perLotMargin * lots;
+        const orderFee = feePerLot * lots * 2;              // 一开一平，往返
+        const maxLots = perLotMargin > 0 ? Math.floor(freeCash / perLotMargin) : 0;
+        // 维持比例跟界面输入一致；真实结算是按当日结算价重算占用，这里给的是量级，
+        // 所以文案一律写"估算"，不装作能替代柜台。
+        const maint = Math.min(1, Math.max(0.1, (eng && eng.maintenanceRatio) || 0.75));
+        const cashAfter = freeCash - orderMargin - orderFee;
+        // 杠杆要连**已有持仓**一起算：已占用保证金 ÷ 保证金率 = 已持仓名义。
+        // 只看本单的话，重仓加一笔会把风险读小一个量级。
+        const heldNotional = rate > 0.0001 ? usedMargin / rate : 0;
+        const totalNotional = heldNotional + perLotNotional * lots;
+        // 按"开多"估算：价格再跌多少，权益会掉到维持保证金线下
+        const liqDrop = (mult * lots) > 0 ? (cashAfter + orderMargin * (1 - maint)) / (mult * lots) : null;
+        const liqPrice = lots > 0 && perLotMargin > 0 ? price - liqDrop : null;
+        return { market: 'futures', price, mult, rate, lots, perLotNotional, perLotMargin, equity, freeCash, usedMargin,
+                 heldNotional, orderMargin, orderFee, maxLots, stopPct, liqPrice,
+                 leverage: equity > 0 ? totalNotional / equity : null,
+                 riskAmt: stopPct > 0 ? perLotNotional * lots * stopPct / 100 : null,
+                 isStock: false };
+      }
+
+      syncOrderCost() {
+        this.bindOrderCostOnce();
+        const host = document.getElementById('orderCost');
+        if (!host) return;
+        const m = this.orderCostModel();
+        if (!m) { host.innerHTML = ''; return; }
+        const f = (v, d = 0) => (Number.isFinite(v) ? v.toLocaleString('zh-CN', { minimumFractionDigits: d, maximumFractionDigits: d }) : '—');
+        const row = (k, v, cls) => `<div>${k} <b${cls ? ` class="${cls}"` : ''}>${v}</b></div>`;
+        const out = [];
+        if (m.isStock) {
+          out.push('<div style="display:flex;justify-content:space-between;gap:8px;">'
+            + row('每手(100股)', f(m.perLotNotional) + ' 元') + row(`本单 ${m.lots} 手金额`, f(m.orderMargin) + ' 元') + '</div>');
+          out.push('<div style="display:flex;justify-content:space-between;gap:8px;">'
+            + row('买入佣金', f(m.buyFee, 2) + ' 元') + row(m.hasStamp ? '卖出费用(佣金+印花税)' : '卖出费用(佣金+过户费)', f(m.sellFee, 2) + ' 元') + '</div>');
+          out.push('<div style="display:flex;justify-content:space-between;gap:8px;">'
+            + row('账户权益', f(m.equity) + ' 元') + row('可用现金', f(m.freeCash) + ' 元' + (m.usedMargin ? `（持仓中 ${f(m.usedMargin)}）` : '')) + '</div>');
+          out.push('<div>A股 <b class="oc-ok">全额资金、无杠杆</b>；现金最多买 <b>' + m.maxLots + '</b> 手（1 手 = 100 股）'
+            + '；佣金 ' + (this.tradingEngine.commRate * 10000).toFixed(1) + '‱（最低 5 元），卖出印花税 0.05%</div>');
+          out.push('<div><b class="oc-warn">T+1</b>：当日买入不可当日卖出；涨停封板买不进、跌停封板卖不出'
+            + (m.limitPct ? `（板幅 ${(m.limitPct * 100).toFixed(0)}%）` : '') + '</div>');
+          if (m.riskAmt !== null) out.push('<div>' + row('本单最多亏（按止损）', f(m.riskAmt) + ' 元') + '</div>');
+        } else {
+          out.push('<div style="display:flex;justify-content:space-between;gap:8px;">'
+            + row('每手名义', f(m.perLotNotional) + ' 元') + row('每手占用', f(m.perLotMargin) + ' 元（' + (m.rate * 100).toFixed(0) + '%）') + '</div>');
+          out.push('<div style="display:flex;justify-content:space-between;gap:8px;">'
+            + row(`本单 ${m.lots} 手占用`, f(m.orderMargin) + ' 元') + row('往返手续费', f(m.orderFee, 1) + ' 元') + '</div>');
+          out.push('<div style="display:flex;justify-content:space-between;gap:8px;">'
+            + row('账户权益', f(m.equity) + ' 元') + row('可用现金', f(m.freeCash) + ' 元' + (m.usedMargin ? `（占用中 ${f(m.usedMargin)}）` : '')) + '</div>');
+          out.push('<div style="display:flex;justify-content:space-between;gap:8px;">'
+            + row('总敞口杠杆' + (m.usedMargin ? '（含已持仓）' : ''), m.leverage === null ? '—' : f(m.leverage, 2) + ' 倍', m.leverage > 3 ? 'oc-warn' : 'oc-ok')
+            + row('本单最多亏', m.riskAmt === null ? '未设止损' : f(m.riskAmt) + ' 元', m.riskAmt === null ? 'oc-warn' : '') + '</div>');
+          // 账户里躺着大量闲置现金时，按公式算出来的"爆仓价"会跑到零以下 —— 那种数没有意义，
+          // 直说"打不到维持线"，别把 -390% 这种数字甩到用户脸上。
+          const liqReal = m.liqPrice !== null && m.liqPrice > 0 && m.liqPrice < m.price;
+          const liqText = m.liqPrice === null ? '—'
+            : liqReal ? `${f(m.liqPrice, 1)} 元（${f((m.liqPrice / m.price - 1) * 100, 2)}%）`
+                      : '按开多估算：跌不到维持线（闲置现金充裕）';
+          out.push('<div style="display:flex;justify-content:space-between;gap:8px;">'
+            + row('维持线价位', liqText, liqReal ? 'oc-warn' : 'oc-ok')
+            + row('资金够开吗', m.lots <= m.maxLots ? '够，上限 ' + m.maxLots + ' 手' : '不够，只能开 ' + m.maxLots + ' 手', m.lots <= m.maxLots ? 'oc-ok' : 'oc-warn') + '</div>');
+        }
+        // 当前持仓的实时风险：不是"再开一单的估算"，而是这个账户此刻离强平还有多远。
+        const live = this.tradingEngine;
+        if (live && live.position) {
+          const risk = live.marginState(m.price);
+          if (risk) {
+            const state = live.pendingLiquidation ? '已挂强平，下一根开盘执行'
+              : risk.equity < risk.maintenance ? '已跌破维持线'
+              : risk.equity < risk.marginReq ? '追保区'
+              : '安全';
+            const cls = state === '安全' ? 'oc-ok' : 'oc-warn';
+            out.push('<div style="display:flex;justify-content:space-between;gap:8px;">'
+              + row('持仓风险度', f(risk.riskRatio * 100, 0) + '%', cls)
+              + row('距维持线', risk.liqPrice === null ? '—' : f(risk.liqPrice, 1) + ' 元', cls) + '</div>');
+            out.push('<div>账户状态 <b class="' + cls + '">' + state + '</b></div>');
+          }
+        }
+        host.innerHTML = out.join('');
+      }
+
+      bindOrderCostOnce() {
+        if (this._costBound) return;
+        this._costBound = true;
+        ['tradeLots', 'contractMultiplier', 'marginRatio', 'commissionPerLot', 'aShareCommRate', 'stopLossPct', 'takeProfitPct']
+          .forEach(id => { const el = document.getElementById(id); if (el) el.addEventListener('input', () => this.syncOrderCost()); });
+        const be = document.getElementById('btnSizeEquity');
+        if (be) be.addEventListener('click', () => this.sizeByEquityPct());
+        const br = document.getElementById('btnSizeRisk');
+        if (br) br.addEventListener('click', () => this.sizeByRiskAmount());
+      }
+
+      setLots(lots, msg) {
+        const el = document.getElementById('tradeLots');
+        if (!el) return;
+        el.value = String(Math.max(1, Math.min(100, lots)));
+        this.syncOrderCost();
+        this.showToast(msg);
+      }
+
+      /** 按权益占比反推：占用 = 名义 × 保证金率，杠杆越高同样占比能开的越多 —— 这正是要提醒的地方。 */
+      sizeByEquityPct() {
+        const m = this.orderCostModel();
+        if (!m || !(m.perLotMargin > 0)) { this.showToast('算不出来：每手占用为 0'); return; }
+        const pct = parseFloat(document.getElementById('sizeEquityPct').value) || 0;
+        if (!(pct > 0)) { this.showToast('先填占权益的百分比'); return; }
+        const lots = Math.floor(m.equity * (pct / 100) / m.perLotMargin);
+        if (lots < 1) { this.showToast(`权益 ${Math.round(m.equity)} 的 ${pct}% 还不够 1 手占用（${Math.round(m.perLotMargin)} 元/手）`); return; }
+        const tail = m.isStock
+          ? `买入金额 ${Math.round(lots * m.perLotNotional)} 元（全额资金）`
+          : `占用 ${Math.round(lots * m.perLotMargin)} 元｜杠杆 ${(lots * m.perLotNotional / m.equity).toFixed(2)} 倍`;
+        this.setLots(lots, `占权益 ${pct}% → ${lots} 手｜${tail}`);
+      }
+
+      /** 按止损风险额反推：先回答"这笔最多亏多少"，再倒推手数 —— 这才是趋势交易的仓位观。 */
+      sizeByRiskAmount() {
+        const m = this.orderCostModel();
+        if (!m) return;
+        const stopPct = parseFloat(document.getElementById('stopLossPct').value) || 0;
+        if (!(stopPct > 0)) { this.showToast('这条要先设止损 %：没有止损就没有"最多亏多少"'); return; }
+        const risk = parseFloat(document.getElementById('sizeRiskAmt').value) || 0;
+        if (!(risk > 0)) { this.showToast('先填可承受的风险额（元）'); return; }
+        const per = m.perLotNotional * stopPct / 100;
+        const lots = Math.floor(risk / per);
+        if (lots < 1) { this.showToast(`风险额 ${risk} 元撑不起 1 手：1 手在 ${stopPct}% 止损下就亏 ${Math.round(per)} 元`); return; }
+        const tail = m.isStock ? '' : `｜杠杆 ${(lots * m.perLotNotional / m.equity).toFixed(2)} 倍`;
+        this.setLots(lots, `风险 ${risk} 元 ÷ 止损 ${stopPct}% → ${lots} 手｜实际风险 ${Math.round(lots * per)} 元${tail}`);
+      }
+
+      /** 推进一根后检查止损/止盈：读图上的线（拖过就按拖后的价），穿越即按线价平仓。同根同时穿越时优先止损。 */
+      checkStopLevels(bar) {
+        const pos = this.tradingEngine && this.tradingEngine.position;
+        if (!pos || !bar) return;
+        const dm = this.chartModule.drawingModule;
+        const level = role => {
+          const l = dm.lines.find(x => x.role === role);
+          return l ? l.p1.price : null;
+        };
+        const sl = level('sl'), tp = level('tp');
+        const long = pos.direction === 'long';
+        let exit = null, why = '';
+        // 跳空穿过线时按开盘成交，不按线价 —— 与自动回测的 gap_stop 同一条口径。
+        if (sl !== null && ((long && bar.low <= sl) || (!long && bar.high >= sl))) {
+          exit = (long ? bar.open <= sl : bar.open >= sl) ? bar.open : sl;
+          why = (long ? bar.open <= sl : bar.open >= sl) ? '止损(跳空按开盘)' : '止损';
+        } else if (tp !== null && ((long && bar.high >= tp) || (!long && bar.low <= tp))) {
+          exit = (long ? bar.open >= tp : bar.open <= tp) ? bar.open : tp;
+          why = (long ? bar.open >= tp : bar.open <= tp) ? '止盈(跳空按开盘)' : '止盈';
+        }
+        if (exit === null) return;
+        try {
+          const res = this.tradingEngine.requestExit(exit, bar.date, this.chartModule.getCurrentIndex(), why, why);
+          if (res.deferred) {
+            this.showToast(`⏳ ${res.message}`);
+            return;
+          }
+          const t = res.trade;
+          const pnlText = (t.netPnL >= 0 ? '+' : '') + t.netPnL.toFixed(1) + ' 元';
+          this.showToast('🔔 触发' + why + '! 净盈亏: ' + pnlText);
+          this.renderEquityCurve();
+        } catch (err) {
+          this.showToast('❌ ' + why + '触发失败: ' + err.message);
+        }
+      }
+
+      /**
+       * 条件单在途状态。
+       * 这个方法在 69a05d7（M3 主题那次 wip 存档）里被整段删掉，但 syncUI 里的调用还在 ——
+       * 于是每次开仓/平仓/推进都会抛 "not a function"，手动复盘这条路整个是坏的。
+       * 颜色改用 M3 令牌，不再用 legacy aliases。
+       */
+      renderConditionalStatus() {
+        const badge = document.getElementById('condBadge');
+        const list = document.getElementById('condOrderList');
+        if (!badge || !list) return;
+        const pos = this.tradingEngine.position;
+        const orders = (pos && pos.orders) || [];
+        const idle = 'background:var(--md-sys-color-surface-container-high); color:var(--md-sys-color-on-surface-variant);';
+        if (!pos) { badge.textContent = '无持仓'; badge.style.cssText = idle; list.innerHTML = ''; return; }
+        if (!orders.length) {
+          badge.textContent = '未挂单'; badge.style.cssText = idle;
+          list.innerHTML = '<div>未挂条件单。持仓裸奔时，出场全靠你自己按。</div>';
+          return;
+        }
+        badge.textContent = `${orders.length} 张在途`;
+        badge.style.cssText = 'background:var(--md-sys-color-primary-container); color:var(--md-sys-color-primary);';
+        const dir = pos.direction === 'long' ? 1 : -1;
+        list.innerHTML = orders.map(o => {
+          const dist = ((o.price - pos.entryPrice) / pos.entryPrice * 100 * dir).toFixed(2);
+          return `<div>· <b>${o.label}</b> ${o.price}${o.qtyLots && o.qtyLots < pos.lots ? `（平 ${o.qtyLots}/${pos.lots} 手）` : ''} <span style="color:var(--md-sys-color-on-surface-variant);">距均价 ${dist}%</span></div>`;
+        }).join('') + (pos.trailCfg ? `<div style="color:var(--md-sys-color-primary);">· 移动止损 ${((pos.trailCfg.pct || 0) * 100).toFixed(1)}% → 当前 ${pos.stop ?? '—'}</div>` : '');
+      }
+
+      syncUI() {
+        this.syncPositionLevels();
+        const bar = this.chartModule.getCurrentBar();
+        // 以前没有 bar 时兜底成 4200 —— 那是个凭空的价格，会算出一个假的动态权益显示在
+        // "账户资金概况"里。没行情就按成本价挂（浮动为 0），并在读数上说明是成本价。
+        const pos0 = this.tradingEngine.position;
+        const currentPrice = bar ? bar.close : (pos0 ? pos0.entryPrice : this.tradingEngine.cash);
+        this.renderConditionalStatus();
+        this.syncOrderCost();
+        this.syncBlindUI();
+
+        if (bar) {
+          document.getElementById('quotePrice').textContent = bar.close;
+          const chg = bar.close - bar.open;
+          // 前复权会把早年价格扣到 ≤0，开盘价为 0 时百分比是 Infinity
+          const chgPct = bar.open > 0 ? ` (${chg >= 0 ? '+' : ''}${((chg / bar.open) * 100).toFixed(2)}%)` : '';
+          const qEl = document.getElementById('quoteChange');
+          qEl.textContent = `${chg >= 0 ? '+' : ''}${chg}${chgPct}`;
+          qEl.className = `quote-change ${chg >= 0 ? 'val-up' : 'val-down'}`;
+
+          document.getElementById('btnLongPriceLabel').textContent = `@ ${bar.close}`;
+          document.getElementById('btnShortPriceLabel').textContent = `@ ${bar.close}`;
+        } else {
+          // 图上没有K线时，顶栏报价必须一起清空。留着上一个品种的 3076，
+          // 会让人以为"拉取失败但行情还在"，而下单按钮上的 @3076 还会被当成可成交价。
+          document.getElementById('quotePrice').textContent = '--';
+          const qEl = document.getElementById('quoteChange');
+          qEl.textContent = '无行情';
+          qEl.className = 'quote-change';
+          document.getElementById('btnLongPriceLabel').textContent = '@ --';
+          document.getElementById('btnShortPriceLabel').textContent = '@ --';
+        }
+
+        document.getElementById('replayBarIndexBadge').textContent = 
+          `进度: ${this.chartModule.visibleDataCount} / ${this.chartModule.data.length}`;
+
+        const totalEquity = this.tradingEngine.getTotalEquity(currentPrice);
+        const marginUsed = this.tradingEngine.position ? this.tradingEngine.position.margin : 0;
+
+        document.getElementById('displayAvailableCash').textContent = Math.round(this.tradingEngine.cash).toLocaleString();
+        document.getElementById('displayTotalEquity').textContent = Math.round(totalEquity).toLocaleString();
+        document.getElementById('displayMarginUsed').textContent = Math.round(marginUsed).toLocaleString();
+
+        const pos = this.tradingEngine.position;
+        const dirBadge = document.getElementById('posDirectionBadge');
+        if (!pos) {
+          dirBadge.className = 'pos-badge flat';
+          dirBadge.textContent = '空仓观望';
+          document.getElementById('posAvgPrice').textContent = '--';
+          document.getElementById('posPriceDiff').textContent = '--';
+          document.getElementById('posMarginAmount').textContent = '0.00 元';
+          const pnlEl = document.getElementById('posFloatingPnL');
+          pnlEl.textContent = '0.00 元';
+          pnlEl.className = 'pos-pnl';
+        } else {
+          dirBadge.className = `pos-badge ${pos.direction}`;
+          const qtyText = this.profile.id === 'ashare'
+            ? `${pos.lots}手 (${pos.lots * Math.round(this.tradingEngine.multiplier)}股)`
+            : `${pos.lots}手`;
+          dirBadge.textContent = pos.direction === 'long' ? `多头持仓 (${qtyText})` : `空头持仓 (${qtyText})`;
+          document.getElementById('posAvgPrice').textContent = `${pos.entryPrice} 元`;
+
+          const diff = pos.direction === 'long' ? (currentPrice - pos.entryPrice) : (pos.entryPrice - currentPrice);
+          const diffEl = document.getElementById('posPriceDiff');
+          const diffUnit = this.profile.id === 'ashare' ? '元' : '点';
+          diffEl.textContent = `${currentPrice} (${diff >= 0 ? '+' : ''}${diff}${diffUnit})`;
+          diffEl.className = diff >= 0 ? 'val-up' : 'val-down';
+
+          document.getElementById('posMarginAmount').textContent = `${Math.round(pos.margin).toLocaleString()} 元`;
+
+          const floating = this.tradingEngine.calcFloatingPnL(currentPrice);
+          const pnlEl = document.getElementById('posFloatingPnL');
+          pnlEl.textContent = `${floating >= 0 ? '+' : ''}${Math.round(floating).toLocaleString()} 元`;
+          pnlEl.className = `pos-pnl ${floating >= 0 ? 'val-up' : 'val-down'}`;
+        }
+
+        const stats = this.tradingEngine.getComprehensiveStatistics(currentPrice, this.chartModule.data.length);
+
+        const netProfitEl = document.getElementById('kpiNetProfit');
+        netProfitEl.textContent = `${stats.netProfit >= 0 ? '+' : ''}${stats.netProfit.toFixed(1)} 元`;
+        netProfitEl.className = `kpi-val ${stats.netProfit >= 0 ? 'val-up' : 'val-down'}`;
+
+        const retRateEl = document.getElementById('kpiReturnRate');
+        retRateEl.textContent = `${stats.returnRate >= 0 ? '+' : ''}${stats.returnRate.toFixed(2)}%`;
+        retRateEl.className = `kpi-val ${stats.returnRate >= 0 ? 'val-up' : 'val-down'}`;
+
+        document.getElementById('kpiTotalTrades').textContent = stats.totalTrades;
+        document.getElementById('kpiWinRate').textContent = `${stats.winRate.toFixed(1)}%`;
+        document.getElementById('kpiProfitRatio').textContent = stats.avgProfitRatio.toFixed(2);
+        document.getElementById('kpiMaxDrawdown').textContent = `${stats.maxDrawdownAmount.toFixed(0)} (${stats.maxDrawdownPercent.toFixed(2)}%)`;
+        document.getElementById('kpiWinLossCount').textContent = `${stats.winCount} 胜 / ${stats.lossCount} 负`;
+        document.getElementById('kpiMaxWinLoss').textContent = `+${stats.maxWin.toFixed(0)} / -${stats.maxLoss.toFixed(0)}`;
+
+        this.renderTradeTable();
+        this.renderMiniLedger();
+      }
+
+      renderTradeTable() {
+        const tbody = document.getElementById('tradeLogTableBody');
+        const history = this.tradingEngine.tradesHistory;
+
+        if (history.length === 0) {
+          tbody.innerHTML = `<tr><td colspan="13" class="cell-empty">
+            暂无已平仓交易。请在上方点击【单步 (Space)】进行复盘，配合【${this.profile.id === 'ashare' ? '买入' : '买入开多'}】/${this.profile.allowShort ? '【卖出开空】/' : ''}【${this.profile.id === 'ashare' ? '卖出清仓' : '平仓'}】体验模拟回测。
+          </td></tr>`;
+          return;
+        }
+
+        let html = '';
+        for (let i = history.length - 1; i >= 0; i--) {
+          const t = history[i];
+          const isWin = t.netPnL >= 0;
+          const dirClass = t.direction === 'long' ? 'badge-long' : 'badge-short';
+          const dirText = t.direction === 'long' ? '做多' : '做空';
+
+          html += `<tr>
+            <td>${t.id}</td>
+            <td><b>${t.symbol}</b></td>
+            <td><span class="badge ${dirClass}">${dirText}</span></td>
+            <td>${t.entryTime}</td>
+            <td>${t.exitTime}</td>
+            <td>${t.entryPrice}</td>
+            <td>${t.exitPrice}</td>
+            <td>${t.lots} 手</td>
+            <td class="${t.points >= 0 ? 'val-up' : 'val-down'}">${t.points >= 0 ? '+' : ''}${t.points}</td>
+            <td>${t.fee.toFixed(1)}</td>
+            <td class="${isWin ? 'val-up' : 'val-down'}" style="font-weight:700;">
+              ${isWin ? '+' : ''}${t.netPnL.toFixed(1)}
+            </td>
+            <td>${t.holdingBars} 根</td>
+            <td>${t.exitTag || t.exitReason || '—'}</td>
+            <td>${Math.round(t.equityAfter).toLocaleString()}</td>
+          </tr>`;
+        }
+        tbody.innerHTML = html;
+      }
+
+      // 渲染侧边栏已了结小账本 (Matching Image 6)
+      renderMiniLedger() {
+        const container = document.getElementById('miniLedgerList');
+        const history = this.tradingEngine.tradesHistory;
+        document.getElementById('closedCountBadge').textContent = `共 ${history.length} 单`;
+
+        if (history.length === 0) {
+          container.innerHTML = `<div class="empty-state">暂无已了结交易</div>`;
+          return;
+        }
+
+        let html = '';
+        for (let i = history.length - 1; i >= 0; i--) {
+          const t = history[i];
+          const isLong = t.direction === 'long';
+          const isWin = t.netPnL >= 0;
+          html += `<div class="ledger-item">
+            <div>
+              <span class="badge ${isLong ? 'badge-long' : 'badge-short'}">${isLong ? '多' : '空'}</span>
+              <span style="font-weight:600; margin-left:4px;">${t.entryPrice} → ${t.exitPrice}</span>
+            </div>
+            <div style="text-align:right;">
+              <span class="${isWin ? 'val-up' : 'val-down'}" style="font-weight:700;">
+                ${isWin ? '+' : ''}${t.netPnL.toFixed(1)}
+              </span>
+              <span style="color:var(--text-muted); margin-left:4px;">${t.holdingBars}根</span>
+            </div>
+          </div>`;
+        }
+        container.innerHTML = html;
+      }
+
+      renderEquityCurve() {
+        const canvas = document.getElementById('equityCanvas');
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        const rect = canvas.getBoundingClientRect();
+        const dpr = window.devicePixelRatio || 1;
+
+        canvas.width = rect.width * dpr;
+        canvas.height = 140 * dpr;
+        ctx.scale(dpr, dpr);
+
+        const w = rect.width;
+        const h = 140;
+        ctx.clearRect(0, 0, w, h);
+
+        const snaps = this.tradingEngine.equitySnapshots;
+        if (snaps.length < 2) {
+          ctx.fillStyle = '#848c9e';
+          ctx.font = '12px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText('至少完成 1 笔平仓交易后绘制资金曲线', w / 2, h / 2);
+          return;
+        }
+
+        let minEq = Infinity;
+        let maxEq = -Infinity;
+        for (const s of snaps) {
+          if (s.equity < minEq) minEq = s.equity;
+          if (s.equity > maxEq) maxEq = s.equity;
+        }
+
+        const padding = (maxEq - minEq) * 0.15 || 2000;
+        minEq -= padding;
+        maxEq += padding;
+
+        const getY = (val) => h - 20 - ((val - minEq) / (maxEq - minEq)) * (h - 40);
+        const getX = (idx) => 40 + (idx / (snaps.length - 1)) * (w - 70);
+
+        const initY = getY(this.tradingEngine.initialCapital);
+        ctx.strokeStyle = 'rgba(120, 123, 134, 0.4)';
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.moveTo(40, initY);
+        ctx.lineTo(w - 20, initY);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        const grad = ctx.createLinearGradient(0, 0, 0, h);
+        grad.addColorStop(0, 'rgba(41, 98, 255, 0.35)');
+        grad.addColorStop(1, 'rgba(41, 98, 255, 0.0)');
+
+        ctx.beginPath();
+        ctx.moveTo(getX(0), getY(snaps[0].equity));
+        for (let i = 1; i < snaps.length; i++) {
+          ctx.lineTo(getX(i), getY(snaps[i].equity));
+        }
+        ctx.strokeStyle = '#2962ff';
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
+
+        ctx.lineTo(getX(snaps.length - 1), h - 10);
+        ctx.lineTo(getX(0), h - 10);
+        ctx.closePath();
+        ctx.fillStyle = grad;
+        ctx.fill();
+
+        for (let i = 0; i < snaps.length; i++) {
+          ctx.fillStyle = '#ffffff';
+          ctx.beginPath();
+          ctx.arc(getX(i), getY(snaps[i].equity), 3, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        ctx.fillStyle = '#848c9e';
+        ctx.font = '10px monospace';
+        ctx.textAlign = 'left';
+        ctx.fillText(Math.round(maxEq).toLocaleString(), 4, 15);
+        ctx.fillText(Math.round(minEq).toLocaleString(), 4, h - 8);
+
+        let peakVal = 0;
+        for (const s of snaps) if (s.equity > peakVal) peakVal = s.equity;
+        document.getElementById('equityHighWaterMark').textContent = `最高资产峰值: ${Math.round(peakVal).toLocaleString()} 元`;
+      }
+
+      // 打开「账户分析」高级量化看板模态弹窗 (100% 还原 Images 1 & 5)
+      openAnalysisModal() {
+        const modal = document.getElementById('accountAnalysisModal');
+        modal.classList.add('show');
+        this._modalReturnFocus = document.activeElement;
+        modal.focus();
+
+        const bar = this.chartModule.getCurrentBar();
+        const pos = this.tradingEngine.position;
+        // 同上：没有最后一根 bar 时不许凭空拿 4200 去算账户统计，按成本价挂（浮动 0）
+        const curPrice = bar ? bar.close : (pos ? pos.entryPrice : this.tradingEngine.cash);
+        const stats = this.tradingEngine.getComprehensiveStatistics(curPrice, this.chartModule.data.length);
+
+        // 填充头部
+        document.getElementById('modalSubtitle').textContent = 
+          `全局账户 · 已结束复盘练习 · ${stats.totalTrades} 单操作`;
+
+        // 填充 4 象限量化指标
+        // 1. 方向准头
+        document.getElementById('m_totalClosed').textContent = `${stats.totalTrades} 单`;
+        document.getElementById('m_winRate').textContent = `${stats.winRate.toFixed(1)}%`;
+        document.getElementById('m_winLossRatio').textContent = `${stats.winCount} / ${stats.lossCount}`;
+        document.getElementById('m_lossRatio').textContent = `${stats.lossRate.toFixed(1)}%`;
+        document.getElementById('m_avgProfitRatio').textContent = stats.avgProfitRatio.toFixed(2);
+        document.getElementById('m_profitFactor').textContent = stats.profitFactor.toFixed(2);
+        document.getElementById('m_maxConsecutiveWins').textContent = `${stats.maxConsecutiveWins} 单`;
+
+        // 2. 爆发力
+        document.getElementById('m_expectancyR').textContent = `${stats.expectancyR.toFixed(2)} R`;
+        document.getElementById('m_compoundRate').textContent = stats.compoundRate.toFixed(4);
+        document.getElementById('m_avgWin').textContent = `+${stats.avgWin.toFixed(2)}`;
+        document.getElementById('m_maxWin').textContent = `+${stats.maxWin.toFixed(2)}`;
+        document.getElementById('m_extremeProfitRatio').textContent = stats.extremeProfitRatio.toFixed(2);
+        document.getElementById('m_maxWinContribution').textContent = `${stats.maxWinContribution.toFixed(1)}%`;
+        document.getElementById('m_returnToDrawdown').textContent = stats.returnToDrawdown.toFixed(2);
+
+        // 3. 回撤控制
+        document.getElementById('m_maxDrawdownPct').textContent = `${stats.maxDrawdownPercent.toFixed(1)}%`;
+        document.getElementById('m_maxDrawdownAmt').textContent = stats.maxDrawdownAmount.toFixed(2);
+        document.getElementById('m_avgLoss').textContent = `-${stats.avgLoss.toFixed(2)}`;
+        document.getElementById('m_maxLoss').textContent = `-${stats.maxLoss.toFixed(2)}`;
+        document.getElementById('m_maxConsecutiveLosses').textContent = `${stats.maxConsecutiveLosses} 单`;
+
+        // 4. 交易频率
+        document.getElementById('m_totalFills').textContent = `${stats.totalFills} 笔`;
+        document.getElementById('m_totalFees').textContent = stats.totalFees.toFixed(2);
+        document.getElementById('m_feeToCapital').textContent = `${stats.feeToCapital.toFixed(2)}%`;
+        document.getElementById('m_avgHoldingBars').textContent = `${stats.avgHoldingBars.toFixed(1)} 根`;
+        document.getElementById('m_intervalSpan').textContent = `${stats.intervalSpan} 根K线`;
+
+        const maxRate = (this.tradingEngine.tradesHistory || [])
+          .reduce((m, t) => Math.max(m, Number(t.positionRate) || 0), 0);
+        document.getElementById('modalMaxMarginRate').textContent = `最大仓位: ${maxRate.toFixed(0)}%`;
+
+        // 渲染 Modal 曲线图 (包含权益走势折线图与下方仓位柱状图)
+        this.renderModalCharts();
+      }
+
+      closeAnalysisModal() {
+        const modal = document.getElementById('accountAnalysisModal');
+        modal.classList.remove('show');
+        if (this._modalReturnFocus && document.contains(this._modalReturnFocus)) this._modalReturnFocus.focus();
+        this._modalReturnFocus = null;
+      }
+
+      renderModalCharts() {
+        const eqCanvas = document.getElementById('modalEquityCanvas');
+        const posCanvas = document.getElementById('modalPositionCanvas');
+        if (!eqCanvas || !posCanvas) return;
+
+        const dpr = window.devicePixelRatio || 1;
+        const rect = eqCanvas.getBoundingClientRect();
+        const w = rect.width;
+
+        // 1. 账户权益曲线
+        eqCanvas.width = w * dpr;
+        eqCanvas.height = 180 * dpr;
+        const ctxEq = eqCanvas.getContext('2d');
+        ctxEq.scale(dpr, dpr);
+        ctxEq.clearRect(0, 0, w, 180);
+
+        const mode = this._modalEquityMode || 'realized';
+        const noteEl = document.getElementById('modalEquityNote');
+        let snaps;
+        if (mode === 'floating') {
+          const bars = this.chartModule.data.slice(0, this.chartModule.visibleDataCount);
+          snaps = this.tradingEngine.buildFloatingEquitySeries(bars);
+          if (noteEl) noteEl.textContent = '横轴：K线根数（逐根 mark-to-market，含未平仓浮动）';
+        } else {
+          snaps = this.tradingEngine.equitySnapshots;
+          if (noteEl) noteEl.textContent = '横轴：平仓笔数（仅已实现，浮盈不计入）';
+        }
+        if (snaps.length < 2) {
+          ctxEq.fillStyle = '#848c9e';
+          ctxEq.font = '12px sans-serif';
+          ctxEq.textAlign = 'center';
+          ctxEq.fillText(mode === 'floating' ? '至少推进两根 K 线后绘制动态权益' : '暂无平仓历史，请先复盘至少平仓一笔', w / 2, 90);
+        } else {
+          let minEq = Infinity, maxEq = -Infinity;
+          for (const s of snaps) {
+            if (s.equity < minEq) minEq = s.equity;
+            if (s.equity > maxEq) maxEq = s.equity;
+          }
+          const pad = (maxEq - minEq) * 0.15 || 2000;
+          minEq -= pad; maxEq += pad;
+
+          const getY = (val) => 170 - ((val - minEq) / (maxEq - minEq)) * 150;
+          const getX = (idx) => 40 + (idx / (snaps.length - 1)) * (w - 70);
+
+          // 初始基准线
+          const initY = getY(this.tradingEngine.initialCapital);
+          ctxEq.strokeStyle = 'rgba(120, 123, 134, 0.4)';
+          ctxEq.setLineDash([3, 3]);
+          ctxEq.beginPath();
+          ctxEq.moveTo(40, initY);
+          ctxEq.lineTo(w - 20, initY);
+          ctxEq.stroke();
+          ctxEq.setLineDash([]);
+
+          // 绘制折线与发光渐变 (红/橙色，如 Image 5)
+          const grad = ctxEq.createLinearGradient(0, 0, 0, 180);
+          grad.addColorStop(0, 'rgba(239, 68, 68, 0.35)');
+          grad.addColorStop(1, 'rgba(239, 68, 68, 0.0)');
+
+          ctxEq.beginPath();
+          ctxEq.moveTo(getX(0), getY(snaps[0].equity));
+          for (let i = 1; i < snaps.length; i++) {
+            ctxEq.lineTo(getX(i), getY(snaps[i].equity));
+          }
+          ctxEq.strokeStyle = '#ef4444';
+          ctxEq.lineWidth = 2.5;
+          ctxEq.stroke();
+
+          ctxEq.lineTo(getX(snaps.length - 1), 175);
+          ctxEq.lineTo(getX(0), 175);
+          ctxEq.closePath();
+          ctxEq.fillStyle = grad;
+          ctxEq.fill();
+
+          if (snaps.length <= 60) {
+            for (let i = 0; i < snaps.length; i++) {
+              ctxEq.fillStyle = '#ffffff';
+              ctxEq.beginPath();
+              ctxEq.arc(getX(i), getY(snaps[i].equity), 3, 0, Math.PI * 2);
+              ctxEq.fill();
+            }
+          }
+
+          ctxEq.fillStyle = '#848c9e';
+          ctxEq.font = '10px monospace';
+          ctxEq.textAlign = 'left';
+          ctxEq.fillText(Math.round(maxEq).toLocaleString(), 4, 15);
+          ctxEq.fillText(Math.round(minEq).toLocaleString(), 4, 172);
+
+          let peak = 0;
+          for (const s of snaps) if (s.equity > peak) peak = s.equity;
+          document.getElementById('modalPeakEquity').textContent = `最高峰值: ${Math.round(peak).toLocaleString()} 元`;
+        }
+
+        // 2. 平仓前账户仓位占用率柱状图 (如 Image 5)
+        posCanvas.width = w * dpr;
+        posCanvas.height = 70 * dpr;
+        const ctxPos = posCanvas.getContext('2d');
+        ctxPos.scale(dpr, dpr);
+        ctxPos.clearRect(0, 0, w, 70);
+
+        if (snaps.length >= 2) {
+          const barW = Math.max(4, Math.min(18, (w - 70) / (snaps.length * 1.5)));
+          for (let i = 1; i < snaps.length; i++) {
+            const x = 40 + ((i - 1) / (snaps.length - 1)) * (w - 70);
+            const rate = snaps[i].positionRate || 10;
+            const barH = (rate / 100) * 55;
+            ctxPos.fillStyle = '#b45309';
+            ctxPos.fillRect(x - barW / 2, 65 - barH, barW, barH);
+          }
+        }
+      }
+
+      handleCSVUpload(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = (evt) => {
+          this.parseAndLoadCSV(evt.target.result, file.name);
+        };
+        reader.readAsText(file);
+      }
+
+      parseAndLoadCSV(text, filename) {
+        try {
+          const { bars, detectedSymbol } = parseCSV(text);
+          const symbol = detectedSymbol || filename.replace(/\.[^.]+$/, '');
+          const parsed = parseSymbol(symbol, '');
+          if (!parsed.ok) {
+            throw new Error(`无法从文件名或 symbol 列识别代码「${symbol}」。请把文件名改成代码（如 600519.csv / RB0.csv），或在 CSV 里加 symbol 列。`);
+          }
+          if (parsed.market !== this.profile.id) {
+            throw new Error(`${symbol} 是${parsed.market === 'futures' ? '期货' : 'A股'}代码，当前是${this.profile.label}工作台，不能导入。`);
+          }
+          this.applyDataToChart(bars, symbol, `🎉 成功导入 ${filename}，共 ${bars.length} 根 K 线！`, symbol);
+          document.querySelector('.tab-btn[data-tab="tabTrades"]').click();
+        } catch (err) {
+          alert('CSV 解析失败: ' + err.message);
+        }
+      }
+
+      downloadSampleCSV() {
+        downloadText('sample_format_only.csv', SAMPLE_CSV);
+      }
+
+      exportTradesToCSV() {
+        const history = this.tradingEngine.tradesHistory;
+        if (history.length === 0) {
+          this.showToast('当前暂无交易记录可供导出');
+          return;
+        }
+        const market = this.currentMarket || 'futures';
+        downloadText(`${market}_backtest_trades_${Date.now()}.csv`, tradesToCSV(history, market));
+        this.showToast('✅ 交易明细 CSV 导出成功！');
+      }
+
+      showToast(msg) {
+        const toast = document.getElementById('toast');
+        toast.textContent = msg;
+        toast.classList.add('show');
+        clearTimeout(this.toastTimer);
+        this.toastTimer = setTimeout(() => {
+          toast.classList.remove('show');
+        }, 2600);
+      }
+    }
+
+    // 入口页在注入 shell 之后才调用，DOM 已就绪；幂等防止重复绑定事件。
+    export function bootReplayApp(profile) {
+      if (window.app) return window.app;
+      window.app = new AppController(profile);
+      return window.app;
+    }
+

@@ -50,16 +50,17 @@ def main():
     port = pick_port(port)
     os.environ["TREND_PORT"] = str(port)
     os.environ["TREND_BASE"] = f"http://localhost:{port}"
-    url = f"http://localhost:{port}/futures_replay_trader.html"
+    url = f"http://localhost:{port}/index.html"
 
     import run_local_server as server
     import socketserver
 
-    print("=== 趋势交易回测系统 · 双市场（期货 + A股）===")
-    print(f"  主页 {url}")
+    print("=== 烛台簿 · Candle Ledger（期货 / A股 双工作台）===")
+    print(f"  门户 {url}")
     lan = server.lan_ip()
     if lan:
-        print(f"  平板/手机 http://{lan}:{port}/futures_replay_trader.html  （同一 Wi-Fi 下的 iPad 用这个）")
+        print(f"  平板/手机 http://{lan}:{port}/index.html  （同一 Wi-Fi 下的 iPad 用这个）")
+    print(f"  期货工作台 /futures.html · A股工作台 /ashare.html")
     print(f"  接口 /api/kline  /api/resolve  /api/ocr  /api/health")
 
     httpd = socketserver.ThreadingTCPServer(("", port), server.Handler)

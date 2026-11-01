@@ -1,5 +1,5 @@
 /* ==========================================================================
-   趋势交易回测系统 — Material Design 3 theme
+   烛台簿 · Candle Ledger — Material Design 3 theme
    Semantic tokens only. Screens must not hardcode colors; the one deliberate
    exception is the --data-* palette, documented at the bottom of :root.
    ========================================================================== */
@@ -1663,6 +1663,13 @@ kbd {
   .navbar {
     flex-wrap: wrap;
   }
+  .nav-left,
+  .contract-selector {
+    flex-wrap: wrap;
+    width: 100%;
+  }
+  .nav-left { row-gap: 6px; }
+  .contract-quote { margin-left: auto; }
   .nav-center {
     order: 3;
     width: 100%;
@@ -1742,3 +1749,60 @@ kbd {
 @media (max-width: 700px) {
   .nav-center { flex-wrap: wrap; justify-content: flex-start; }
 }
+
+/* ==========================================================================
+   双工作台入口（期货 / A股）
+   ========================================================================== */
+[hidden] { display: none !important; }
+a.brand { text-decoration: none; }
+
+.market-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px;
+  border-radius: var(--md-shape-full);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: var(--md-type-label-md);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.market-switch:hover {
+  color: var(--md-sys-color-on-surface);
+  border-color: var(--md-sys-color-outline);
+  background: var(--md-sys-color-surface-container-high);
+}
+
+.market-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px var(--md-space-3);
+  font-size: var(--md-type-body-sm);
+  color: var(--md-sys-color-on-surface-variant);
+  background: var(--md-sys-color-surface-container-low);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  border-left: 3px solid var(--md-sys-color-primary);
+}
+.market-banner b { color: var(--md-sys-color-primary); font-weight: 600; }
+.market-banner--ashare { border-left-color: var(--md-sys-color-tertiary); }
+.market-banner--ashare b { color: var(--md-sys-color-tertiary); }
+
+body.market-ashare .navbar { border-bottom-color: var(--md-sys-color-tertiary-container); }
+body.market-futures .navbar { border-bottom-color: var(--md-sys-color-primary-container); }
+
+.app-loading,
+.boot-error {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  font-family: var(--md-sys-typescale-font);
+  color: var(--md-sys-color-on-surface-variant);
+  background: var(--md-sys-color-background);
+  text-align: center;
+  line-height: 1.7;
+}
+.boot-error { color: var(--md-sys-color-error); }

@@ -1,5 +1,5 @@
 """
-趋势交易回测系统 · 本地服务器
+烛台簿 · Candle Ledger 本地服务器
 ================================
 职责（对齐演进计划 §2 目标架构）：
   1. 静态托管前端（ES module 需要 http:// 源，file:// 下浏览器拒绝加载模块）。
@@ -349,13 +349,14 @@ def lan_ip():
 
 
 def main():
-    url = f"http://localhost:{PORT}/futures_replay_trader.html"
-    print("=== 趋势交易回测系统 · 双市场（期货 + A股）===")
+    url = f"http://localhost:{PORT}/index.html"
+    print("=== 烛台簿 · Candle Ledger（期货 / A股 双工作台）===")
     print(f"本地服务: http://localhost:{PORT}")
-    print(f"主页:     {url}")
+    print(f"门户:     {url}")
+    print(f"工作台:   /futures.html  /ashare.html")
     ip = lan_ip()
     if ip:
-        print(f"平板/手机: http://{ip}:{PORT}/futures_replay_trader.html")
+        print(f"平板/手机: http://{ip}:{PORT}/index.html")
         print(f"          （iPad 与本机连同一个 Wi-Fi，上面这个地址才是它能打开的）")
     print("接口:     /api/kline  /api/resolve  /api/ocr  /api/health")
     try:

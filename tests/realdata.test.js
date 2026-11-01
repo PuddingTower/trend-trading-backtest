@@ -63,9 +63,12 @@ test('守卫：生产代码里不存在任何合成K线生成器', () => {
 test('守卫：src/data/mock.js 与 trading_core.js 已删除，取数失败只剩硬失败一条路', () => {
   assert.ok(!fs.existsSync(path.join(root, 'src', 'data', 'mock.js')), 'src/data/mock.js 不该还存在');
   assert.ok(!fs.existsSync(path.join(root, 'trading_core.js')), 'trading_core.js（含重复 mock）不该还存在');
-  const html = fs.readFileSync(path.join(root, 'futures_replay_trader.html'), 'utf8');
+  const html = ['futures.html', 'ashare.html', 'src/app/shell.html', 'src/app/replayApp.js']
+    .map(f => fs.readFileSync(path.join(root, f), 'utf8')).join('\n');
   assert.ok(/9999/.test(html) === false, '下拉框和默认品种里不许再留 *9999 仿真代码');
   assert.ok(/showDataError/.test(html), '取数失败必须有持久横幅，不能只靠 2.6 秒的 toast');
+  assert.ok(/data-market-only="futures"/.test(html) && /data-market-only="ashare"/.test(html),
+    '共享 shell 必须按工作台隔离市场专属控件');
 });
 
 const mk = (date, o, h, l, c, v = 100) => ({ date, open: o, high: h, low: l, close: c, volume: v });
@@ -202,7 +205,7 @@ test('组合引擎遇到分钟级序列必须拒跑，而不是静默压成日�
 /* ── 第三轮：浏览器冒烟抓到的两个静默错误 ─────────────────────────────── */
 
 test('ChartModule 内部不许出现 this.chartModule（那是 undefined，会抛 TypeError）', () => {
-  const html = fs.readFileSync(path.join(root, 'futures_replay_trader.html'), 'utf8').split('\n');
+  const html = fs.readFileSync(path.join(root, 'src', 'app', 'replayApp.js'), 'utf8').split('\n');
   const start = html.findIndex(l => /^    class ChartModule \{/.test(l));
   assert.ok(start > 0, '找不到 ChartModule 类起点');
   let end = start + 1;

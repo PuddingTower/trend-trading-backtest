@@ -1,0 +1,816 @@
+<body>
+
+  <!-- Top Navigation & Replay Bar -->
+  <header class="navbar">
+    <div class="nav-left">
+      <a class="brand" href="index.html" title="回到烛台簿门户">
+        <span>⚡ 烛台簿</span>
+        <span class="brand-badge" data-profile-text="badge">期货复盘工作台</span>
+      </a>
+      <a class="market-switch" data-profile-link="other" href="ashare.html">A股工作台 →</a>
+
+      <div class="contract-selector">
+        <label for="symbolSelect">品种:</label>
+        <select id="symbolSelect" aria-label="品种"></select>
+        <select id="periodSelect" title="K线周期" aria-label="K线周期">
+          <option value="daily" selected>日线</option>
+          <option value="weekly">周线</option>
+          <option value="monthly">月线</option>
+          <option value="4h" title="东财没有 4 小时这个周期，由 60 分钟按交易日连续 4 根合成">4小时</option>
+          <option value="60m">60分钟</option>
+        </select>
+        <select id="adjustSelect" data-market-only="ashare" title="价格复权口径（A股）；期货用主连拼接" aria-label="价格复权口径">
+          <option value="hfq" selected>后复权</option>
+          <option value="qfq">前复权</option>
+          <option value="none">不复权</option>
+        </select>
+        <input id="symbolInput" class="form-input" placeholder="代码/名称 如 rb2610、600519" aria-label="按代码或名称载入"
+               title="也可直接输入代码：期货 rb2610 / RB0 / 螺纹钢主连，A股 600519 / sh000001" />
+        <button class="btn btn-sm" id="btnLoadCode" title="解析输入的任意代码并载入">载入</button>
+        <button class="btn btn-sm btn-primary" id="btnSyncOnlineData" title="在线拉取真实行情并缓存至本地">🌐 在线同步</button>
+      </div>
+
+      <div class="contract-quote">
+        <span id="quotePrice" class="quote-price">4320</span>
+        <span id="quoteChange" class="quote-change val-up">+24 (+0.56%)</span>
+      </div>
+    </div>
+
+    <!-- Center Replay Controls -->
+    <div class="nav-center">
+      <span class="replay-status-badge" id="replayBarIndexBadge">进度: 120 / 260</span>
+      <select id="startOffset" class="mini-select" aria-label="回测起点" title="回测起点：只载入该时间之后的数据，切换后重载当前品种并重置账户">
+        <option value="0">全部数据</option>
+        <option value="0.5">近6个月</option>
+        <option value="1" selected>近1年</option>
+        <option value="2">近2年</option>
+        <option value="3">近3年</option>
+        <option value="custom">自定义…</option>
+      </select>
+      <button class="btn btn-sm" id="btnReplayReset" title="重置回测到初始位置">⏮ 重置</button>
+      <button class="btn btn-sm btn-primary" id="btnReplayStep" title="单步推进下一根 K 线 · 快捷键: 空格 或 F">⏭ 单步</button>
+      <button class="btn btn-sm" id="btnReplayAutoPlay">▶ 播放</button>
+      <select id="replaySpeed" class="mini-select" aria-label="自动播放速度">
+        <option value="1000">1.0秒/根</option>
+        <option value="500" selected>0.5秒/根</option>
+        <option value="200">0.2秒/根</option>
+        <option value="100">极速(0.1s)</option>
+      </select>
+      <button class="btn btn-sm" id="btnShowAllBars" title="显示全部K线">⏩ 全部</button>
+      <button class="btn btn-sm" id="btnToggleAnchor" aria-pressed="false" title="K线末端居中：最新K线固定在图表中央，推进/播放时视角自动跟随">🎯 K线末端居中: 关</button>
+    </div>
+
+    <!-- Right Quick Actions -->
+    <div class="nav-right">
+      <button class="btn btn-sm btn-warning" id="btnOpenAnalysisModal">📊 账户分析</button>
+      <button class="btn btn-sm" id="btnExportCSV">📥 导出明细</button>
+      <button class="btn btn-sm" id="btnResetAccount">🔄 清空回测</button>
+    </div>
+  </header>
+
+  <div class="market-banner" data-market-only="futures">
+    <b>T+0 双向</b> · 保证金交易 · 逐日盯市 · 权益跌破维持线强平
+  </div>
+  <div class="market-banner market-banner--ashare" data-market-only="ashare">
+    <b>T+1</b> · 仅做多 · 100 股/手 · 全额资金 · 涨停买不进 / 跌停卖不出 · 佣金最低 5 元、卖出印花税 0.05%
+  </div>
+
+  <!-- 自定义回测区间：选「自定义区间…」后出现。单独一行，避免和顶部导航抢宽度。
+       起止都含，只按 YYYY-MM-DD 前缀切片；改完日期立即重载并重置回测进度。 -->
+  <div id="customRangeWrap" class="custom-range-bar" style="display:none;">
+    <span class="custom-range-label">回测区间</span>
+    <input type="date" id="customRangeFrom" class="mini-select" aria-label="回测起始日期" title="回测起始日期（含当天）" />
+    <span class="custom-range-sep" aria-hidden="true">→</span>
+    <input type="date" id="customRangeTo" class="mini-select" aria-label="回测结束日期" title="回测结束日期（含当天）" />
+    <span class="custom-range-hint">已加载 K 线的起止日期；两端都包含</span>
+    <button class="btn btn-sm" id="customRangeApply" title="按当前起止日期重新切片">应用区间</button>
+  </div>
+
+  <!-- Drawing & Measurement Toolbar -->
+  <div class="toolbar">
+    <div class="toolbar-group">
+      <span class="toolbar-title" id="grpDraw">绘制</span>
+      <!-- 单选工具：互斥，故为分段控件 -->
+      <div class="seg-group" role="group" aria-labelledby="grpDraw">
+        <button class="tool-btn active" data-tool="select" aria-pressed="true" title="选择与平移模式 (V)">↖ 选择</button>
+        <button class="tool-btn" data-tool="hline" aria-pressed="false" title="水平支撑/阻力线 (W)">— 水平线 (W)</button>
+        <button class="tool-btn" data-tool="segment" aria-pressed="false" title="两点趋势线段 (E)">╱ 线段 (E)</button>
+        <button class="tool-btn" data-tool="ray" aria-pressed="false" title="两点向右无限延伸射线 (Q)">↗ 射线 (Q)</button>
+        <button class="tool-btn" data-tool="measure" aria-pressed="false" title="测量价格变化、点数、涨跌幅、K线周期 (D)">📐 测量尺 (D)</button>
+        <button class="tool-btn" data-tool="riskreward" aria-pressed="false" title="盈亏比测算工具：设定进场点、止盈目标与止损风险 (R)">⚖️ 盈亏比 (R)</button>
+      </div>
+    </div>
+
+    <div class="toolbar-group">
+      <span class="toolbar-title" id="grpAssist">辅助</span>
+      <button class="tool-btn" id="btnToggleMagnet" aria-pressed="false" title="自动吸附到最近K线的高/低/开/收 (M)">🧲 磁吸: 关</button>
+      <button class="tool-btn active" id="btnToggleTradePaths" aria-pressed="true" title="在K线图上显示多空平仓连线与盈亏统计">📍 交易连线: 开</button>
+      <button class="tool-btn active" id="btnToggleLogScale" aria-pressed="true" title="Y 轴对数刻度：等距像素=等率涨跌，百分比止损/回撤/通道宽度才量得准。默认开启，切线性只为对照">📏 对数轴: 开</button>
+      <input type="color" id="drawColorPicker" value="#f59e0b" class="swatch" aria-label="画线颜色" title="画线颜色" />
+      <select id="drawLineWidth" class="mini-select" aria-label="画线粗细">
+        <option value="1">细 1px</option>
+        <option value="2" selected>中 2px</option>
+        <option value="3">粗 3px</option>
+      </select>
+    </div>
+
+    <div class="toolbar-group">
+      <span class="toolbar-title" id="grpLayers">图层</span>
+      <!-- 多选叠加：可任意组合，故为筛选片 -->
+      <div class="chip-row" role="group" aria-labelledby="grpLayers">
+        <button class="tool-btn" data-overlay="vp" aria-pressed="false" title="Volume Profile：POC / VAH / VAL / HVN·LVN。自动锚定=从最近显著高低点起算">📊 VP 剖面</button>
+        <button class="tool-btn" data-overlay="supertrend" aria-pressed="false" title="Supertrend：单向动态支撑/阻力线，变色即趋势翻转">〰 SuperTrend</button>
+        <button class="tool-btn" data-overlay="pivots" aria-pressed="false" title="Pivot Points：上一期高低收算出的关键位（只用已收盘数据，不预测未来）">✛ Pivot</button>
+        <button class="tool-btn" data-overlay="patterns" aria-pressed="false" title="自动形态：头肩/双顶底/三角/楔形/旗形，标出 突破·目标·止损 三条关键位。启发式，可能误报">◈ 形态识别</button>
+        <button class="tool-btn" data-overlay="zones" aria-pressed="false" title="供需区 + Wyckoff 事件（spring/ut/sos/sow）。已跌破的区自动移除">▧ 供需区</button>
+      </div>
+    </div>
+
+    <div class="toolbar-group">
+      <span class="toolbar-title">清理</span>
+      <button class="tool-btn" id="btnDeleteSelectedLine" title="删除当前选中的线 (Delete)">🗑 删除线</button>
+      <button class="tool-btn tool-btn--danger" id="btnClearAllLines" title="清空全部画线（不可撤销）">🧹 清空画线</button>
+    </div>
+
+    <div class="toolbar-hint">
+      <span>K线配色：<b class="val-up">▲ 红涨</b> / <b class="val-down">▼ 绿跌</b></span>
+      <span aria-hidden="true">·</span>
+      <span>滚轮缩放 · 拖拽平移</span>
+    </div>
+  </div>
+
+  <!-- 叠加指标参数条：开启任一叠加层时出现（TradingView 式“指标+设置”分离） -->
+  <div id="overlaySettings" class="toolbar" style="display:none">
+    <span id="overlaySettingsBody"></span>
+  </div>
+
+  <!-- Main Split Area -->
+  <div class="workspace">
+    <!-- Chart Panel -->
+    <div class="chart-panel">
+      <!-- OHLC and Indicator Legend -->
+      <div class="chart-legend" id="chartLegend">
+        <div class="legend-item"><span class="legend-label">时间:</span> <span class="legend-val" id="legendTime">--</span></div>
+        <div class="legend-item"><span class="legend-label">开:</span> <span class="legend-val" id="legendOpen">--</span></div>
+        <div class="legend-item"><span class="legend-label">高:</span> <span class="legend-val" id="legendHigh">--</span></div>
+        <div class="legend-item"><span class="legend-label">低:</span> <span class="legend-val" id="legendLow">--</span></div>
+        <div class="legend-item"><span class="legend-label">收:</span> <span class="legend-val" id="legendClose">--</span></div>
+        <div class="legend-item"><span class="legend-label">涨跌:</span> <span class="legend-val" id="legendChange">--</span></div>
+        <div class="legend-item"><span class="legend-label">成交量:</span> <span class="legend-val" id="legendVol">--</span></div>
+        <div class="legend-item legend-ma5"><span class="legend-label">MA5:</span> <span class="legend-val" id="legendMA5">--</span></div>
+        <div class="legend-item legend-ma10"><span class="legend-label">MA10:</span> <span class="legend-val" id="legendMA10">--</span></div>
+        <div class="legend-item legend-ma20"><span class="legend-label">MA20:</span> <span class="legend-val" id="legendMA20">--</span></div>
+      </div>
+
+      <!-- 取数失败横幅：本项目不允许虚拟K线，所以拉不到真数据时图上必须什么都不画，
+           并把"哪条通道、什么错、下一步做什么"摆在图面上。toast 会自己消失，不足以承担这个责任。 -->
+      <div class="data-error" id="dataError" hidden>
+        <div class="data-error-head">
+          <span class="data-error-title" id="dataErrorTitle">行情拉取失败</span>
+          <button type="button" class="btn btn-sm" id="btnRetryData">重试</button>
+          <button type="button" class="data-error-close" id="btnDismissDataError" aria-label="关闭提示">✕</button>
+        </div>
+        <div class="data-error-body" id="dataErrorBody"></div>
+      </div>
+
+      <!-- Canvas Container -->
+      <div class="chart-container" id="chartContainer">
+        <canvas id="chartCanvas"></canvas>
+      </div>
+    </div>
+
+    <!-- Side Panel: Trading, Position & Mini Ledger -->
+    <aside class="side-panel">
+      <!-- Account Info -->
+      <div class="panel-section">
+        <div class="section-title">
+          <span>账户资金概况</span>
+          <span data-profile-text="accountBadge">T+0 双向交易</span>
+        </div>
+        <div class="form-grid">
+          <div class="form-group">
+            <span class="form-label">初始资金(元)</span>
+            <input type="number" id="inputInitialCapital" class="form-input" value="100000" step="10000" />
+          </div>
+          <div class="form-group">
+            <span class="form-label">可用资金(元)</span>
+            <div id="displayAvailableCash" class="form-input is-readonly">100,000</div>
+          </div>
+        </div>
+
+        <div class="form-grid">
+          <div class="form-group">
+            <span class="form-label">动态总权益(元)</span>
+            <div id="displayTotalEquity" class="form-input is-readonly">100,000</div>
+          </div>
+          <div class="form-group">
+            <span class="form-label" data-profile-text="marginUsedLabel">占用保证金(元)</span>
+            <div id="displayMarginUsed" class="form-input is-readonly">0</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Contract & Order Setup -->
+      <div class="panel-section">
+        <div class="section-title">
+          <span>下单委托参数</span>
+        </div>
+        <div class="form-grid">
+          <div class="form-group">
+            <span class="form-label" data-profile-text="qtyLabel">下单手数(手)</span>
+            <input type="number" id="tradeLots" class="form-input" value="1" min="1" max="100" />
+          </div>
+          <div class="form-group" data-market-only="futures">
+            <span class="form-label">合约乘数(吨/手)</span>
+            <input type="number" id="contractMultiplier" class="form-input" value="10" />
+          </div>
+          <div class="form-group" data-market-only="ashare">
+            <span class="form-label">每手股数</span>
+            <div class="form-input is-readonly">100</div>
+          </div>
+        </div>
+
+        <div class="form-grid">
+          <div class="form-group" data-market-only="futures">
+            <span class="form-label">保证金率(%)</span>
+            <input type="number" id="marginRatio" class="form-input" value="10" step="1" />
+          </div>
+          <div class="form-group" data-market-only="futures">
+            <span class="form-label">单边手续费(元/手)</span>
+            <input type="number" id="commissionPerLot" class="form-input" value="4" step="0.5" />
+          </div>
+        </div>
+
+        <div class="form-grid" data-market-only="ashare">
+          <div class="form-group">
+            <span class="form-label">佣金费率(万分之)</span>
+            <input type="number" id="aShareCommRate" class="form-input" value="2.5" step="0.5" min="0" title="券商佣金，双边收取，单笔最低 5 元" />
+          </div>
+          <div class="form-group">
+            <span class="form-label">卖出印花税 / 过户费</span>
+            <div style="font-size:11px; color:var(--md-sys-color-on-surface-variant); line-height:1.5;">
+              印花税 0.05%（仅卖出）· 过户费 0.001%（双边）<br />由 src/markets/marketRules.js 统一计费
+            </div>
+          </div>
+        </div>
+
+        <div class="form-grid" data-market-only="futures">
+          <div class="form-group">
+            <span class="form-label">维持保证金比例(%)</span>
+            <input type="number" id="maintenanceRatio" class="form-input" value="75" min="10" max="100" step="1" />
+          </div>
+          <div class="form-group" data-market-only="futures">
+            <span class="form-label">强平口径</span>
+            <div style="font-size:11px; color:var(--md-sys-color-on-surface-variant); line-height:1.5;">
+              权益 &lt; 占用×该比例 → 下一根开盘强平；A股/全额占用不适用
+            </div>
+          </div>
+        </div>
+
+        <!-- 下单前的成本与杠杆读数。期货的风险不在"买不买得到"，在杠杆那一层：
+             这些数字以前只在下单失败的报错里出现，等于让用户靠试错去理解自己开了多大仓。 -->
+        <div id="orderCost" class="order-cost" aria-live="polite"></div>
+
+        <div class="form-grid">
+          <div class="form-group">
+            <span class="form-label">按权益占比反推手数</span>
+            <div class="sizer">
+              <input type="number" id="sizeEquityPct" class="form-input" value="20" min="0" step="5" aria-label="占权益百分比" />
+              <button type="button" class="btn btn-sm" id="btnSizeEquity" title="手数 = 权益 × 占比 ÷ 每手占用保证金，算完回填到上面的手数框">占权益%</button>
+            </div>
+          </div>
+          <div class="form-group">
+            <span class="form-label">按止损风险额反推手数</span>
+            <div class="sizer">
+              <input type="number" id="sizeRiskAmt" class="form-input" value="2000" min="0" step="100" aria-label="单笔最大亏损金额" />
+              <button type="button" class="btn btn-sm" id="btnSizeRisk" title="手数 = 风险额 ÷（每手名义 × 止损%）。这是趋势交易真正该问的问题：这笔最多亏多少">风险额元</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-grid">
+          <div class="form-group">
+            <span class="form-label">止损 %（0=关闭）</span>
+            <input type="number" id="stopLossPct" class="form-input" value="5" min="0" step="0.5" />
+          </div>
+          <div class="form-group">
+            <span class="form-label">止盈 %（0=不止盈）</span>
+            <input type="number" id="takeProfitPct" class="form-input" value="0" min="0" step="0.5" />
+          </div>
+        </div>
+
+        <!-- Order Execution Buttons -->
+        <div class="trade-actions">
+          <button class="btn-trade-long" id="btnBuyLong" title="快捷键: B">
+            <span data-profile-text="tradeLongLabel">买入开多 (B)</span>
+            <span id="btnLongPriceLabel">@ 4320</span>
+          </button>
+          <button class="btn-trade-short" id="btnSellShort" data-market-only="futures" title="快捷键: S">
+            <span>卖出开空 (S)</span>
+            <span id="btnShortPriceLabel">@ 4320</span>
+          </button>
+          <button class="btn-trade-close" id="btnClosePosition" title="快捷键: C" data-profile-text="tradeCloseLabel">
+            一键平仓 (C)
+          </button>
+        </div>
+      </div>
+
+      <!-- 条件单（M4）。触发判定走 src/core/orders.js，和自动回测是同一个函数：
+           两边各写一套的话，人工按键和策略信号会在同一根 bar 上给出不同出场点。 -->
+      <div class="panel-section">
+        <div class="section-title">
+          <span>条件单 / 移动止损</span>
+          <span id="condBadge" class="badge">未挂单</span>
+        </div>
+        <div class="form-grid">
+          <div class="form-group">
+            <span class="form-label">止损 %</span>
+            <input type="number" id="condStopPct" class="form-input" step="0.1" min="0" placeholder="如 2" />
+          </div>
+          <div class="form-group">
+            <span class="form-label">止盈 %</span>
+            <input type="number" id="condTargetPct" class="form-input" step="0.1" min="0" placeholder="如 5" />
+          </div>
+        </div>
+        <div class="form-grid">
+          <div class="form-group">
+            <span class="form-label">盈亏比 rr</span>
+            <input type="number" id="condRr" class="form-input" step="0.1" min="0" placeholder="留空用止盈%" title="给了 rr 就按「风险额 × rr」推止盈，这是交易者真正想要的挂法" />
+          </div>
+          <div class="form-group">
+            <span class="form-label">移动止损 %</span>
+            <input type="number" id="condTrailPct" class="form-input" step="0.1" min="0" placeholder="从极值回撤" />
+          </div>
+        </div>
+        <div class="form-grid">
+          <div class="form-group">
+            <span class="form-label">止损价(优先)</span>
+            <input type="number" id="condStopPrice" class="form-input" step="0.01" placeholder="结构位" />
+          </div>
+          <div class="form-group">
+            <span class="form-label">止盈价</span>
+            <input type="number" id="condTargetPrice" class="form-input" step="0.01" placeholder="可留空" />
+          </div>
+        </div>
+        <div class="form-grid">
+          <div class="form-group">
+            <span class="form-label">部分平仓/加仓(手)</span>
+            <input type="number" id="condQty" class="form-input" value="1" min="1" />
+          </div>
+          <div class="form-group">
+            <span class="form-label">分批止盈比例</span>
+            <input type="number" id="condScalePct" class="form-input" step="10" min="0" max="100" placeholder="留空=全平" />
+          </div>
+        </div>
+        <div class="trade-actions">
+          <button class="btn btn-sm" id="btnAttachCond" title="给当前持仓挂止损/止盈/移动止损（OCO 括号单）">📌 挂括号单</button>
+          <button class="btn btn-sm" id="btnClearCond" title="撤掉当前持仓的全部条件单">✖ 撤条件单</button>
+          <button class="btn btn-sm" id="btnPartialClose" title="只平一部分，剩下的继续由条件单看管">➖ 部分平仓</button>
+          <button class="btn btn-sm" id="btnAddPosition" title="金字塔加仓，均价按手数加权上移">➕ 加仓</button>
+        </div>
+        <div id="condOrderList" style="font-size:11px; color:var(--text-muted); margin-top:6px; line-height:1.7;"></div>
+      </div>
+
+      <!-- Current Position Status -->
+      <div class="panel-section">
+        <div class="section-title">
+          <span>当前持仓监控</span>
+          <span id="posSymbolBadge" class="badge">EG0</span>
+        </div>
+
+        <div class="position-card">
+          <div class="position-header">
+            <span>方向 & 手数:</span>
+            <span id="posDirectionBadge" class="pos-badge flat">空仓观望</span>
+          </div>
+
+          <div class="pos-row">
+            <span>持仓均价:</span>
+            <span id="posAvgPrice">--</span>
+          </div>
+
+          <div class="pos-row">
+            <span>现价 / 涨跌:</span>
+            <span id="posPriceDiff">--</span>
+          </div>
+
+          <div class="pos-row">
+            <span data-profile-text="positionMarginLabel">保证金占用:</span>
+            <span id="posMarginAmount" class="muted">0.00 元</span>
+          </div>
+
+          <hr class="divider" />
+
+          <div class="pos-row">
+            <span>浮动盈亏:</span>
+            <span id="posFloatingPnL" class="pos-pnl">0.00 元</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Practice Ledger & Completed Trades (Matching Image 6) -->
+      <div class="panel-section" style="flex:1;">
+        <div class="section-title">
+          <span>已了结明细</span>
+          <span id="closedCountBadge">共 0 单</span>
+        </div>
+
+        <div class="ledger-list" id="miniLedgerList">
+          <div class="empty-state">暂无已了结交易</div>
+        </div>
+
+        <div class="ledger-actions">
+          <button class="btn btn-sm btn-warning" id="btnSideOpenAnalysis" style="flex:1;">📊 本次曲线</button>
+          <button class="btn btn-sm" id="btnUndoTrade" style="flex:1;" title="撤销上一笔平仓或开仓">↩ 单次撤销</button>
+          <button class="btn btn-sm" id="btnSideClearAll" style="flex:1;">🧹 全部清空</button>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- Bottom Panel: KPI Dashboard, Trade History, Equity Curve -->
+  <div class="bottom-panel">
+    <!-- Tab Navigation -->
+    <div class="tab-header">
+      <div class="tab-buttons">
+        <button class="tab-btn active" data-tab="tabTrades">📝 交易明细与记录</button>
+        <button class="tab-btn" data-tab="tabEquity">📈 资金净值曲线 (Equity)</button>
+        <button class="tab-btn" data-tab="tabBacktest">🤖 策略自动回测</button>
+        <button class="tab-btn" data-tab="tabWatchlist">⭐ 自选池与识图导入</button>
+        <button class="tab-btn" data-tab="tabResearch">🔬 寻优·组合·报表</button>
+        <button class="tab-btn" data-tab="tabJournal">📔 交易日志与复盘</button>
+        <button class="tab-btn" data-tab="tabUpload">🌐 行情与缓存中心 (真实在线 / IndexedDB / CSV)</button>
+        <button class="tab-btn" data-tab="tabHelp">⌨️ 快捷键与使用指南</button>
+      </div>
+
+      <div class="tab-hint">
+        回测统计实时计算已平仓记录 · 点击右上角【📊 账户分析】查看高级多维绩效
+      </div>
+    </div>
+
+    <!-- Core KPI Summary Banner -->
+    <div class="kpi-bar">
+      <div class="kpi-card">
+        <span class="kpi-title">累计净利润</span>
+        <span class="kpi-val" id="kpiNetProfit">0.00</span>
+      </div>
+      <div class="kpi-card">
+        <span class="kpi-title">总收益率</span>
+        <span class="kpi-val" id="kpiReturnRate">0.00%</span>
+      </div>
+      <div class="kpi-card">
+        <span class="kpi-title">总交易次数</span>
+        <span class="kpi-val" id="kpiTotalTrades">0</span>
+      </div>
+      <div class="kpi-card">
+        <span class="kpi-title">胜率 (Win Rate)</span>
+        <span class="kpi-val" id="kpiWinRate">0.00%</span>
+      </div>
+      <div class="kpi-card">
+        <span class="kpi-title">盈亏比 (P/L Ratio)</span>
+        <span class="kpi-val" id="kpiProfitRatio">0.00</span>
+      </div>
+      <div class="kpi-card">
+        <span class="kpi-title">最大回撤 (Drawdown)</span>
+        <span class="kpi-val val-down" id="kpiMaxDrawdown">0.00 (0.00%)</span>
+      </div>
+      <div class="kpi-card">
+        <span class="kpi-title">盈利 / 亏损笔数</span>
+        <span class="kpi-val" id="kpiWinLossCount">0 / 0</span>
+      </div>
+      <div class="kpi-card">
+        <span class="kpi-title">最大单笔盈/亏</span>
+        <span class="kpi-val" id="kpiMaxWinLoss">0 / 0</span>
+      </div>
+    </div>
+
+    <!-- Tab 1: Trade Log Table -->
+    <div id="tabTrades" class="tab-content active">
+      <table class="table-container">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>合约</th>
+            <th>方向</th>
+            <th>开仓时间</th>
+            <th>平仓时间</th>
+            <th>开仓价</th>
+            <th>平仓价</th>
+            <th data-profile-text="lotsHeader">手数</th>
+            <th data-profile-text="pointsHeader">盈亏点数</th>
+            <th>手续费</th>
+            <th>净盈亏(元)</th>
+            <th>持仓周期</th>
+            <th>原因</th>
+            <th>平仓后权益</th>
+          </tr>
+        </thead>
+        <tbody id="tradeLogTableBody">
+          <tr>
+            <td colspan="14" class="cell-empty">
+              暂无已平仓交易。请在上方点击【单步 (Space)】进行复盘，配合【买入开多】/【卖出开空】/【平仓】体验模拟回测。
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Tab 2: Equity Curve -->
+    <div id="tabEquity" class="tab-content">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+        <span class="muted">账户资金权益走势曲线 (按每笔平仓结算)</span>
+        <span id="equityHighWaterMark" class="hint-gold">最高资产峰值: 100,000 元</span>
+      </div>
+      <canvas id="equityCanvas"></canvas>
+    </div>
+
+    <!-- Tab 2.5: 策略自动回测（撮合在 src/core/backtestEngine.js，面板只收集参数与展示） -->
+    <div id="tabBacktest" class="tab-content">
+      <div id="backtestPanelRoot"></div>
+    </div>
+
+    <!-- Tab: 自选池（M3）。存储用 IndexedDB 的 watchlist store，识图在本地走 rapidocr、
+         在纯静态托管走浏览器 tesseract，两条通道出的是同一种预览表。 -->
+    <div id="tabWatchlist" class="tab-content">
+      <div id="watchlistPanelRoot"></div>
+    </div>
+
+    <!-- Tab: 研究（M5 寻优 / Walk-Forward / 组合 / 报表） -->
+    <div id="tabResearch" class="tab-content">
+      <div id="researchPanelRoot"></div>
+    </div>
+
+    <!-- Tab: 交易日志与复盘（M6） -->
+    <div id="tabJournal" class="tab-content">
+      <div id="journalPanelRoot"></div>
+    </div>
+
+    <!-- Tab 3: Online Real Data & Local Cache Center -->
+    <div id="tabUpload" class="tab-content">
+      <div style="display:grid; grid-template-columns: 1fr 1fr; gap:16px; max-width:960px; margin:0 auto;">
+        <!-- Left: Online Real Data Sync -->
+        <div class="card">
+          <div class="card-title">
+            <span>🌐 在线真实行情同步</span>
+            <span class="pill-live">东财 / 新浪 · 免 Token</span>
+          </div>
+          <div class="muted-block">
+            <span data-profile-text="dataHint">输入代码，一键直连行情接口抓取真实数据，自动解析开高低收成交量，并持久化缓存至本地 IndexedDB 数据库。</span>
+          </div>
+
+          <div style="display:flex; gap:8px; margin-bottom:10px;">
+            <input type="text" id="inputCustomSymbol" class="form-input" value="EG0" placeholder="代码" style="flex:1; text-transform:uppercase;" />
+            <select id="selectOnlinePeriod" class="form-input" style="width:90px;">
+              <option value="daily" selected>日线</option>
+              <option value="weekly">周线</option>
+              <option value="monthly">月线</option>
+              <option value="60m">60分钟</option>
+              <option value="4h">4小时</option>
+            </select>
+            <button class="btn btn-primary" id="btnTriggerFetchOnline">立即拉取并缓存</button>
+          </div>
+
+          <div class="muted-block">
+            <b>常见代码速查</b><br/>
+            <span data-profile-text="quickCodes">常见代码速查</span>
+          </div>
+        </div>
+
+        <!-- Right: Local Cache & CSV Import -->
+        <div class="card card-fill">
+          <div class="card-title">
+            <span>💾 本地 IndexedDB 缓存数据</span>
+            <button class="btn btn-sm" id="btnRefreshCacheList">刷新列表</button>
+          </div>
+
+          <div id="cacheListContainer" class="cache-list">
+            <div class="empty-state">暂无本地缓存数据</div>
+          </div>
+
+          <div class="card-footer">
+            <input type="file" id="csvFileInput" accept=".csv" style="display:none;" />
+            <button class="btn btn-sm" onclick="document.getElementById('csvFileInput').click();" style="flex:1;">📂 导入本地 CSV 文件</button>
+            <button class="btn btn-sm" id="btnDownloadSampleCSV" style="flex:1;">📥 下载 CSV 模板</button>
+            <button class="btn btn-sm btn-danger" id="btnClearAllCache" style="flex:1;">🧹 清空缓存</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab 4: Help & Hotkeys -->
+    <div id="tabHelp" class="tab-content">
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:20px; max-width:800px; font-size:12px; line-height:1.7;">
+        <div>
+          <h4>⌨️ 快捷键说明</h4>
+          <p><kbd>Space</kbd> 或 <kbd>F</kbd> : 单步推进下一根 K 线</p>
+          <p><kbd>B</kbd> : 买入（期货为开多）</p>
+          <p data-market-only="futures"><kbd>S</kbd> : 卖出开空 (Sell Short)</p>
+          <p><kbd>C</kbd> : 平仓（A股为卖出清仓）</p>
+          <p><kbd>W</kbd> : 水平线画线模式</p>
+          <p><kbd>E</kbd> : 趋势线段画线模式</p>
+          <p><kbd>Q</kbd> : 射线画线模式</p>
+          <p><kbd>D</kbd> : 测量尺工具</p>
+          <p><kbd>R</kbd> : 盈亏比测算工具</p>
+          <p><kbd>M</kbd> : 开启 / 关闭磁吸高低点</p>
+          <p><kbd>Delete</kbd> / <kbd>Backspace</kbd> : 删除选中的画线</p>
+          <p><kbd>Esc</kbd> : 取消当前画线，回到选择模式</p>
+        </div>
+        <div>
+          <h4>🎯 划线与复盘技巧</h4>
+          <p>• <b>多空平仓连线</b>：开启后图表自动在进场点和出场点之间绘制连线轨迹与盈亏幅度框，一目了然！</p>
+          <p>• <b>测量尺 (D)</b>：两点测量任意波段的价格差、涨跌幅、K线周期以及预期模拟盈亏。</p>
+          <p>• <b>盈亏比工具 (R)</b>：点击进场价，设定止盈目标与止损位，自动生成红绿风险收益区间并计算R:R盈亏比！</p>
+          <p>• <b>账户分析 (本次曲线)</b>：点击右上角按钮即可调出与专业交易软件一模一样的4象限量化报告与仓位净值曲线！</p>
+          <p>• <b>盲测复盘</b>：点击【⏮ 重置】回到历史起点，隐藏未来行情，逐根推进验证你的交易系统！</p>
+        </div>
+
+        <div data-market-only="ashare" style="grid-column:1/-1; border-top:1px solid var(--md-sys-color-outline-variant); padding-top:14px;">
+          <h4>📌 A股工作台规则</h4>
+          <p>• <b>T+1</b>：当日买入不能当日卖出；止损/条件单触发后挂到下一交易日开盘执行。</p>
+          <p>• <b>仅做多、100 股/手、全额资金</b>：没有保证金、杠杆与强平；指数只能看图，不能直接下单。</p>
+          <p>• <b>涨跌停</b>：涨停封板买不进，跌停封板卖不出；佣金最低 5 元，卖出印花税 0.05%，过户费双边 0.001%。</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Advanced Account Analysis Modal (Matching Images 1 & 5) -->
+  <div class="modal-overlay" id="accountAnalysisModal" role="dialog" aria-modal="true" aria-labelledby="analysisModalTitle" tabindex="-1">
+    <div class="modal-box">
+      <!-- Header -->
+      <div class="modal-header">
+        <div>
+          <div class="modal-title" id="analysisModalTitle">
+            <span>📈 账户分析</span>
+            <span class="modal-subtitle" id="modalSubtitle">全局账户 · 已结束复盘练习 · 0 次操作</span>
+          </div>
+          <div class="modal-subtitle">
+            趋势交易最该看的几个数：赢面、爆发力、以及回撤控制
+          </div>
+        </div>
+        <button class="modal-close" id="btnCloseAnalysisModal" aria-label="关闭账户分析">✕</button>
+      </div>
+
+      <!-- Body -->
+      <div class="modal-body">
+        <!-- Dual Chart Section: Equity Curve + Position Size Bar Chart -->
+        <div class="modal-chart-section">
+          <div class="modal-chart-header">
+            <div style="display:flex; align-items:center; gap:12px;">
+              <span>账户权益走势 (元)</span>
+              <div class="pill-tabs" role="group" aria-label="权益曲线口径">
+                <button class="pill-tab active" id="modalTabRealized" aria-pressed="true">已实现权益</button>
+                <button class="pill-tab" id="modalTabFloating" aria-pressed="false">含浮动动态权益</button>
+              </div>
+            </div>
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span id="modalPeakEquity" class="hint-gold">最高峰值: 100,000 元</span>
+            </div>
+          </div>
+          <canvas id="modalEquityCanvas"></canvas>
+          <div class="chart-axis-note" id="modalEquityNote"><span>横轴：平仓笔数（仅已实现，浮盈不计入）</span></div>
+
+          <div class="chart-axis-note">
+            <span>平仓前账户仓位占用率 (%)</span>
+            <span id="modalMaxMarginRate">最大仓位: 10%</span>
+          </div>
+          <canvas id="modalPositionCanvas"></canvas>
+        </div>
+
+        <!-- 4-Quadrant Quantitative Matrix (Matching Images 1 & 5) -->
+        <div class="analysis-grid">
+          <!-- Quadrant 1: 方向准头 -->
+          <div class="analysis-card">
+            <div class="analysis-card-title">
+              <span>方向准头</span>
+              <span class="section-sub">胜率与交易赢面</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">已了结</span>
+              <span class="metric-value" id="m_totalClosed">0 单</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">胜率</span>
+              <span class="metric-value" id="m_winRate">0.0%</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">胜 / 负</span>
+              <span class="metric-value" id="m_winLossRatio">0 / 0</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">亏损单占比</span>
+              <span class="metric-value" id="m_lossRatio">0.0%</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">平均盈亏比</span>
+              <span class="metric-value" id="m_avgProfitRatio">0.00</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">利润因子</span>
+              <span class="metric-value" id="m_profitFactor">0.00</span>
+            </div>
+            <div class="metric-row" style="border-bottom:none;">
+              <span class="metric-label">最多连赢</span>
+              <span class="metric-value" id="m_maxConsecutiveWins">0 单</span>
+            </div>
+          </div>
+
+          <!-- Quadrant 2: 爆发力 -->
+          <div class="analysis-card">
+            <div class="analysis-card-title">
+              <span>爆发力</span>
+              <span class="section-sub">单笔盈亏与期望值</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">每单期望</span>
+              <span class="metric-value" id="m_expectancyR">0.00 R</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">账户复利</span>
+              <span class="metric-value" id="m_compoundRate">1.0000</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">平均赚</span>
+              <span class="metric-value val-up" id="m_avgWin">+0.00</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">最大盈利</span>
+              <span class="metric-value val-up" id="m_maxWin">+0.00</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">极值盈亏比</span>
+              <span class="metric-value" id="m_extremeProfitRatio">0.00</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">最大单笔贡献</span>
+              <span class="metric-value" id="m_maxWinContribution">0.0%</span>
+            </div>
+            <div class="metric-row" style="border-bottom:none;">
+              <span class="metric-label">收益回撤比</span>
+              <span class="metric-value" id="m_returnToDrawdown">0.00</span>
+            </div>
+          </div>
+
+          <!-- Quadrant 3: 回撤控制 -->
+          <div class="analysis-card">
+            <div class="analysis-card-title">
+              <span>回撤控制</span>
+              <span class="section-sub">风险承受与底线</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">最大回撤</span>
+              <span class="metric-value val-down" id="m_maxDrawdownPct">0.0%</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">回撤金额</span>
+              <span class="metric-value val-down" id="m_maxDrawdownAmt">0.00</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">平均亏</span>
+              <span class="metric-value val-down" id="m_avgLoss">-0.00</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">最大亏损</span>
+              <span class="metric-value val-down" id="m_maxLoss">-0.00</span>
+            </div>
+            <div class="metric-row" style="border-bottom:none;">
+              <span class="metric-label">最多连亏</span>
+              <span class="metric-value" id="m_maxConsecutiveLosses">0 单</span>
+            </div>
+          </div>
+
+          <!-- Quadrant 4: 交易频率 -->
+          <div class="analysis-card">
+            <div class="analysis-card-title">
+              <span>交易频率</span>
+              <span class="section-sub">节奏与摩擦成本</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">成交笔数</span>
+              <span class="metric-value" id="m_totalFills">0 笔</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">手续费</span>
+              <span class="metric-value" id="m_totalFees">0.00</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">手续费占本金</span>
+              <span class="metric-value" id="m_feeToCapital">0.00%</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">平均持仓</span>
+              <span class="metric-value" id="m_avgHoldingBars">0.0 根</span>
+            </div>
+            <div class="metric-row" style="border-bottom:none;">
+              <span class="metric-label">区间跨度</span>
+              <span class="metric-value" id="m_intervalSpan">0 根K线</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Element -->
+  <div id="toast" role="status" aria-live="polite"></div>
+
