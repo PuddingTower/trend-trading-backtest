@@ -553,7 +553,7 @@ export class BacktestPanel {
     const benchEquity = res.bars.map(b => res.capital + (b.close - res.bars[0].open) * res.spec.multiplier * lots0);
     const cmp = benchmarkCompare(res.equityCurve.map(p => p.equity), benchEquity, res.capital);
     const card = (label, value, cls = '') =>
-      `<div class="kpi-card"><div class="kpi-label">${label}</div><div class="kpi-value ${cls}">${value}</div></div>`;
+      `<div class="kpi-card"><div class="kpi-title">${label}</div><div class="kpi-val ${cls}">${value}</div></div>`;
     const sign = v => (v > 0 ? 'val-up' : v < 0 ? 'val-down' : '');
 
     const years = Object.entries(m.byYear || {}).map(([y, v]) =>

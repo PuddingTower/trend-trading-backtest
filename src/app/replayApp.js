@@ -2224,17 +2224,6 @@ const MarketDataCache = BarStore;
           this.loadSymbolData(e.target.value, false);
         });
 
-        // iPad 竖屏下 .side-panel 变成抽屉（CSS 里 translateX 收起），不给个开关就下不了单
-        const toggleSb = document.getElementById('btnToggleSidebar');
-        const sidePanel = document.querySelector('.side-panel');
-        if (toggleSb && sidePanel) {
-          toggleSb.addEventListener('click', () => {
-            const open = sidePanel.classList.toggle('open');
-            toggleSb.classList.toggle('active', open);
-            if (open) sidePanel.scrollTop = 0;
-          });
-        }
-
         // 任意代码输入：解析权交给 symbolMeta，不在这里写正则
         const loadTypedCode = () => {
           const el = document.getElementById('symbolInput');

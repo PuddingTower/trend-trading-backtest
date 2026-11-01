@@ -189,6 +189,16 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* shell 由 bootPage 注入到 #app-root，这一层必须原样接上 body 的 flex 列，
+   否则 .workspace 的 flex:1 失去高度基准，画布会撑到视口外。 */
+#app-root {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+}
+
 /* Selection stays off the drag path, but every number must be copyable. */
 body,
 button,
@@ -905,6 +915,8 @@ canvas#chartCanvas {
 .order-cost .oc-ok { color: var(--data-down); }
 .sizer { display: flex; gap: 6px; align-items: center; }
 .sizer .form-input { flex: 1 1 auto; min-width: 0; }
+/* 按钮上的 nowrap 文字压不动：不锁 shrink 的话"占权益%"会被切掉半截，输入框反而留着大片空白。 */
+.sizer .btn { flex-shrink: 0; }
 .form-group {
   display: flex;
   flex-direction: column;
@@ -1146,6 +1158,7 @@ div.form-input {
 .tab-btn {
   padding: 0 var(--md-space-3);
   height: 43px;
+  flex-shrink: 0;
   background: transparent;
   border: none;
   border-bottom: 2px solid transparent;
@@ -1216,13 +1229,16 @@ div.form-input {
 /* ==========================================================================
    Tables
    ========================================================================== */
-.table-container {
+/* 面板里 JS 直接生成 <table class="data-table">，与壳里的 .table-container 同一套排版。 */
+.table-container,
+.data-table {
   width: 100%;
   border-collapse: collapse;
   font-size: var(--md-type-body-sm);
   font-variant-numeric: tabular-nums;
 }
-.table-container th {
+.table-container th,
+.data-table th {
   background: var(--md-sys-color-surface-container-high);
   color: var(--md-sys-color-on-surface-variant);
   font-weight: var(--md-weight-semibold);
@@ -1234,13 +1250,16 @@ div.form-input {
   z-index: 2;
   white-space: nowrap;
 }
-.table-container td {
+.table-container td,
+.data-table td {
   padding: var(--md-space-2) var(--md-space-3);
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
   color: var(--md-sys-color-on-surface);
 }
 .table-container tbody tr:hover td,
-.table-container tr:hover td {
+.table-container tr:hover td,
+.data-table tbody tr:hover td,
+.data-table tr:hover td {
   background: var(--md-sys-color-surface-container-high);
 }
 

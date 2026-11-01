@@ -148,20 +148,6 @@
   <div class="workspace">
     <!-- Chart Panel -->
     <div class="chart-panel">
-      <!-- OHLC and Indicator Legend -->
-      <div class="chart-legend" id="chartLegend">
-        <div class="legend-item"><span class="legend-label">时间:</span> <span class="legend-val" id="legendTime">--</span></div>
-        <div class="legend-item"><span class="legend-label">开:</span> <span class="legend-val" id="legendOpen">--</span></div>
-        <div class="legend-item"><span class="legend-label">高:</span> <span class="legend-val" id="legendHigh">--</span></div>
-        <div class="legend-item"><span class="legend-label">低:</span> <span class="legend-val" id="legendLow">--</span></div>
-        <div class="legend-item"><span class="legend-label">收:</span> <span class="legend-val" id="legendClose">--</span></div>
-        <div class="legend-item"><span class="legend-label">涨跌:</span> <span class="legend-val" id="legendChange">--</span></div>
-        <div class="legend-item"><span class="legend-label">成交量:</span> <span class="legend-val" id="legendVol">--</span></div>
-        <div class="legend-item legend-ma5"><span class="legend-label">MA5:</span> <span class="legend-val" id="legendMA5">--</span></div>
-        <div class="legend-item legend-ma10"><span class="legend-label">MA10:</span> <span class="legend-val" id="legendMA10">--</span></div>
-        <div class="legend-item legend-ma20"><span class="legend-label">MA20:</span> <span class="legend-val" id="legendMA20">--</span></div>
-      </div>
-
       <!-- 取数失败横幅：本项目不允许虚拟K线，所以拉不到真数据时图上必须什么都不画，
            并把"哪条通道、什么错、下一步做什么"摆在图面上。toast 会自己消失，不足以承担这个责任。 -->
       <div class="data-error" id="dataError" hidden>
@@ -176,6 +162,19 @@
       <!-- Canvas Container -->
       <div class="chart-container" id="chartContainer">
         <canvas id="chartCanvas"></canvas>
+        <!-- OHLC and Indicator Legend：浮在画布上，不能浮在错误横幅上 -->
+        <div class="chart-legend" id="chartLegend">
+          <div class="legend-item"><span class="legend-label">时间:</span> <span class="legend-val" id="legendTime">--</span></div>
+          <div class="legend-item"><span class="legend-label">开:</span> <span class="legend-val" id="legendOpen">--</span></div>
+          <div class="legend-item"><span class="legend-label">高:</span> <span class="legend-val" id="legendHigh">--</span></div>
+          <div class="legend-item"><span class="legend-label">低:</span> <span class="legend-val" id="legendLow">--</span></div>
+          <div class="legend-item"><span class="legend-label">收:</span> <span class="legend-val" id="legendClose">--</span></div>
+          <div class="legend-item"><span class="legend-label">涨跌:</span> <span class="legend-val" id="legendChange">--</span></div>
+          <div class="legend-item"><span class="legend-label">成交量:</span> <span class="legend-val" id="legendVol">--</span></div>
+          <div class="legend-item legend-ma5"><span class="legend-label">MA5:</span> <span class="legend-val" id="legendMA5">--</span></div>
+          <div class="legend-item legend-ma10"><span class="legend-label">MA10:</span> <span class="legend-val" id="legendMA10">--</span></div>
+          <div class="legend-item legend-ma20"><span class="legend-label">MA20:</span> <span class="legend-val" id="legendMA20">--</span></div>
+        </div>
       </div>
     </div>
 

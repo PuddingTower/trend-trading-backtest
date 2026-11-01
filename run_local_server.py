@@ -348,6 +348,14 @@ def lan_ip():
         s.close()
 
 
+class LocalServer(socketserver.ThreadingTCPServer):
+    """默认积压只有 5：拆成 ES module 后首屏要并行拉 15+ 个文件，
+    超出积压的连接在 Windows 上直接被拒（ECONNREFUSED），于是工作台整页白屏报"载入失败"。"""
+    request_queue_size = 128
+    daemon_threads = True
+    allow_reuse_address = True
+
+
 def main():
     url = f"http://localhost:{PORT}/index.html"
     print("=== 烛台簿 · Candle Ledger（期货 / A股 双工作台）===")
@@ -365,7 +373,7 @@ def main():
         pass
     socketserver.TCPServer.allow_reuse_address = True
     try:
-        with socketserver.ThreadingTCPServer(("", PORT), Handler) as httpd:
+        with LocalServer(("", PORT), Handler) as httpd:
             print("服务已启动（Ctrl+C 停止）")
             httpd.serve_forever()
     except KeyboardInterrupt:
