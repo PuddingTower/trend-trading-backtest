@@ -1,5 +1,5 @@
 // 复盘应用外壳：图表、画线、控制器。市场差异由入口页传入的 profile 决定。
-import { BarStore, barKey, cacheBars } from '../data/barStore.js';
+import { BarStore, barKey, cacheBars, getCacheByBases } from '../data/barStore.js';
 import { resolveBars, periodsPerYear, periodLabel, periodSpacingOk, sliceBarsByDate } from '../data/periods.js';
 import { parseCSV, tradesToCSV, downloadText, SAMPLE_CSV } from '../data/csvIO.js';
 import { parseSymbol, MARKETS } from '../markets/symbolMeta.js';
@@ -1606,15 +1606,15 @@ const MarketDataCache = BarStore;
         const period = periodEl ? periodEl.value : 'daily';
         const isFutures = it.market === MARKETS.FUTURES;
         const adjust = isFutures ? 'none' : (adjustEl ? adjustEl.value : 'hfq');
-        const key = barKey(it.market, it.symbol, period, adjust);
-        const cached = await BarStore.getCache(key);
+        const cached = await getCacheByBases(it.market, it.symbol, period, adjust);
         if (cached && Array.isArray(cached.data) && cached.data.length >= 60) return cached.data;
         try {
           const out = await this.acquireBars({ market: it.market, secid: it.secid,
                                                sinaCode: parseSymbol(it.symbol, '').sinaCode },
                                              it.symbol, period, adjust, false);
           if (out.ok && out.bars && out.bars.length) {
-            await cacheBars(key, out.bars, { market: it.market, symbol: it.symbol, period, adjust, name: out.name, source: out.source });
+            await cacheBars(barKey(it.market, it.symbol, period, adjust, out.basis || ''), out.bars,
+              { market: it.market, symbol: it.symbol, period, adjust, name: out.name, source: out.source, basis: out.basis || '' });
             return out.bars;
           }
         } catch (e) { /* 交给调用方按"没有数据"处理 */ }
@@ -1775,7 +1775,9 @@ const MarketDataCache = BarStore;
         this.chartModule.periodsPerYear = periodsPerYear(period);
         // 寻优/组合报表读这个字段标头，以前全仓库没人赋值，于是无论选哪个周期都印 "周期 daily"
         this.chartModule.periodLabel = periodLabel(period);
-        const cacheKey = barKey(parsed.market, symbol, period, adjust);
+        // 秒开要先认缓存当初是按哪个复权基准存的：腾讯与东财的后复权是每个品种一个常数倍
+        // （实测 000001 ×1.207、600519 ×1.121），而绝对价会进仓位与占用，两种基准不能进同一个键。
+        const basisHit = forceOnline ? null : await getCacheByBases(parsed.market, symbol, period, adjust);
         const label = isFutures
           ? `${parsed.name}${parsed.isDominant ? ' 主连' : ''} (${symbol})`
           : `${parsed.code} (${parsed.board || parsed.kind})`;
@@ -1785,17 +1787,18 @@ const MarketDataCache = BarStore;
 
         if (!forceOnline) {
           try {
-            const cached = await MarketDataCache.getCache(cacheKey);
+            const cached = basisHit;
             if (cached && cached.data && cached.data.length > 5) {
               // 缓存里可能躺着被上游静默降级过的序列（历史上新浪把"取周线"当日线返回并按
               // weekly 键存了进来）。间隔对不上就当没有，重新向上游要，别把坏数据"秒开"出去。
               if (!periodSpacingOk(cached.data, period)) {
                 this.showToast(`${label} ${period} 的本地缓存间隔对不上，已丢弃重取…`);
-                await MarketDataCache.deleteCache(cacheKey);
+                await MarketDataCache.deleteCache(cached.key);
               } else {
                 // 缓存记录里带着当初的来源，报出来：4小时/周线是本地合成的，
                 // 不说清楚的话，用户会以为这 77 根是上游直接给的 4 小时行情。
-                const csrc = { 'eastmoney': '东财', 'eastmoney-direct': '东财直连', 'sina': '新浪',
+                const csrc = { 'eastmoney': '东财', 'eastmoney-direct': '东财直连', 'tencent': '腾讯',
+                               'sina': '新浪',
                                'local-aggregate': '本地日线聚合', 'local-aggregate-60m': '本地60分钟合成' }[cached.meta && cached.meta.source] || '';
                 this.applyDataToChart(cached.data, label,
                   `已从本地缓存秒开 ${label} (${cached.data.length} 根K线${csrc ? `, 源:${csrc}` : ''}, 缓存时间: ${cached.updateTime})`, symbol);
@@ -1815,9 +1818,11 @@ const MarketDataCache = BarStore;
         }
 
         if (out.ok && out.bars && out.bars.length > 0) {
-          await cacheBars(cacheKey, out.bars, { market: parsed.market, symbol, period, adjust, count: out.bars.length, name: out.name || parsed.name });
+          // 回写用取数结果自带的基准：东财基准的键里不能躺进腾讯基准的序列
+          await cacheBars(barKey(parsed.market, symbol, period, adjust, out.basis || ''), out.bars,
+            { market: parsed.market, symbol, period, adjust, count: out.bars.length, name: out.name || parsed.name, source: out.source, basis: out.basis || '' });
           BarStore.putSymbol({ market: parsed.market, symbol, name: out.name || parsed.name, kind: isFutures ? 'futures' : parsed.kind, secid: parsed.secid });
-          const src = { 'eastmoney': '东财', 'eastmoney-direct': '东财直连', 'sina': '新浪',
+          const src = { 'eastmoney': '东财', 'eastmoney-direct': '东财直连', 'tencent': '腾讯', 'sina': '新浪',
                         'local-aggregate': '本地日线聚合', 'local-aggregate-60m': '本地60分钟合成' }[out.source] || out.source;
           // 前复权会把早期价格推到负数（累计扣减分红），不是脏数据而是口径后果，必须说清楚。
           // 含 ≤0 时对数轴不成立，render 会退回线性并在轴上标「线性」—— 这里要说的是实际发生的事。
@@ -1834,10 +1839,11 @@ const MarketDataCache = BarStore;
           return;
         }
 
-        // 缓存里还有一版真实数据就先顶着，但必须说清楚这不是最新行情
-        const stale = await MarketDataCache.getCache(cacheKey);
+        // 缓存里还有一版真实数据就先顶着，但必须说清楚这不是最新行情、也不是同一个基准
+        const stale = await getCacheByBases(parsed.market, symbol, period, adjust);
         if (stale && stale.data && stale.data.length) {
-          this.applyDataToChart(stale.data, label, `在线拉取失败，已离线加载本地缓存 ${label} (${stale.data.length} 根K线, 缓存于 ${stale.updateTime})`, symbol);
+          const ssrc = { 'tencent': '，源:腾讯', 'eastmoney-direct': '，源:东财直连' }[stale.meta && stale.meta.source] || '';
+          this.applyDataToChart(stale.data, label, `在线拉取失败，已离线加载本地缓存 ${label} (${stale.data.length} 根K线${ssrc}, 缓存于 ${stale.updateTime})`, symbol);
           this.refreshCacheListUI();
         } else {
           // 拉不到真数据就留白 —— 本项目不允许用合成K线填空，画一根假线比画不出来更糟
@@ -1937,11 +1943,14 @@ const MarketDataCache = BarStore;
         if (/本地服务器返回 404/.test(all)) {
           return '下一步：当前这个端口只是纯静态服务器，没有 /api/kline 代理。停掉它，改用 python start.py（或 python run_local_server.py）重新打开页面。';
         }
+        if (/tencent/.test(all)) {
+          return '下一步：东财与腾讯两条历史K线通道此刻都不可达（东财已知会按 IP 整段 reset，腾讯偶发限流）。这不是本项目的 bug，稍后再试或换网络；重试按钮会强制走在线通道。';
+        }
         if (/eastmoney/.test(all) && /超时|timeout|Failed to fetch|reset|network|连接/i.test(all)) {
-          return '下一步：东财 push2his 此刻整段不可达（已知会 connection reset，A股和期货一起挂）。这不是本项目的 bug，稍后再试或换网络；重试按钮会强制走在线通道。';
+          return '下一步：东财 push2his 此刻整段不可达（已知会 connection reset，A股和期货一起挂），腾讯兜底也没接住。这不是本项目的 bug，稍后再试或换网络；重试按钮会强制走在线通道。';
         }
         if (!lines.length) return '没有真实行情可画。本项目不生成合成K线，所以图上宁可留白。';
-        return '三条通道都没取到真实行情。图上不会画合成K线，可先用「行情与缓存中心」导入 CSV，或换个品种试。';
+        return '各条通道都没取到真实行情。图上不会画合成K线，可先用「行情与缓存中心」导入 CSV，或换个品种试。';
       }
 
       /** 合约规格 → 账户参数输入框（乘数/保证金率）。用户仍可手改；手续费按品种费率暂不覆盖手填值。 */
@@ -2009,9 +2018,9 @@ const MarketDataCache = BarStore;
       dataDepthNote(parsed, period, out) {
         const bits = [];
         const bars = out.bars || [];
-        if (out.pages) bits.push(`分钟线往前回填了 ${out.pages} 页`);
+        if (out.pages) bits.push(`${periodLabel(period)}往前翻了 ${out.pages} 页`);
         if (out.exhausted && bars.length < 400) {
-          bits.push(`东财分钟线只到 ${String(bars[0] && bars[0].date || '').slice(0, 10)} 为止，再往前没有了 —— 要跑长周期分钟回测请走 CSV 导入`);
+          bits.push(`上游的${periodLabel(period)}只到 ${String(bars[0] && bars[0].date || '').slice(0, 10)} 为止，再往前没有了 —— 要跑更长回测请走 CSV 导入`);
         }
         if (parsed && parsed.market === 'futures' && !parsed.isDominant && bars.length < 400) {
           bits.push(`这是具体月份合约，只有上市以来那几个月 —— 想回测几年改用主连（如 ${parsed.variety}0）`);

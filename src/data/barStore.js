@@ -2,7 +2,7 @@
  * barStore —— IndexedDB schema v2 + 三级缓存（内存 → IndexedDB → localStorage）
  *
  * v1（旧单文件版）：db 'FuturesReplayDB' v1，store 'kline_cache'，key = `EG0_daily`
- * v2（本文件）：        store 'bars'，key = `market:symbol:period:adjust`
+ * v2（本文件）：        store 'bars'，key = `market:symbol:period:adjust[:basis]`
  *                      另加 'symbols' / 'watchlist' / 'journals'（M3/M6 用，M1 先建好 schema）
  *
  * 迁移策略：onupgradeneeded(oldVersion<2) 时把 kline_cache 整表搬进 bars，
@@ -23,9 +23,34 @@ export const STORE_SYMBOLS = 'symbols';
 export const STORE_WATCHLIST = 'watchlist';
 export const STORE_JOURNALS = 'journals';
 
-/** v2 缓存键。symbol 统一大写，与旧版 `symbol.toUpperCase()` 行为一致。 */
-export const barKey = (market, symbol, period = 'daily', adjust = 'none') =>
-  `${market}:${String(symbol).toUpperCase()}:${period}:${adjust}`;
+/**
+ * v2 缓存键。symbol 统一大写，与旧版 `symbol.toUpperCase()` 行为一致。
+ *
+ * basis 隔开"同一个复权口径、不同复权基准"的两份序列：腾讯与东财的后复权是每个品种
+ * 一个常数倍（实测 000001 ×1.207、600519 ×1.121），而绝对价会进仓位与占用
+ * （core/sizing.js 的 perLot、core/backtestEngine.js 的 raw 占用），两者写进同一个键
+ * 就等于中途换了一把尺子还看不出来。
+ * 默认空串 → 键与历史完全一致，不触发缓存迁移。
+ */
+export const barKey = (market, symbol, period = 'daily', adjust = 'none', basis = '') =>
+  `${market}:${String(symbol).toUpperCase()}:${period}:${adjust}${basis ? `:${basis}` : ''}`;
+
+/** 查找顺序：东财基准（无后缀）优先，其次腾讯基准。 */
+export const BAR_BASES = ['', 'tx'];
+
+/**
+ * 按 BAR_BASES 顺序找第一份有数据的缓存，返回 { key, ...record }。
+ * 秒开时上游还没问过、不知道会用哪个源，所以两种基准都得认；调用方回写时改用
+ * 取数结果自带的 basis，就不会把 A 基准的序列写进 B 基准的键。
+ */
+export async function getCacheByBases(market, symbol, period, adjust) {
+  for (const basis of BAR_BASES) {
+    const key = barKey(market, symbol, period, adjust, basis);
+    const rec = await BarStore.getCache(key);
+    if (rec && Array.isArray(rec.data) && rec.data.length) return { key, ...rec };
+  }
+  return null;
+}
 
 /** 旧 key → 新 key（`EG0_daily` → `futures:EG0:daily:none`）。已是新格式则原样返回。 */
 export function upgradeLegacyKey(key) {

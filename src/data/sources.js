@@ -1,15 +1,19 @@
 /**
- * sources —— 行情适配器。三条通道按优先级降级，任何一条通了就返回：
+ * sources —— 行情适配器。四条通道按优先级降级，任何一条通了就返回：
  *
  *   1. 本地服务器 /api/kline  —— 首选。隔离 CORS 与上游接口变动（演进计划 §7 的对策）。
  *      仅在 origin 看起来确实可能跑着本地后端时才尝试（见 mightHaveLocalBackend），
  *      静态托管上整条跳过，避免每次取数都在控制台留一条 404。
  *   2. 浏览器直连 eastmoney   —— 备用。实测 push2his 会回显请求 Origin，
  *      所以 http://localhost 下能直连；file:// 下 Origin 为 null 会被拒，属预期。
- *   3. 新浪 JSONP             —— 期货兜底通道，file:// 也能跑，日线带交易所结算价。
+ *      但 push2his 会整段拒连（按 IP/频率翻脸，A股与期货 secid 一起挂），这时只能靠 3、4。
+ *   3. 浏览器直连 腾讯 ifzq   —— A股/指数/ETF 兜底，实测带 Access-Control-Allow-Origin: *，
+ *      静态托管也能跑。只有日/周/月线，复权基准与东财不同（见 viaTencentDirect）。
+ *   4. 新浪 JSONP             —— 期货兜底通道，file:// 也能跑，日线带交易所结算价。
  *      注意：日线服务名是 InnerFuturesNewService.getDailyKLine；旧的 IndexService 名字
  *      早已失效（返回 Invalid service name），别再把它当成"新浪数据冻结"。
  *      它仍只作对照/兜底：主源是东财，字段更全、主连拼接口径也更稳定。
+ *      A股 走不了这条：新浪的 A股 历史接口没有 CORS、也不接受 callback，浏览器直连必被挡。
  *
  * bars 一律归一化成 {date,open,high,low,close,volume}，按日期升序，并 pre-bake ma5/ma10/ma20。
  */
@@ -84,7 +88,148 @@ async function viaEastmoneyDirect(secid, period, adjust, count, end) {
            count: bars.length, bars: sortByDate(bars) };
 }
 
-/** 通道 3：新浪期货 JSONP（保留旧的对外行为，但修好了解析） */
+/**
+ * 通道 3：腾讯 ifzq —— A股/指数/ETF 的浏览器直连兜底。
+ *
+ * 为什么要有它：东财 push2his 会整段拒连（实测 curl 三次全 HTTP 000、本地代理 502、
+ * 浏览器 Failed to fetch），而新浪的 A股 历史接口不带 Access-Control-Allow-Origin、
+ * 也不接受 callback（实测加了 callback 仍返回裸 JSON），在线版（静态托管、无本地后端）
+ * 于是只能干等。腾讯这个域实测回显 `Access-Control-Allow-Origin: *`，浏览器直连可用。
+ *
+ * 三处实测口径，别改回去：
+ *   · 列序是 date,open,CLOSE,high,low,volume —— 和第 2 通道东财同形，第 3 列不是 high。
+ *     写反就是整根K线上下颠倒（本项目在 60m 合成上出过一次），所以有一道几何校验兜着。
+ *   · 单次上限 640 根：请求 1000 只回 640，请求 5000 直接返回非对象。长历史按 end 往前翻。
+ *   · 复权基准与东财不同：不复权逐点相同（000300 实测差 0.0），后复权是每个品种一个常数倍
+ *     （000001 ×1.207、600519 ×1.121），日收益差 ≤0.033pp。绝对价会进仓位与占用，
+ *     所以复权序列带 basis='tx'，由缓存键把它和东财序列隔开；不复权与指数不需要隔。
+ */
+const TX_HOST = 'https://web.ifzq.gtimg.cn';
+const TX_KLT = { daily: 'day', weekly: 'week', monthly: 'month' };
+const TX_FQ = { none: '', qfq: 'qfq', hfq: 'hfq' };
+const TX_PAGE = 640;
+const TX_MAX_PAGES = 16;
+
+/** 东财 secid `0.000001` / `1.600519` → 腾讯 `sz000001` / `sh600519`；已是腾讯写法则原样返回。 */
+export function tencentCodeOf(secid) {
+  const s = String(secid || '').trim().toLowerCase();
+  const m = /^([01])\.(\d{6})$/.exec(s);
+  if (m) return `${m[1] === '1' ? 'sh' : 'sz'}${m[2]}`;
+  return /^[a-z]{2}\d{6}$/.test(s) ? s : '';
+}
+
+/** 腾讯K线行 → bar。列序 [date, open, close, high, low, volume, …]，多余字段丢掉。 */
+export function txRowsToBars(rows) {
+  const out = [];
+  for (const r of rows || []) {
+    if (!Array.isArray(r) || r.length < 5) continue;
+    const bar = { date: String(r[0]), open: parseFloat(r[1]), close: parseFloat(r[2]),
+                  high: parseFloat(r[3]), low: parseFloat(r[4]), volume: parseFloat(r[5]) || 0 };
+    if (!/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])/.test(bar.date)) continue;
+    if (![bar.open, bar.high, bar.low, bar.close].every(Number.isFinite)) continue;
+    out.push(bar);
+  }
+  return sortByDate(out);
+}
+
+/**
+ * 几何校验：high ≥ max(open,close) 且 low ≤ min(open,close)。
+ * 列序哪天再变（比如上游改成 OHLC），几乎每根都会越界 —— 那就拒绝出图，
+ * 而不是把颠倒的K线画出去、让均线与突破全错却没有任何提示。
+ */
+export function assertTxGeometry(bars) {
+  if (!Array.isArray(bars) || bars.length < 20) return;
+  let bad = 0;
+  for (const b of bars) {
+    const hi = Math.max(b.open, b.close), lo = Math.min(b.open, b.close);
+    if (!(b.high >= hi - 1e-6 && b.low <= lo + 1e-6)) bad++;
+  }
+  if (bad > bars.length * 0.01) {
+    throw new Error(`腾讯K线高低点几何校验不通过（${bad}/${bars.length} 根越界），列序可能已变，拒绝出图`);
+  }
+}
+
+/** 前一交易日锚点：只按 UTC 做日期减法，避免本地时区把 end 参数错移一天。 */
+function prevCalendarDay(dateStr) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(dateStr));
+  if (!m) return '';
+  return new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]) - 86400000).toISOString().slice(0, 10);
+}
+
+async function txFetchPage(code, klt, fq, end, timeoutMs) {
+  const url = `${TX_HOST}/appstock/app/fqkline/get?param=${code},${klt},,${end || ''},${TX_PAGE},${fq}`;
+  const res = await withTimeout(fetch(url), timeoutMs, '腾讯直连');
+  if (!res.ok) throw new Error(`腾讯直连返回 ${res.status}`);
+  const json = await res.json();
+  const d = json && json.data && json.data[code];
+  if (!d || typeof d !== 'object') throw new Error(`腾讯返回里没有 ${code} 的数据`);
+  // 指数没有复权概念，问它要 hfq 仍回 day —— 两个键名都认，但认不到必须说清楚
+  const key = [`${fq}${klt}`, klt].find(k => Array.isArray(d[k]) && d[k].length);
+  if (!key) throw new Error(`腾讯返回缺少 ${klt}${fq || ''} 序列（键：${Object.keys(d).join(',')}）`);
+  return d[key];
+}
+
+/** 复权基准标记：不复权与指数两边逐点相同，不需要隔开；前/后复权是另一把尺子。 */
+export function tencentBasisOf(adjust) {
+  return (adjust === 'qfq' || adjust === 'hfq') ? 'tx' : '';
+}
+
+/** 本机当天（YYYY-MM-DD）。用本地日历而不是 UTC，否则晚上 8 点后取数会把"今天"算成昨天。 */
+function localToday() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+export async function viaTencentDirect({ secid, period, adjust, count, end }, timeoutMs = 12000) {
+  const code = tencentCodeOf(secid);
+  if (!code) throw new Error(`腾讯通道解析不出 ${secid} 的市场前缀代码`);
+  const klt = TX_KLT[period];
+  if (!klt) throw new Error(`腾讯通道没有 ${period} 这个周期（只有 daily/weekly/monthly），拒绝用日线顶替`);
+  if (!(adjust in TX_FQ)) throw new Error(`腾讯通道不认识复权口径 ${adjust}`);
+  const fq = TX_FQ[adjust];
+
+  // 腾讯复权序列"当日那根"用的是还没换新的因子表：实测 2026-11-06 末根隐含因子 155.81，
+  // 前一根 199.11，凭空多出 −21.7% 的假跳空（深市主板涨跌停只有 ±10%，不可能是行情）。
+  // 给它显式 end 就只回到上一根已收盘的，所以复权口径一律把游标压到昨天；不复权没这个问题。
+  let cursor = end || (fq ? prevCalendarDay(localToday()) : '');
+  const rows = [];
+  const seam = new Map();          // 页间接缝：同一日期在相邻两页里的收盘价必须一致
+  let pages = 0, exhausted = false;
+  while (pages < TX_MAX_PAGES) {
+    const page = await txFetchPage(code, klt, fq, cursor, pages === 0 ? timeoutMs : 12000);
+    pages++;
+    if (!page.length) { exhausted = true; break; }
+    for (const r of page) {
+      const d = String(r[0]), close = parseFloat(r[2]);
+      if (!seam.has(d)) seam.set(d, close);
+      else if (Math.abs(seam.get(d) - close) > Math.abs(close) * 0.005) {
+        throw new Error(`腾讯翻页接缝对不上（${d} 两次分别给 ${seam.get(d)} 与 ${close}），两页基准不一致，拒绝拼接`);
+      }
+    }
+    rows.push(...page);
+    if (page.length < TX_PAGE) { exhausted = true; break; }
+    if (count && rows.length >= count) break;
+    // 下一页把这一页最早那根再带一次：没有重叠就没有接缝可查，翻错的基准就只能靠肉眼发现
+    cursor = page.reduce((min, r) => (String(r[0]) < min ? String(r[0]) : min), String(page[0][0]));
+    if (!cursor) break;
+  }
+
+  const unique = new Map();
+  for (const r of rows) { const d = String(r[0]); if (!unique.has(d)) unique.set(d, r); }
+  const bars = txRowsToBars([...unique.values()]);
+  if (!bars.length) throw new Error(`腾讯返回的 ${code} 序列解析后没有有效K线`);
+  assertTxGeometry(bars);
+
+  const basis = tencentBasisOf(adjust);
+  const parts = [];
+  if (basis) parts.push(`${adjust === 'hfq' ? '后' : '前'}复权按腾讯基准（与东财同口径差一个品种一个常数倍，日收益差 ≤0.033pp，绝对价位不可与东财序列混用；缓存已按基准分开）`);
+  if (fq && !end) parts.push('不含当日未换因子那根（腾讯复权因子表当日滞后，实测会凭空造出 −21.7% 假跳空）');
+  if (!exhausted) parts.push(`只翻了 ${pages} 页，更早的历史没取到，当前最早 ${bars[0].date}`);
+  return { ok: true, source: 'tencent', name: null, secid, period, adjust, basis,
+           count: bars.length, bars, pages, exhausted, depth: depthOf(bars), note: parts.join('｜') };
+}
+
+/** 通道 4：新浪期货 JSONP（保留旧的对外行为，但修好了解析） */
 export function fetchSinaJSONP(symbol, period = 'daily', timeoutMs = 8000) {
   return new Promise((resolve, reject) => {
     const cbName = 'sina_cb_' + Math.random().toString(36).slice(2, 8);
@@ -219,7 +364,7 @@ export async function fetchBars({ market = 'futures', symbol, secid, period = 'd
            depth: depthOf(merged.bars), pages: merged.pages, exhausted: merged.exhausted };
 }
 
-/** 三条通道按序降级，一次取数，不做合成也不回填。 */
+/** 通道按序降级，一次取数，不做合成也不回填。 */
 async function fetchBarsOnce({ market, symbol, secid, period, adjust, provider, count, end, sinaSymbol }) {
   const attempted = [];
   const targetSecid = secid || symbol;
@@ -258,7 +403,18 @@ async function fetchBarsOnce({ market, symbol, secid, period, adjust, provider, 
     attempted.push({ channel: 'eastmoney-direct', error: String(e.message || e) });
   }
 
-  // 3. 期货再兜一层新浪。东财不可用时才走这里；新浪日线带交易所结算价，
+  // 3. A股/指数/ETF 再兜一层腾讯 ifzq。东财 push2his 整段拒连时，在线版只有这条路能出图；
+  //    分钟线它没有（mkline 301 到 web3 后直接 reset），所以宁缺不顶，绝不拿日线冒充 60m。
+  if (market !== 'futures') {
+    try {
+      const out = await viaTencentDirect({ secid: targetSecid, period, adjust, count, end });
+      return { ...out, bars: attachDefaultMAs(out.bars), attempted };
+    } catch (e) {
+      attempted.push({ channel: 'tencent-direct', error: String(e.message || e) });
+    }
+  }
+
+  // 4. 期货再兜一层新浪。东财不可用时才走这里；新浪日线带交易所结算价，
   //    历史可回到 2009（RB0），比东财主连拼接的 2015 还长。
   if (market === 'futures') {
     try {

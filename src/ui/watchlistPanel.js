@@ -298,7 +298,8 @@ export class WatchlistPanel {
           sinaSymbol: it.sinaCode, period, adjust
         });
         if (out.ok && out.bars && out.bars.length) {
-          await cacheBars(barKey(it.market, it.symbol, period, adjust), out.bars, { name: out.name, source: out.source });
+          await cacheBars(barKey(it.market, it.symbol, period, adjust, out.basis || ''), out.bars,
+            { name: out.name, source: out.source, basis: out.basis || '' });
           ok++;
         } else fail.push(`${it.openCode || it.symbol}`);
       } catch (e) { fail.push(`${it.openCode || it.symbol}`); }

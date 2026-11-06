@@ -9,7 +9,7 @@
  */
 
 import { fetchBars } from './sources.js';
-import { BarStore, barKey, cacheBars } from './barStore.js';
+import { barKey, cacheBars, getCacheByBases } from './barStore.js';
 import { aggregate, aggregateIntraday, INTRADAY_GROUP } from './dominant.js';
 import { attachDefaultMAs } from './indicators.js';
 
@@ -88,14 +88,17 @@ export async function resolveBars({ market, symbol, secid, sinaSymbol = null,
     }
   }
 
-  const baseKey = barKey(market, symbol, base, adjust);
-  let src = forceOnline ? null : (await BarStore.getCache(baseKey))?.data;
-  if (src && !periodSpacingOk(src, base)) src = null;   // 坏缓存视同没有，重新向上游要
+  let hit = forceOnline ? null : await getCacheByBases(market, symbol, base, adjust);
+  if (hit && !periodSpacingOk(hit.data, base)) hit = null;   // 坏缓存视同没有，重新向上游要
+  let src = hit && hit.data;
   if (!src || !src.length) {
     const r = await ask(base);
     if (!r || !r.ok || !r.bars || !r.bars.length) return r || { ok: false, error: `${base} 也无数据` };
     src = r.bars;
-    await cacheBars(baseKey, src, { market, symbol, period: base, adjust, count: src.length });
+    // 按底料实际的复权基准落键：腾讯与东财的后复权差一个品种一个常数倍，
+    // 混进同一个键的话，周/月线就是拿两把尺子量出来的序列合成出来的。
+    await cacheBars(barKey(market, symbol, base, adjust, r.basis || ''), src,
+      { market, symbol, period: base, adjust, count: src.length, source: r.source, basis: r.basis || '' });
   }
   const fromDaily = base === 'daily';
   const agg = attachDefaultMAs(fromDaily ? aggregate(src, period)
