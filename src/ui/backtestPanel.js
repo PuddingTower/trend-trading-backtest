@@ -11,6 +11,7 @@ import { addRule, getRuleEntry, isDefaultRule, listRuleEntries, parseRuleJson, r
 import { normalizeRule } from '../strategy/ruleSchema.js';
 import { computeMetrics, benchmarkCompare } from '../report/metrics.js';
 import { downloadText } from '../data/csvIO.js';
+import { periodLabel } from '../data/periods.js';
 import { resolveTradeSpec } from '../markets/instrumentSpec.js';
 import { rulesFor } from '../markets/marketRules.js';
 import { annotateGaps, checkAdjustmentContinuity, checkRolloverGaps, checkPriceValidity, repairAdjustmentGaps } from '../markets/dataQuality.js';
@@ -112,7 +113,10 @@ export class BacktestPanel {
     const builtIn = STRATEGIES.map(s => ({ value: s.id, label: s.name, title: STRATEGY_DESC[s.id] || '' }));
     const custom = listRuleEntries().map(entry => ({
       value: strategyValue(entry),
-      label: `${entry.name}（${isDefaultRule(entry.id) ? '默认规则' : '自定义'} r${entry.revision}）`,
+      // 规则声明的适用频率进下拉框：月线闸门被选在日线上跑，曲线照样出但意义全无，
+      // 先把口径写在名字旁边，比事后在结果里找原因便宜。
+      label: `${entry.name}（${isDefaultRule(entry.id) ? '默认规则' : '自定义'}`
+        + `${entry.doc.metadata?.freq ? ` · ${periodLabel(entry.doc.metadata.freq)}` : ''} r${entry.revision}）`,
       title: entry.doc.description || '导入的 JSON 策略规则'
     }));
     return [...builtIn, ...custom].map(option =>

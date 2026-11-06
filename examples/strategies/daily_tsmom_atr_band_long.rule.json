@@ -1,0 +1,262 @@
+{
+  "schemaVersion": 1,
+  "kind": "rules",
+  "id": "daily_tsmom_atr_band_long",
+  "name": "M2 日频时序动量(只做多)",
+  "revision": 1,
+  "description": "上一条的多头半边：三窗口趋势分高于阈值才持有 ETF/股票，回到阈值内或转负就空仓（不能做空时的兜底）。只在日线周期运行。多头单腿的收益低于多空版，文献里的回撤改善主要由「跌回均线即空仓」贡献，而不是由做空贡献。本仓库日线 17 品种同口径读数：7/17 正收益、4/17 跑赢买入持有、平均 Sharpe 0.06，最差单品种回撤 95.6%。默认参数不是实盘建议。",
+  "parameters": {
+    "w1": {
+      "type": "integer",
+      "default": 63,
+      "min": 5,
+      "max": 250,
+      "label": "动量窗口1",
+      "description": "约 3 个月的交易日数"
+    },
+    "w2": {
+      "type": "integer",
+      "default": 126,
+      "min": 10,
+      "max": 380,
+      "label": "动量窗口2",
+      "description": "约 6 个月的交易日数"
+    },
+    "w3": {
+      "type": "integer",
+      "default": 252,
+      "min": 20,
+      "max": 500,
+      "label": "动量窗口3",
+      "description": "约 12 个月的交易日数；三窗口必须等权平均，单窗口的读数在文献里不稳"
+    },
+    "atrLen": {
+      "type": "integer",
+      "default": 14,
+      "min": 2,
+      "max": 100,
+      "label": "ATR周期",
+      "description": "阈值与初始止损共用的尺度"
+    },
+    "theta": {
+      "type": "number",
+      "default": 0.5,
+      "min": 0.05,
+      "max": 3,
+      "label": "开仓阈值(ATR倍)",
+      "description": "三窗口均分高于它才允许持仓，落在 ±它之间 = 中性区空仓"
+    },
+    "stopAtr": {
+      "type": "number",
+      "default": 3,
+      "min": 0,
+      "max": 10,
+      "label": "初始止损(ATR倍)",
+      "description": "主风险阀是组合层的波动率目标，这里只防隔夜跳空把亏损放大"
+    }
+  },
+  "requires": {
+    "fields": [
+      "open",
+      "high",
+      "low",
+      "close",
+      "volume"
+    ]
+  },
+  "series": {
+    "ma1": {
+      "op": "sma",
+      "source": {
+        "field": "close"
+      },
+      "period": {
+        "param": "w1"
+      }
+    },
+    "ma2": {
+      "op": "sma",
+      "source": {
+        "field": "close"
+      },
+      "period": {
+        "param": "w2"
+      }
+    },
+    "ma3": {
+      "op": "sma",
+      "source": {
+        "field": "close"
+      },
+      "period": {
+        "param": "w3"
+      }
+    },
+    "atr": {
+      "op": "atr",
+      "period": {
+        "param": "atrLen"
+      }
+    }
+  },
+  "rules": [
+    {
+      "when": {
+        "op": "greaterThan",
+        "left": {
+          "op": "divide",
+          "left": {
+            "op": "add",
+            "left": {
+              "op": "add",
+              "left": {
+                "op": "divide",
+                "left": {
+                  "op": "subtract",
+                  "left": {
+                    "field": "close"
+                  },
+                  "right": {
+                    "series": "ma1"
+                  }
+                },
+                "right": {
+                  "series": "atr"
+                }
+              },
+              "right": {
+                "op": "divide",
+                "left": {
+                  "op": "subtract",
+                  "left": {
+                    "field": "close"
+                  },
+                  "right": {
+                    "series": "ma2"
+                  }
+                },
+                "right": {
+                  "series": "atr"
+                }
+              }
+            },
+            "right": {
+              "op": "divide",
+              "left": {
+                "op": "subtract",
+                "left": {
+                  "field": "close"
+                },
+                "right": {
+                  "series": "ma3"
+                }
+              },
+              "right": {
+                "series": "atr"
+              }
+            }
+          },
+          "right": {
+            "const": 3
+          }
+        },
+        "right": {
+          "param": "theta"
+        }
+      },
+      "do": {
+        "action": "long",
+        "reason": "三窗口趋势分高于阈值，多头趋势态",
+        "risk": {
+          "stop": {
+            "op": "subtract",
+            "left": {
+              "field": "close"
+            },
+            "right": {
+              "op": "multiply",
+              "left": {
+                "param": "stopAtr"
+              },
+              "right": {
+                "series": "atr"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "when": {
+        "op": "not",
+        "condition": {
+          "op": "greaterThan",
+          "left": {
+            "op": "divide",
+            "left": {
+              "op": "add",
+              "left": {
+                "op": "add",
+                "left": {
+                  "op": "divide",
+                  "left": {
+                    "op": "subtract",
+                    "left": {
+                      "field": "close"
+                    },
+                    "right": {
+                      "series": "ma1"
+                    }
+                  },
+                  "right": {
+                    "series": "atr"
+                  }
+                },
+                "right": {
+                  "op": "divide",
+                  "left": {
+                    "op": "subtract",
+                    "left": {
+                      "field": "close"
+                    },
+                    "right": {
+                      "series": "ma2"
+                    }
+                  },
+                  "right": {
+                    "series": "atr"
+                  }
+                }
+              },
+              "right": {
+                "op": "divide",
+                "left": {
+                  "op": "subtract",
+                  "left": {
+                    "field": "close"
+                  },
+                  "right": {
+                    "series": "ma3"
+                  }
+                },
+                "right": {
+                  "series": "atr"
+                }
+              }
+            },
+            "right": {
+              "const": 3
+            }
+          },
+          "right": {
+            "param": "theta"
+          }
+        }
+      },
+      "do": {
+        "action": "close",
+        "reason": "趋势分回到阈值内或转负"
+      }
+    }
+  ]
+}

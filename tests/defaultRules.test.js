@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { DEFAULT_RULES, DEFAULT_RULE_IDS } from '../src/strategy/defaultRules.js';
 import { validateRule, ruleHash } from '../src/strategy/ruleSchema.js';
 import { compileRule } from '../src/strategy/ruleStrategy.js';
+import { getStrategy } from '../src/strategy/library.js';
 import { addRule, getRuleEntry, isDefaultRule, listRuleEntries, strategyValue } from '../src/strategy/ruleRegistry.js';
 import { runOne } from '../src/report/optimizer.js';
 import { computeMetrics } from '../src/report/metrics.js';
@@ -13,7 +14,9 @@ import { rulesFor } from '../src/markets/marketRules.js';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 
-function syntheticBars({ start, step, n = 400 }) {
+// n 要长过最慢的默认规则（M2 的 252 根动量窗口），否则暖机期把整段样本吃掉，
+// 因果性断言会在"两边都是空信号"上平凡通过。
+function syntheticBars({ start, step, n = 700 }) {
   const bars = [];
   for (let i = 0; i < n; i++) {
     const close = start + step * i + Math.sin(i / 9) * Math.abs(step) * 0.8;
@@ -28,6 +31,8 @@ function syntheticBars({ start, step, n = 400 }) {
   return bars;
 }
 
+const CUT = 520;
+
 test('默认规则通过校验、出现在注册表且带稳定内容哈希', () => {
   const entries = listRuleEntries();
   for (const doc of DEFAULT_RULES) {
@@ -39,12 +44,42 @@ test('默认规则通过校验、出现在注册表且带稳定内容哈希', ()
     assert.eq(entries.some((e) => e.id === doc.id), true, `${doc.id} 应出现在策略列表`);
     assert.eq(strategyValue(entry), `custom:${doc.id}`, `${doc.id} 的下拉值应稳定`);
   }
+  // 方法论 §5.5 把这两个哈希写进了正文，任何改动都必须在文档里同步，不能悄悄换血。
+  assert.eq(ruleHash(DEFAULT_RULES.find((d) => d.id === 'intraday_ema_band_both')), '7e8c86f7fdbfb4b5',
+    'M5 多空版哈希应与研究文档记录一致（metadata 不参与哈希）');
+  assert.eq(ruleHash(DEFAULT_RULES.find((d) => d.id === 'intraday_ema_band_long')), '78a521c5b28bd677',
+    'M5 只做多版哈希应与研究文档记录一致');
 });
 
-test('默认规则只做趋势：入场依赖均线排列，风控没有固定止盈', () => {
+test('每条默认规则声明方法论编号、适用频率与市场，M4 不在规则层重复实现', () => {
+  const FREQS = new Set(['60m', 'daily', 'monthly']);
+  for (const doc of DEFAULT_RULES) {
+    const md = doc.metadata || {};
+    assert.ok(/^M[1-5]$/.test(md.method || ''), `${doc.id} 必须标明来自 M1–M5 哪一条方法`);
+    assert.ok(FREQS.has(md.freq), `${doc.id} 必须声明适用频率（月线规则跑在日线上读数无意义）`);
+    assert.ok(Array.isArray(md.markets) && md.markets.length, `${doc.id} 必须声明适用市场`);
+    assert.ok((md.evidence || '').length > 0, `${doc.id} 必须写明证据状态，不能被当成已验证策略`);
+  }
+  const methods = new Set(DEFAULT_RULES.map((d) => d.metadata.method));
+  for (const m of ['M1', 'M2', 'M3', 'M5']) assert.eq(methods.has(m), true, `${m} 应有一条默认规则`);
+  assert.eq(DEFAULT_RULES.some((d) => d.metadata.method === 'M4'), false,
+    'M4 的趋势模板判据由内置 minerviniTemplate 单点实现，规则层重写会出现第二个真值源');
+  assert.ok(getStrategy('minerviniTemplate'), 'M4 的承接实现必须仍在内置策略库里');
+  assert.eq(DEFAULT_RULES.filter((d) => d.metadata.freq === '60m').map((d) => d.id).sort().join(','),
+    'intraday_ema_band_both,intraday_ema_band_long',
+    '1H 复核工具只应拿到这两条 60 分钟规则');
+});
+
+test('默认规则只做趋势：入场依赖趋势判据，风控没有固定止盈', () => {
   for (const doc of DEFAULT_RULES) {
     const first = JSON.stringify(doc.rules[0].when);
-    assert.ok(first.includes('"slow"') && first.includes('"fast"'), `${doc.id} 首条入场规则必须同时看快慢线`);
+    // 排列判据只有 M5 那条用快慢线；其余方法看均线位置、通道突破或趋势分。
+    if (doc.parameters.fast && doc.parameters.slow) {
+      assert.ok(first.includes('"slow"') && first.includes('"fast"'), `${doc.id} 首条入场规则必须同时看快慢线`);
+    } else {
+      assert.ok(/"(sma|ema|atr|priorHigh|priorLow)"/.test(JSON.stringify(doc.series)),
+        `${doc.id} 入场必须建立在均线/通道/波动之一上，不能是裸 K 线形态`);
+    }
     assert.ok(!Object.values(doc.series).some((s) => s.op === 'rsi'), `${doc.id} 不应引入超买超卖反转`);
     for (const rule of doc.rules) {
       if (rule.do.risk) {
@@ -64,27 +99,29 @@ test('默认规则信号与 K 线等长，且截断未来 K 线不改变历史�
   for (const doc of DEFAULT_RULES) {
     const strategy = compileRule(doc);
     const full = strategy.signals(bars);
-    const cut = strategy.signals(bars.slice(0, 250));
+    const cut = strategy.signals(bars.slice(0, CUT));
     assert.eq(full.length, bars.length, `${doc.id} 信号必须与 K 线等长`);
-    assert.eq(cut.length, 250, `${doc.id} 截断后信号长度应对应截断 K 线`);
-    assert.deep(full.slice(0, 250), cut, `${doc.id} 第 i 根信号不能使用 i 之后的数据`);
+    assert.eq(cut.length, CUT, `${doc.id} 截断后信号长度应对应截断 K 线`);
+    assert.deep(full.slice(0, CUT), cut, `${doc.id} 第 i 根信号不能使用 i 之后的数据`);
+    assert.ok(full.slice(0, CUT).some((s) => s !== null), `${doc.id} 截断段内应有信号，否则这条断言是空过`);
   }
 });
 
-test('单调上涨只出多、单调下跌只出空（按品种方向）', () => {
+test('单调上涨只出多、单调下跌只出空（按规则是否声明做空）', () => {
   const up = syntheticBars({ start: 100, step: 0.5 });
   const down = syntheticBars({ start: 500, step: -0.5 });
   for (const doc of DEFAULT_RULES) {
     const strategy = compileRule(doc);
     const upSignals = strategy.signals(up).filter(Boolean);
     const downSignals = strategy.signals(down).filter(Boolean);
+    const canShort = doc.rules.some((r) => r.do.action === 'short');
     assert.ok(upSignals.some((s) => s.dir === 1), `${doc.id} 上涨段应有多头信号`);
     assert.ok(!upSignals.some((s) => s.dir === -1), `${doc.id} 上涨段不应出现空头信号`);
     assert.ok(!downSignals.some((s) => s.dir === 1), `${doc.id} 下跌段不应出现多头信号`);
-    if (doc.id.endsWith('_both')) {
-      assert.ok(downSignals.some((s) => s.dir === -1), '多空版在下跌段应有空头信号');
+    if (canShort) {
+      assert.ok(downSignals.some((s) => s.dir === -1), `${doc.id} 声明了做空，下跌段应有空头信号`);
     } else {
-      assert.ok(!downSignals.some((s) => s.dir === -1), '只做多版不能产生空头信号');
+      assert.ok(!downSignals.some((s) => s.dir === -1), `${doc.id} 未声明做空，不能产生空头信号`);
     }
   }
 });

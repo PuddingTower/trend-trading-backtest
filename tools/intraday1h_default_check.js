@@ -1,8 +1,12 @@
 /**
- * 已保存默认规则的 1h 样本外复核。
+ * 60 分钟默认规则的样本外复核。
  *
  * 与 exploratory 的 intraday1h_research.js 分开：这里直接读 src/strategy/defaultRules.js，
- * 保证复核的就是应用启动时加载的那两条文档，不是另抄一份参数。
+ * 保证复核的就是应用启动时加载的那份文档，不是另抄一份参数。
+ *
+ * 只跑 metadata.freq === '60m' 的规则：默认规则池现在按方法论 M1–M5 分层，
+ * 把月线闸门或 252 日动量窗口套在 1023 根 60 分钟线上，跑出来的是一条没意义的曲线。
+ * 日线/月线那几条用 tools/backtest.js --strategy <规则id> 复核。
  *
  * 口径：70–100% 为完整样本外，85–100% 为最终留出；每段前留 300 根暖机。
  * 期货保证金 5%（约 0.5 倍名义敞口），A股 50% 现金；滑点 1 tick，含手续费与板锁/T+1。
@@ -116,9 +120,10 @@ function portfolio(rows) {
 function main() {
   const items = loadItems();
   const out = { generatedAt: new Date().toISOString(), rules: [], checks: [] };
-  console.log(`\n1H 默认规则复核：${items.length} 个品种\n`);
+  const intradayRules = DEFAULT_RULES.filter((doc) => (doc.metadata?.freq ?? '60m') === '60m');
+  console.log(`\n1H 默认规则复核：${items.length} 个品种 × ${intradayRules.length} 条 60 分钟规则\n`);
 
-  for (const doc of DEFAULT_RULES) {
+  for (const doc of intradayRules) {
     const strategy = compileRule(doc);
     const useItems = doc.id.endsWith('_both') ? items.filter((it) => it.meta.market === 'futures') : items;
     const oos = [], hold = [];

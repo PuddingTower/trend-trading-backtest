@@ -1,0 +1,191 @@
+{
+  "schemaVersion": 1,
+  "kind": "rules",
+  "id": "daily_donchian_turtle_s2",
+  "name": "M3 海龟S2突破(55/20)",
+  "revision": 1,
+  "description": "海龟 S2 腿：收盘高于上一根为止 55 根最高价做多、低于 55 根最低价做空（突破判定不含当日），反向 20 根通道被收盘击穿即离场或反手，初始止损 ±2N（N = 20 日 ATR，文献口径），不设目标位。只在日线周期运行。规则层做不到、必须留在仓位层与执行层的海龟纪律有三条：unit = 1% 净值 ÷ (N × 每点价值)、每顺势 0.5N 加 1 单位至 4 单位（用 src/core/sizing.js 的 ATR 风险预算与加仓档），以及 S1 的「上次 20 日突破盈利则跳过本次信号」（有状态）。海龟学员账户属 C 级证据，同族业绩看 M2 的 A 级指数。本仓库日线 17 品种同口径读数：8/17 正收益、2/17 跑赢买入持有、平均 Sharpe 0.06 —— 比内置 donchianBreak 的 20/10 档（11/17 正收益、4/17 跑赢、0.14）更弱，说明文献参数不是本地最优，别把它当默认就该用的版本。",
+  "parameters": {
+    "entry": {
+      "type": "integer",
+      "default": 55,
+      "min": 2,
+      "max": 250,
+      "label": "突破回看",
+      "description": "S2 用 55 根；S1 的 20 根带\"上次盈利则跳过\"状态，规则层表达不了"
+    },
+    "exit": {
+      "type": "integer",
+      "default": 20,
+      "min": 2,
+      "max": 250,
+      "label": "出场回看",
+      "description": "S2 的反向通道是 20 根（S1 才是 10 根）"
+    },
+    "atrLen": {
+      "type": "integer",
+      "default": 20,
+      "min": 2,
+      "max": 100,
+      "label": "N 周期",
+      "description": "海龟的 N = 20 日 Wilder ATR；内置 donchianBreak 默认 14，按文献改回 20 手数才不偏大"
+    },
+    "stopAtr": {
+      "type": "number",
+      "default": 2,
+      "min": 0,
+      "max": 10,
+      "label": "初始止损(N倍)",
+      "description": "入场价 ±2N"
+    }
+  },
+  "requires": {
+    "fields": [
+      "open",
+      "high",
+      "low",
+      "close",
+      "volume"
+    ]
+  },
+  "series": {
+    "entryHigh": {
+      "op": "priorHigh",
+      "source": {
+        "field": "high"
+      },
+      "period": {
+        "param": "entry"
+      }
+    },
+    "entryLow": {
+      "op": "priorLow",
+      "source": {
+        "field": "low"
+      },
+      "period": {
+        "param": "entry"
+      }
+    },
+    "exitHigh": {
+      "op": "priorHigh",
+      "source": {
+        "field": "high"
+      },
+      "period": {
+        "param": "exit"
+      }
+    },
+    "exitLow": {
+      "op": "priorLow",
+      "source": {
+        "field": "low"
+      },
+      "period": {
+        "param": "exit"
+      }
+    },
+    "atr": {
+      "op": "atr",
+      "period": {
+        "param": "atrLen"
+      }
+    }
+  },
+  "rules": [
+    {
+      "when": {
+        "op": "greaterThan",
+        "left": {
+          "field": "close"
+        },
+        "right": {
+          "series": "entryHigh"
+        }
+      },
+      "do": {
+        "action": "long",
+        "reason": "突破 55 根高点(S2)",
+        "risk": {
+          "stop": {
+            "op": "subtract",
+            "left": {
+              "field": "close"
+            },
+            "right": {
+              "op": "multiply",
+              "left": {
+                "param": "stopAtr"
+              },
+              "right": {
+                "series": "atr"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "when": {
+        "op": "lessThan",
+        "left": {
+          "field": "close"
+        },
+        "right": {
+          "series": "entryLow"
+        }
+      },
+      "do": {
+        "action": "short",
+        "reason": "跌破 55 根低点(S2 反向)",
+        "risk": {
+          "stop": {
+            "op": "add",
+            "left": {
+              "field": "close"
+            },
+            "right": {
+              "op": "multiply",
+              "left": {
+                "param": "stopAtr"
+              },
+              "right": {
+                "series": "atr"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "when": {
+        "op": "lessThan",
+        "left": {
+          "field": "close"
+        },
+        "right": {
+          "series": "exitLow"
+        }
+      },
+      "do": {
+        "action": "close",
+        "reason": "跌破 20 根反向通道，多头离场"
+      }
+    },
+    {
+      "when": {
+        "op": "greaterThan",
+        "left": {
+          "field": "close"
+        },
+        "right": {
+          "series": "exitHigh"
+        }
+      },
+      "do": {
+        "action": "close",
+        "reason": "越过 20 根反向通道，空头离场"
+      }
+    }
+  ]
+}

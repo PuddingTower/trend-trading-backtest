@@ -1,0 +1,431 @@
+{
+  "schemaVersion": 1,
+  "kind": "rules",
+  "id": "daily_tsmom_atr_band_both",
+  "name": "M2 日频时序动量(期货多空)",
+  "revision": 1,
+  "description": "日频时序动量 + ATR 阈值中性区：63/126/252 三窗口「收盘距均线几个 ATR」等权平均，均分高于阈值做多、低于负阈值做空、两者之间空仓；反向信号即离场，不设固定止盈。只用于可做空品种，只在日线周期运行（月线/60分钟上窗口含义会变）。文献里这一族的正收益是组合曲线（TTU 43 个程序、费后年化 7.43% / 最大回撤 20.93%；Moskowitz–Ooi–Pedersen 2012），单品种层面本仓库没有边际：日线 17 品种、1 手、全样本内、滑点 1 tick 的口径下 6/17 正收益、2/17 跑赢买入持有、平均 Sharpe −0.09。必须配 ≥15 个低相关品种 + 波动率目标或 ATR 反比风险平价一起用，默认参数不是实盘建议。",
+  "parameters": {
+    "w1": {
+      "type": "integer",
+      "default": 63,
+      "min": 5,
+      "max": 250,
+      "label": "动量窗口1",
+      "description": "约 3 个月的交易日数"
+    },
+    "w2": {
+      "type": "integer",
+      "default": 126,
+      "min": 10,
+      "max": 380,
+      "label": "动量窗口2",
+      "description": "约 6 个月的交易日数"
+    },
+    "w3": {
+      "type": "integer",
+      "default": 252,
+      "min": 20,
+      "max": 500,
+      "label": "动量窗口3",
+      "description": "约 12 个月的交易日数；三窗口必须等权平均，单窗口的读数在文献里不稳"
+    },
+    "atrLen": {
+      "type": "integer",
+      "default": 14,
+      "min": 2,
+      "max": 100,
+      "label": "ATR周期",
+      "description": "阈值与初始止损共用的尺度"
+    },
+    "theta": {
+      "type": "number",
+      "default": 0.5,
+      "min": 0.05,
+      "max": 3,
+      "label": "开仓阈值(ATR倍)",
+      "description": "三窗口均分高于它才允许持仓，落在 ±它之间 = 中性区空仓"
+    },
+    "stopAtr": {
+      "type": "number",
+      "default": 3,
+      "min": 0,
+      "max": 10,
+      "label": "初始止损(ATR倍)",
+      "description": "主风险阀是组合层的波动率目标，这里只防隔夜跳空把亏损放大"
+    }
+  },
+  "requires": {
+    "fields": [
+      "open",
+      "high",
+      "low",
+      "close",
+      "volume"
+    ]
+  },
+  "series": {
+    "ma1": {
+      "op": "sma",
+      "source": {
+        "field": "close"
+      },
+      "period": {
+        "param": "w1"
+      }
+    },
+    "ma2": {
+      "op": "sma",
+      "source": {
+        "field": "close"
+      },
+      "period": {
+        "param": "w2"
+      }
+    },
+    "ma3": {
+      "op": "sma",
+      "source": {
+        "field": "close"
+      },
+      "period": {
+        "param": "w3"
+      }
+    },
+    "atr": {
+      "op": "atr",
+      "period": {
+        "param": "atrLen"
+      }
+    }
+  },
+  "rules": [
+    {
+      "when": {
+        "op": "greaterThan",
+        "left": {
+          "op": "divide",
+          "left": {
+            "op": "add",
+            "left": {
+              "op": "add",
+              "left": {
+                "op": "divide",
+                "left": {
+                  "op": "subtract",
+                  "left": {
+                    "field": "close"
+                  },
+                  "right": {
+                    "series": "ma1"
+                  }
+                },
+                "right": {
+                  "series": "atr"
+                }
+              },
+              "right": {
+                "op": "divide",
+                "left": {
+                  "op": "subtract",
+                  "left": {
+                    "field": "close"
+                  },
+                  "right": {
+                    "series": "ma2"
+                  }
+                },
+                "right": {
+                  "series": "atr"
+                }
+              }
+            },
+            "right": {
+              "op": "divide",
+              "left": {
+                "op": "subtract",
+                "left": {
+                  "field": "close"
+                },
+                "right": {
+                  "series": "ma3"
+                }
+              },
+              "right": {
+                "series": "atr"
+              }
+            }
+          },
+          "right": {
+            "const": 3
+          }
+        },
+        "right": {
+          "param": "theta"
+        }
+      },
+      "do": {
+        "action": "long",
+        "reason": "三窗口趋势分高于阈值，多头趋势态",
+        "risk": {
+          "stop": {
+            "op": "subtract",
+            "left": {
+              "field": "close"
+            },
+            "right": {
+              "op": "multiply",
+              "left": {
+                "param": "stopAtr"
+              },
+              "right": {
+                "series": "atr"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "when": {
+        "op": "lessThan",
+        "left": {
+          "op": "divide",
+          "left": {
+            "op": "add",
+            "left": {
+              "op": "add",
+              "left": {
+                "op": "divide",
+                "left": {
+                  "op": "subtract",
+                  "left": {
+                    "field": "close"
+                  },
+                  "right": {
+                    "series": "ma1"
+                  }
+                },
+                "right": {
+                  "series": "atr"
+                }
+              },
+              "right": {
+                "op": "divide",
+                "left": {
+                  "op": "subtract",
+                  "left": {
+                    "field": "close"
+                  },
+                  "right": {
+                    "series": "ma2"
+                  }
+                },
+                "right": {
+                  "series": "atr"
+                }
+              }
+            },
+            "right": {
+              "op": "divide",
+              "left": {
+                "op": "subtract",
+                "left": {
+                  "field": "close"
+                },
+                "right": {
+                  "series": "ma3"
+                }
+              },
+              "right": {
+                "series": "atr"
+              }
+            }
+          },
+          "right": {
+            "const": 3
+          }
+        },
+        "right": {
+          "op": "multiply",
+          "left": {
+            "param": "theta"
+          },
+          "right": {
+            "const": -1
+          }
+        }
+      },
+      "do": {
+        "action": "short",
+        "reason": "三窗口趋势分低于负阈值，空头趋势态",
+        "risk": {
+          "stop": {
+            "op": "add",
+            "left": {
+              "field": "close"
+            },
+            "right": {
+              "op": "multiply",
+              "left": {
+                "param": "stopAtr"
+              },
+              "right": {
+                "series": "atr"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "when": {
+        "op": "and",
+        "conditions": [
+          {
+            "op": "not",
+            "condition": {
+              "op": "greaterThan",
+              "left": {
+                "op": "divide",
+                "left": {
+                  "op": "add",
+                  "left": {
+                    "op": "add",
+                    "left": {
+                      "op": "divide",
+                      "left": {
+                        "op": "subtract",
+                        "left": {
+                          "field": "close"
+                        },
+                        "right": {
+                          "series": "ma1"
+                        }
+                      },
+                      "right": {
+                        "series": "atr"
+                      }
+                    },
+                    "right": {
+                      "op": "divide",
+                      "left": {
+                        "op": "subtract",
+                        "left": {
+                          "field": "close"
+                        },
+                        "right": {
+                          "series": "ma2"
+                        }
+                      },
+                      "right": {
+                        "series": "atr"
+                      }
+                    }
+                  },
+                  "right": {
+                    "op": "divide",
+                    "left": {
+                      "op": "subtract",
+                      "left": {
+                        "field": "close"
+                      },
+                      "right": {
+                        "series": "ma3"
+                      }
+                    },
+                    "right": {
+                      "series": "atr"
+                    }
+                  }
+                },
+                "right": {
+                  "const": 3
+                }
+              },
+              "right": {
+                "param": "theta"
+              }
+            }
+          },
+          {
+            "op": "not",
+            "condition": {
+              "op": "lessThan",
+              "left": {
+                "op": "divide",
+                "left": {
+                  "op": "add",
+                  "left": {
+                    "op": "add",
+                    "left": {
+                      "op": "divide",
+                      "left": {
+                        "op": "subtract",
+                        "left": {
+                          "field": "close"
+                        },
+                        "right": {
+                          "series": "ma1"
+                        }
+                      },
+                      "right": {
+                        "series": "atr"
+                      }
+                    },
+                    "right": {
+                      "op": "divide",
+                      "left": {
+                        "op": "subtract",
+                        "left": {
+                          "field": "close"
+                        },
+                        "right": {
+                          "series": "ma2"
+                        }
+                      },
+                      "right": {
+                        "series": "atr"
+                      }
+                    }
+                  },
+                  "right": {
+                    "op": "divide",
+                    "left": {
+                      "op": "subtract",
+                      "left": {
+                        "field": "close"
+                      },
+                      "right": {
+                        "series": "ma3"
+                      }
+                    },
+                    "right": {
+                      "series": "atr"
+                    }
+                  }
+                },
+                "right": {
+                  "const": 3
+                }
+              },
+              "right": {
+                "op": "multiply",
+                "left": {
+                  "param": "theta"
+                },
+                "right": {
+                  "const": -1
+                }
+              }
+            }
+          }
+        ]
+      },
+      "do": {
+        "action": "close",
+        "reason": "回到 ±阈值中性区，趋势不明确"
+      }
+    }
+  ]
+}

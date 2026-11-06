@@ -18,6 +18,7 @@ import { rsi as rsiFn, roc as rocFn, sma as smaFn, adx as adxFn } from '../strat
 import { atr as atrFn } from '../analysis/common.js';
 import { simulatePaths, parameterHeatmap, costStress, DEFAULT_COST_SCENARIOS } from '../report/monteCarlo.js';
 import { runPortfolio } from '../core/portfolio.js';
+import { periodLabel } from '../data/periods.js';
 import { PortfolioEngine } from '../core/portfolioEngine.js';
 import { computeMetrics } from '../report/metrics.js';
 import { monthlyReturns, underwaterSeries, tradeDistribution, benchmarkSeries, reportToCsv, reportToHtml } from '../report/advanced.js';
@@ -244,7 +245,8 @@ export class ResearchPanel {
       ...STRATEGIES.map(s => ({ value: s.id, label: s.name })),
       ...listRuleEntries().map(entry => ({
         value: strategyValue(entry),
-        label: `${entry.name}（${isDefaultRule(entry.id) ? '默认规则' : '自定义'} r${entry.revision}）`
+        label: `${entry.name}（${isDefaultRule(entry.id) ? '默认规则' : '自定义'}`
+          + `${entry.doc.metadata?.freq ? ` · ${periodLabel(entry.doc.metadata.freq)}` : ''} r${entry.revision}）`
       }))
     ];
   }

@@ -1,15 +1,20 @@
 /**
- * 离线回测跑批：读 fixtures/ 真实数据，跑策略库，打印绩效。
- *   node tools/backtest.js                 全品种 × 全策略
+ * 离线回测跑批：读 fixtures/ 真实数据，跑策略库或默认 JSON 规则，打印绩效。
+ *   node tools/backtest.js                        全品种 × 全内置策略
  *   node tools/backtest.js --only rbm,600519
  *   node tools/backtest.js --strategy donchianBreak
- *   node tools/backtest.js --grid          跑参数网格，看参数敏感性
+ *   node tools/backtest.js --strategy monthly_sma_gate_long          默认规则也能跑（月线自动聚合）
+ *   node tools/backtest.js --strategy daily_tsmom_atr_band_both,daily_donchian_turtle_s2
+ *   node tools/backtest.js --grid           跑参数网格，看参数敏感性
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BacktestEngine } from '../src/core/backtestEngine.js';
 import { STRATEGIES, getStrategy } from '../src/strategy/library.js';
+import { DEFAULT_RULES } from '../src/strategy/defaultRules.js';
+import { compileRule } from '../src/strategy/ruleStrategy.js';
+import { aggregate } from '../src/data/dominant.js';
 import { computeMetrics, benchmarkCompare, maxDrawdown } from '../src/report/metrics.js';
 import { FUTURES_SPECS } from '../src/markets/contractSpecs.js';
 import { rulesFor } from '../src/markets/marketRules.js';
@@ -56,7 +61,8 @@ function runOne(bars, spec, strat, params, opts = {}) {
     sizing: opts.sizing ?? 'notional', notionalPct: opts.notionalPct ?? 0.25
   });
   const out = eng.run(signals);
-  const m = computeMetrics({ equityCurve: out.equityCurve, trades: out.trades, capital: CAPITAL, periodsPerYear: 252, bars });
+  const m = computeMetrics({ equityCurve: out.equityCurve, trades: out.trades, capital: CAPITAL,
+    periodsPerYear: opts.ppy ?? 252, bars });
   m.rejectedMargin = out.rejected.margin;
   // 板锁拦截必须进表：不然"改天再出"的真实成本只藏在权益曲线里，没人知道差在哪
   m.rejectedBoardLock = out.rejected.boardLock || 0;
@@ -85,7 +91,36 @@ const filter = only ? only.split(',') : null;
 const fixtures = loadFixtures(filter);
 if (fixtures.length === 0) { console.error('fixtures 为空，先跑 python tools/fetch_fixtures.py'); process.exit(1); }
 
-const strategies = getArg('--strategy') ? [getStrategy(getArg('--strategy'))].filter(Boolean) : STRATEGIES;
+/**
+ * 内置策略与默认 JSON 规则走同一条跑批路径。
+ * 规则文档的 metadata.freq 决定底料口径：月线规则先把日线聚合成月线（上游月线在这里没有夹具），
+ * 年化因子跟着换 —— 月线还按 252 期算 Sharpe，等于把月度收益当日度收益复利，读数会虚高一个量级。
+ * 60 分钟规则不在这里跑： fixtures 里的日线没法还原 60 分钟，用 tools/intraday1h_default_check.js。
+ */
+function resolveRunTarget(id) {
+  const builtin = getStrategy(id);
+  if (builtin) return { ...builtin, barsOf: (b) => b, ppy: 252 };
+  const doc = DEFAULT_RULES.find((d) => d.id === id);
+  if (!doc) return null;
+  const freq = doc.metadata?.freq ?? 'daily';
+  if (freq === '60m') return null;
+  const monthly = freq === 'monthly';
+  return {
+    ...compileRule(doc),
+    barsOf: monthly ? (b) => aggregate(b, 'monthly') : (b) => b,
+    ppy: monthly ? 12 : 252
+  };
+}
+
+const requested = getArg('--strategy');
+const strategies = requested
+  ? requested.split(',').map((s) => resolveRunTarget(s.trim())).filter(Boolean)
+  : STRATEGIES.map((s) => resolveRunTarget(s.id)).filter(Boolean);
+if (requested && !strategies.length) {
+  console.error(`--strategy "${requested}" 没有可跑的目标。可填内置策略 id，或日线/月线的默认规则 id；` +
+    '60 分钟规则请用 tools/intraday1h_default_check.js。');
+  process.exit(1);
+}
 
 console.log(`\n真实数据回测：${fixtures.length} 个品种 × ${strategies.length} 个策略，` +
   `初始资金 ${CAPITAL.toLocaleString()}，1 手，滑点 1 tick，信号次根开盘成交\n`);
@@ -105,7 +140,7 @@ if (flags.has('grid')) {
     const rows = [];
     for (const p of GRID[st.id] || []) {
       for (const fx of fixtures.filter(f => ['rbm', 'egm', 'mm', '600519'].some(s => f.fn.includes('_' + s + '_')))) {
-        const r = runOne(fx.bars, specFor(fx.meta.symbol, fx.meta), st, p);
+        const r = runOne(st.barsOf(fx.bars), specFor(fx.meta.symbol, fx.meta), st, p, { ppy: st.ppy });
         rows.push([JSON.stringify(p), fx.meta.name, pct(r.metrics.totalReturn), pct(r.metrics.annualReturn),
           pct(r.metrics.maxDDPct), num(r.metrics.sharpe), r.metrics.trades, pct(r.metrics.winRate)]);
       }
@@ -120,12 +155,13 @@ const detail = [];
 for (const st of strategies) {
   for (const fx of fixtures) {
     const spec = specFor(fx.meta.symbol, fx.meta);
+    const bars = st.barsOf(fx.bars);
     let r;
-    try { r = runOne(fx.bars, spec, st, {}); }
+    try { r = runOne(bars, spec, st, {}, { ppy: st.ppy }); }
     catch (e) { detail.push({ strat: st.name, sym: fx.meta.name, error: e.message }); continue; }
     const m = r.metrics;
-    const bench = { equity: fx.bars.map(b => ({ equity: b.close / fx.bars[0].open })) };
-    const bhReturn = fx.bars[fx.bars.length - 1].close / fx.bars[0].open - 1;
+    const bench = { equity: bars.map(b => ({ equity: b.close / bars[0].open })) };
+    const bhReturn = bars[bars.length - 1].close / bars[0].open - 1;
     summaryRows.push([
       st.name, fx.meta.name, pct(m.totalReturn), pct(bhReturn), pct(m.totalReturn - bhReturn),
       pct(m.annualReturn), pct(m.maxDDPct), num(m.sharpe), num(m.calmar),

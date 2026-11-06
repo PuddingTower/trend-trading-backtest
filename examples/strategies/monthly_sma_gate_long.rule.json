@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "kind": "rules",
+  "id": "monthly_sma_gate_long",
+  "name": "M1 月线均线闸门(持有/空仓)",
+  "revision": 1,
+  "description": "月线均线趋势闸门（Faber 式 10 月 SMA + 缓冲带）：月收盘高出均线一个缓冲带才在下个月持有，跌破均线下方缓冲带才换成现金，带内不出信号即继续持有。只在月线周期运行 —— 日线或 60 分钟上它会把 10 根当成 10 天，读数无意义。它是五种方法里唯一不需要盘中条件单的一层，换手极低，代价是永远慢一步。文献读数是「少亏」型：5 类资产 GTAA 组合 Sharpe 0.75→1.20、最大回撤 −19.62%→−9.51%；沪深 300 散户级复测回撤 45.4%→37.7%、年化 7.67%→7.19%，且 150/250 日均线不复现。本仓库月线 17 品种同口径读数：8/17 正收益、4/17 跑赢买入持有、平均 Sharpe 0.05、单品种最多 14 笔（换手确实极低）；形状与文献一致 —— 沪深300ETF 回撤 38.5%→10.4% 但涨幅 41.8%→3.3%，沪金 +278%→+566%，宁德时代 +1757%→+123%。它是\"少亏\"型记录，右尾大的品种会被切掉。",
+  "parameters": {
+    "smaLen": {
+      "type": "integer",
+      "default": 10,
+      "min": 2,
+      "max": 60,
+      "label": "月均线",
+      "description": "Faber 原文用 10 个月收盘价的简单平均；日线替代口径是 200 日均线，但 150/250 不复现，不要当成魔法数字"
+    },
+    "band": {
+      "type": "number",
+      "default": 0.01,
+      "min": 0,
+      "max": 0.2,
+      "label": "缓冲带%",
+      "description": "高出均线这一比例才建仓、跌破均线下方这一比例才空仓，带内不动"
+    }
+  },
+  "requires": {
+    "fields": [
+      "open",
+      "high",
+      "low",
+      "close",
+      "volume"
+    ]
+  },
+  "series": {
+    "ma": {
+      "op": "sma",
+      "source": {
+        "field": "close"
+      },
+      "period": {
+        "param": "smaLen"
+      }
+    }
+  },
+  "rules": [
+    {
+      "when": {
+        "op": "greaterThan",
+        "left": {
+          "field": "close"
+        },
+        "right": {
+          "op": "multiply",
+          "left": {
+            "series": "ma"
+          },
+          "right": {
+            "op": "add",
+            "left": {
+              "const": 1
+            },
+            "right": {
+              "param": "band"
+            }
+          }
+        }
+      },
+      "do": {
+        "action": "long",
+        "reason": "月收盘高于均线+缓冲带，下月持有"
+      }
+    },
+    {
+      "when": {
+        "op": "lessThan",
+        "left": {
+          "field": "close"
+        },
+        "right": {
+          "op": "multiply",
+          "left": {
+            "series": "ma"
+          },
+          "right": {
+            "op": "subtract",
+            "left": {
+              "const": 1
+            },
+            "right": {
+              "param": "band"
+            }
+          }
+        }
+      },
+      "do": {
+        "action": "close",
+        "reason": "月收盘跌破均线−缓冲带，下月空仓"
+      }
+    }
+  ]
+}
